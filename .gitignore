@@ -1,0 +1,33 @@
+# 数据与产物（体积大 / 可再生）
+data/raw/
+data/cache/
+data/pred_ledger/
+data/state/
+*.npz
+*.parquet
+*.pkl
+
+# 密钥与本地配置（绝不入库）
+.env
+*.key
+secrets.*
+configs/local_*.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 日志与临时
+logs/
+*.log
+tmp/

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>APB 自学习参数体 · 控制台</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">APB</span>
+    <div class="brand-text">
+      <h1>自学习参数体</h1>
+      <p>Adaptive Parameter Body · 走样外控制台</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span class="badge" id="badge-asof">数据日 —</span>
+    <span class="badge ghost" id="badge-mode">模式 —</span>
+    <button class="btn ghost" id="btn-run" type="button" title="触发一次增量更新（需 X-Token）">运行一次</button>
+    <button class="btn" id="btn-refresh" type="button">刷新</button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist" aria-label="页面切换">
+  <button class="tab is-active" role="tab" data-tab="overview" aria-selected="true">总览</button>
+  <button class="tab" role="tab" data-tab="signals" aria-selected="false">信号</button>
+  <button class="tab" role="tab" data-tab="ledger" aria-selected="false">台账</button>
+  <button class="tab" role="tab" data-tab="paper" aria-selected="false">模拟实盘</button>
+</nav>
+
+<main class="wrap">
+
+  <!-- ============================ 总览 ============================ -->
+  <section class="panel is-active" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview">
+    <div class="cards" id="status-cards"></div>
+
+    <div class="grid two">
+      <div class="card">
+        <div class="card-head">
+          <h2>方向命中率</h2>
+          <span class="muted">sign(score) == sign(r<sub>h</sub>)</span>
+        </div>
+        <div class="gauges" id="hitrates"></div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Rank IC</h2>
+          <span class="muted">日横截面 Spearman</span>
+        </div>
+        <div class="kv" id="ic-block"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>多空组合净值</h2>
+        <span class="muted" id="ls-meta">—</span>
+      </div>
+      <div class="chart" id="ls-chart"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>市场状态 regime</h2>
+        <span class="muted" id="regime-meta">最近 500 交易日</span>
+      </div>
+      <div class="regime-band" id="regime-band"></div>
+      <div class="legend" id="regime-legend"></div>
+    </div>
+
+    <div class="card" id="baseline-card" hidden>
+      <div class="card-head">
+        <h2>基线对照</h2>
+        <span class="muted">学习器必须跑赢等权集成，否则无效</span>
+      </div>
+      <div class="kv" id="baseline-block"></div>
+    </div>
+  </section>
+
+  <!-- ============================ 信号 ============================ -->
+  <section class="panel" id="panel-signals" role="tabpanel" aria-labelledby="tab-signals">
+    <div class="card">
+      <div class="card-head">
+        <h2>信号权重</h2>
+        <div class="card-tools">
+          <label class="field inline">
+            <span>每侧条数</span>
+            <select id="topn">
+              <option value="10">10</option>
+              <option value="20" selected>20</option>
+              <option value="30">30</option>
+              <option value="50">50</option>
+            </select>
+          </label>
+          <span class="muted" id="signals-meta">—</span>
+        </div>
+      </div>
+      <div class="bars-grid">
+        <div class="bars-col">
+          <h3 class="bars-title up">Top（权重最高）</h3>
+          <div class="bars" id="bars-top"></div>
+        </div>
+        <div class="bars-col">
+          <h3 class="bars-title down">Bottom（权重最低）</h3>
+          <div class="bars" id="bars-bottom"></div>
+        </div>
+      </div>
+      <p class="hint">点击任意条形查看该信号的命中率、更新次数与平均收益。</p>
+    </div>
+    <div class="card" id="signal-detail-card">
+      <div class="card-head"><h2>信号明细</h2><span class="muted" id="signal-detail-sid">未选择</span></div>
+      <div class="kv" id="signal-detail"></div>
+    </div>
+  </section>
+
+  <!-- ============================ 台账 ============================ -->
+  <section class="panel" id="panel-ledger" role="tabpanel" aria-labelledby="tab-ledger">
+    <div class="card">
+      <div class="card-head">
+        <h2>预测台账</h2>
+        <div class="card-tools">
+          <div class="segmented" id="ledger-filter">
+            <button type="button" class="seg is-active" data-f="all">全部</button>
+            <button type="button" class="seg" data-f="hit">命中</button>
+            <button type="button" class="seg" data-f="miss">未中</button>
+            <button type="button" class="seg" data-f="pending">待定</button>
+          </div>
+          <label class="field inline">
+            <span>最近</span>
+            <select id="ledger-days">
+              <option value="10">10 天</option>
+              <option value="30" selected>30 天</option>
+              <option value="60">60 天</option>
+            </select>
+          </label>
+          <span class="muted" id="ledger-meta">—</span>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="table" id="ledger-table">
+          <thead>
+            <tr>
+              <th>决策日</th><th>代码</th><th class="num">综合分</th><th>regime</th>
+              <th class="num">入场价</th><th class="num">出场价</th>
+              <th class="num">收益</th><th>结果</th>
+            </tr>
+          </thead>
+          <tbody id="ledger-body"></tbody>
+        </table>
+      </div>
+      <p class="hint">台账只追加、不回改：<code>status=pending</code> 表示 h 日未到，尚未对账。</p>
+    </div>
+  </section>
+
+  <!-- ============================ 模拟实盘 ============================ -->
+  <section class="panel" id="panel-paper" role="tabpanel" aria-labelledby="tab-paper">
+    <div class="grid two">
+      <div class="card navcard">
+        <div class="card-head"><h2>模拟盘</h2><span class="muted">paper / sim</span></div>
+        <div class="nav-value" id="sim-nav">—</div>
+        <div class="kv compact" id="sim-kv"></div>
+      </div>
+      <div class="card navcard">
+        <div class="card-head"><h2>实盘</h2><span class="muted">paper / live</span></div>
+        <div class="nav-value" id="live-nav">—</div>
+        <div class="kv compact" id="live-kv"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>净值双线</h2>
+        <span class="muted" id="paper-chart-meta">—</span>
+      </div>
+      <div class="chart" id="paper-chart"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>模拟 / 实盘差异</h2><span class="muted">diff</span></div>
+      <div class="kv" id="paper-diff"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>录入实盘成交</h2>
+        <span class="muted">POST /api/paper/trade → live_trades.jsonl</span>
+      </div>
+      <form class="form" id="trade-form" autocomplete="off">
+        <label class="field"><span>日期</span><input type="date" name="date" required></label>
+        <label class="field"><span>代码</span><input type="text" name="code" placeholder="600519 / 00700.HK" required maxlength="24"></label>
+        <label class="field"><span>方向</span>
+          <select name="side"><option value="buy">买入 buy</option><option value="sell">卖出 sell</option></select>
+        </label>
+        <label class="field"><span>成交价</span><input type="number" name="price" step="0.001" min="0.001" placeholder="1680.5" required></label>
+        <label class="field"><span>数量</span><input type="number" name="qty" step="1" min="1" placeholder="100" required></label>
+        <label class="field wide"><span>备注</span><input type="text" name="note" placeholder="可选" maxlength="200"></label>
+        <div class="form-actions">
+          <button class="btn primary" type="submit">提交成交</button>
+          <span class="form-msg" id="trade-msg"></span>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h2>最近成交</h2><span class="muted" id="trades-meta">—</span></div>
+      <div class="table-wrap">
+        <table class="table" id="trades-table">
+          <thead><tr><th>日期</th><th>代码</th><th>方向</th><th class="num">价格</th><th class="num">数量</th><th>备注</th></tr></thead>
+          <tbody id="trades-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <span>APB Web UI · 零依赖 stdlib · 只读 IO，全部数值来自 qcore 落盘产物</span>
+  <span id="foot-stamp"></span>
+</footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
