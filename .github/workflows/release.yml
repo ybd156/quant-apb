@@ -94,77 +94,57 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ---------------- 4. fnOS .fpk 安装包 ----------------
-  fpk:
-    needs: meta
+  # ---------------- 4. 构建 fpk 并发布 ----------------
+  release:
+    needs: [meta, docker]
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        platform: [x86, arm]
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: 生成图标（可复现）
+
+      - name: 生成图标
         run: |
           pip install --quiet pillow
           python scripts/make_icons.py
-      - name: 构建 fpk
+
+      - name: 构建 fnOS fpk（x86 + arm）
         run: |
           chmod +x scripts/build-fpk.sh
-          ./scripts/build-fpk.sh "${{ needs.meta.outputs.version }}" "${{ matrix.platform }}"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: fpk-${{ matrix.platform }}
-          path: apb_*_${{ matrix.platform }}.fpk
-          if-no-files-found: error
-
-  # ---------------- 5. 汇总发布 ----------------
-  release:
-    needs: [meta, docker, fpk]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
+          ./scripts/build-fpk.sh "${{ needs.meta.outputs.version }}" x86
+          ./scripts/build-fpk.sh "${{ needs.meta.outputs.version }}" arm
+          ls -la *.fpk
 
       - name: 准备附件
         run: |
+          mkdir -p dist
+          mv *.fpk dist/
           cp docker-compose.yml dist/
           cp deploy/fnos/README.md dist/FNOS-INSTALL.md
           cat > dist/INSTALL.md <<'EOF'
           # APB 安装
 
-          ## 方式一：fnOS .fpk（推荐给飞牛用户）
-          在 fnOS「应用中心 → 手动安装」选择 `apb_<version>_x86.fpk`（ARM 设备选 `_arm`）。
-          安装后会自动拉取 Docker 镜像并启动，端口 8765。
+          ## 方式一：fnOS .fpk（飞牛用户推荐）
+          在 fnOS「应用中心 → 手动安装」选择 `apb_<version>_x86.fpk`
+          （ARM 设备选 `_arm`）。安装后自动拉取镜像并启动，端口 8765。
 
           ## 方式二：Docker Compose
-          ```bash
           mkdir -p /vol1/docker/apb && cd /vol1/docker/apb
-          # 放入本包的 docker-compose.yml
+          # 放入本包的 docker-compose.yml，然后
           docker compose up -d
-          ```
 
           ## 方式三：直接跑镜像
-          ```bash
-          docker run -d --name apb --restart unless-stopped \
-            -p 8765:8765 -v ./data:/app/data -e TZ=Asia/Shanghai \
-            ghcr.io/ybd156/quant-apb:latest
-          ```
+          docker run -d --name apb --restart unless-stopped -p 8765:8765 -v ./data:/app/data -e TZ=Asia/Shanghai ghcr.io/ybd156/quant-apb:latest
 
           ## 首次初始化
-          ```bash
           docker exec -it apb python -m qcore.pipeline --pool 300 --start 2013-01-01
-          ```
 
           打开 http://<NAS-IP>:8765
+
+          > 研究工具，输出为统计检验结果，不构成投资建议。
           EOF
-          (cd dist && zip -r apb-source.zip docker-compose.yml VERSION README.md INSTALL.md FNOS-INSTALL.md)
           ls -la dist
 
       - name: 创建 / 更新 GitHub Release
@@ -173,13 +153,9 @@ jobs:
         run: |
           set -x
           TAG="${{ needs.meta.outputs.tag }}"
-          echo "tag=$TAG"
-          ls -la dist
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release exists, uploading assets"
             gh release upload "$TAG" dist/* --clobber
           else
-            echo "creating release"
-            gh release create "$TAG" dist/*               --title "APB $TAG"               --notes-file dist/INSTALL.md
+            gh release create "$TAG" dist/* --title "APB $TAG" --notes-file dist/INSTALL.md
           fi
           gh release view "$TAG" --json assets --jq '.assets[].name'
