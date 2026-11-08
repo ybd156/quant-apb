@@ -142,8 +142,15 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
           f"skill={calrep.get('brier_skill_vs_base')}", flush=True)
 
     print("[5/7] paper trading (sim vs live)", flush=True)
+    from . import account_config as AC
+    _acct = AC.load()
+    print(f"      account: 初始资金 {_acct['initial_capital']:,.0f} / "
+          f"持仓 {_acct['top_k']} / 单票上限 {_acct['max_weight']:.0%}", flush=True)
     sim = simulate(res["scores_TN"], p3d.OPEN, p3d.CLOSE, p3d.VALID, p3d.dates,
-                   PaperConfig(top_k=10, hold=horizon, cost_bps=cost_bps), start_t=cfg.warmup)
+                   PaperConfig(top_k=int(_acct["top_k"]), hold=horizon,
+                               cost_bps=float(_acct["cost_bps"]),
+                               initial=float(_acct["initial_capital"])),
+                   start_t=cfg.warmup)
     lt = load_live_trades()
     lv = live_nav(lt, p3d.CLOSE, p3d.dates, codes)
     cmp_ = compare(sim, lv, lt, sim["trades"])
@@ -162,6 +169,26 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
             ctx[c] = {"ok": False, "reason": str(e)}
 
     print("[7/7] export", flush=True)
+    # 代码->名称映射（UI 显示用）
+    try:
+        from . import names as _names_mod
+        print("      names:", _names_mod.export_from_pool(pool), flush=True)
+    except Exception as _e:  # noqa: BLE001
+        print(f"      names export skipped: {_e}", flush=True)
+    # 数据源健康度
+    try:
+        import shutil as _sh, os as _os
+        _src = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                             "data", "state", "source_health.json")
+        if not _os.path.exists(_src):
+            print("      source_health: 数据源未记录健康度", flush=True)
+    except Exception:
+        pass
+    try:
+        from .policy_calendar import to_state_json as _events_to_state
+        _events_to_state()
+    except Exception as _e:  # noqa: BLE001
+        print(f"      events export skipped: {_e}", flush=True)
     from .signals import signal_zoo
     _zoo = signal_zoo()
     fam = {s.sid: s.family for s in _zoo}
@@ -237,6 +264,27 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
         "paper": cmp_,
         "context": ctx,
     }
+    # 行为因子体检（真实计算，不是占位）
+    try:
+        from . import behavior_report as BR
+        _codes = [str(c) for c in p3d.codes]
+        _ind = {}
+        _cap = {}
+        try:
+            _pool = get_pool(top_n=max(len(_codes), 50))
+            _ind = dict(zip(_pool["code"].astype(str), _pool["industry"].astype(str)))
+            _cap = dict(zip(_pool["code"].astype(str), _pool["mktcap"].astype(float)))
+        except Exception:
+            pass
+        print("      behavior: 计算中 ...", flush=True)
+        perf["behavior"] = BR.compute(_codes, start="2016-01-01", horizon=horizon,
+                                      max_stocks=150, industry_map=_ind, cap_map=_cap)
+        print(f"      behavior: {len(perf['behavior'])} 个因子", flush=True)
+    except Exception as _e:  # noqa: BLE001
+        perf["behavior"] = []
+        perf["behavior_error"] = f"{type(_e).__name__}: {_e}"
+        print(f"      behavior skipped: {_e}", flush=True)
+
     store.write_json("performance", _san(perf))
 
     led = res.get("ledger")

@@ -889,3 +889,31 @@ select { cursor: pointer; }
   .update-badge { padding: 4px 8px; }
   .modal { width: 100%; }
 }
+
+/* ==========================================================================
+   代码→名称、账户设置（v0.0.8 增补）
+   ========================================================================== */
+
+/* 「名称(代码)」单元 */
+.name-cell { display: inline-flex; align-items: baseline; gap: 1px; }
+.name-cell .nm { color: var(--text); }
+.name-cell .cd { color: var(--text-3); font: 11px/1.5 var(--mono); }
+
+/* 输入框下方的即时提示行 */
+.hintline {
+  display: block; min-height: 15px;
+  font: 11px/1.5 var(--sans); color: var(--text-3);
+}
+.hintline.warn { color: var(--warn); }
+
+/* 账户设置卡的醒目说明 */
+.acct-note {
+  display: flex; align-items: flex-start; gap: 7px;
+  margin-top: 12px; padding: 9px 12px;
+  border-radius: var(--r-sm);
+  background: var(--warn-soft);
+  border: 1px solid rgba(245, 158, 11, .35);
+  color: var(--text-2); font-size: 12px; line-height: 1.65;
+}
+.acct-note .ico { width: 15px; height: 15px; flex: 0 0 15px; color: var(--warn); margin-top: 2px; }
+.acct-note b { color: var(--text); }

@@ -7,7 +7,9 @@
 #   2) 容器以 uid 10001 运行，挂载目录若是 root 所有会 Permission denied
 
 CONTAINER="${APPNAME:-apb}"
-IMAGE="${APB_IMAGE:-ghcr.io/ybd156/quant-apb:latest}"
+# 镜像标签跟随本 fpk 的版本号（从 manifest 读），这样装新 fpk 必然指向新镜像
+APP_VER="$(grep '^version' "${TRIM_APPDEST:-/var/apps/apb}/manifest" 2>/dev/null | awk -F'=' '{print $2}' | tr -d ' ')"
+IMAGE="${APB_IMAGE:-ghcr.io/ybd156/quant-apb:${APP_VER:-latest}}"
 IMAGE_MIRROR="${APB_IMAGE_MIRROR:-}"
 DATA_DIR="${PKGVAR:-/tmp}/data"
 LOG_HOST_DIR="${PKGVAR:-/tmp}/logs"
@@ -56,6 +58,15 @@ start_daemon() {
     local img
     img="$(resolve_image)"
     log "使用镜像: ${img}"
+
+    if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+        local cur_img
+        cur_img="$(docker inspect --format '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || true)"
+        if [ -n "$cur_img" ] && [ "$cur_img" != "$img" ]; then
+            log "镜像变更：${cur_img} -> ${img}，重建容器"
+            docker rm -f "$CONTAINER" >>"$LOG_FILE" 2>&1 || true
+        fi
+    fi
 
     if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
         docker start "$CONTAINER" >>"$LOG_FILE" 2>&1 || return 1

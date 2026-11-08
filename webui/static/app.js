@@ -513,7 +513,10 @@
     },
     selSid: null,
     update: null,
-    updating: false
+    updating: false,
+    names: {},
+    namesHint: '',
+    account: null
   };
 
   /* ============================== 页面定义 ============================= */
@@ -815,6 +818,151 @@
         '<p class="muted" style="margin-top:10px">命令行等价操作：<code>' +
         esc((u && u.command) || 'docker compose pull && docker compose up -d') + '</code></p>'
     });
+  }
+
+  /* ======================= 代码 → 名称（展示映射） ===================== */
+
+  /** names[code].name；查不到返回空串，由调用方兜底显示代码（绝不渲染 undefined） */
+  function nameOf(code) {
+    const raw = String(code === null || code === undefined ? '' : code).trim();
+    if (!raw) return '';
+    const rec = S.names[raw] || S.names[raw.toUpperCase()] || null;
+    return (rec && rec.name) ? String(rec.name) : '';
+  }
+
+  function industryOf(code) {
+    const raw = String(code === null || code === undefined ? '' : code).trim();
+    if (!raw) return '';
+    const rec = S.names[raw] || S.names[raw.toUpperCase()] || null;
+    return (rec && rec.industry) ? String(rec.industry) : '';
+  }
+
+  /** 统一渲染「名称(代码)」；无名称时只显示代码 */
+  function codeCell(code) {
+    const c = String(code === null || code === undefined ? '' : code).trim();
+    if (!c) return '<span class="mono">—</span>';
+    const nm = nameOf(c);
+    if (!nm || nm === c) return '<span class="mono">' + esc(c) + '</span>';
+    return '<span class="name-cell"><span class="nm">' + esc(nm) + '</span>' +
+      '<span class="cd">(' + esc(c) + ')</span></span>';
+  }
+
+  async function loadNames() {
+    const res = await api('/api/names');
+    if (res.ok && res.data && res.data.names && typeof res.data.names === 'object') {
+      S.names = res.data.names;
+      S.namesHint = '';
+    } else {
+      S.names = {};
+      S.namesHint = (res.ok && res.data && res.data.hint) || '';
+    }
+  }
+
+  const namesEmpty = () => !S.names || !Object.keys(S.names).length;
+
+  /* ===================== 模拟账户配置（可编辑本金） =================== */
+
+  const rawVal = (v) => (isNil(v) ? '' : String(v));
+
+  const fmtMoney = (v) => {
+    const n = toNum(v);
+    return n === null ? '—' : n.toLocaleString('zh-CN') + ' 元';
+  };
+
+  /** 0.15 -> "15"（百分数显示）。仅单位换算，不取整、不纠正 */
+  function pctOf(v) {
+    const n = toNum(v);
+    return n === null ? '' : String(+(n * 100).toFixed(4));
+  }
+
+  function accountCardHtml(cfg) {
+    const c = cfg || {};
+    const sub = 'data/state/account.json · ' +
+      (c.updated_at ? '更新于 ' + esc(c.updated_at) : '尚未保存过');
+    return card({
+      title: '账户设置',
+      sub: sub,
+      tools: '<span class="tag na" title="未设 APB_TOKEN 时只允许内网修改">内网免 token</span>',
+      body: '<form class="form" id="acct-form" autocomplete="off" novalidate>' +
+        '<label class="field"><span>初始资金（元）</span>' +
+        '<input type="number" name="initial_capital" step="1000" value="' + esc(rawVal(c.initial_capital)) +
+        '" placeholder="1000000">' +
+        '<span class="hintline" id="acct-cap-hint">' + esc(fmtMoney(c.initial_capital)) + '</span></label>' +
+        '<label class="field"><span>持仓数 top_k</span>' +
+        '<input type="number" name="top_k" step="1" value="' + esc(rawVal(c.top_k)) + '" placeholder="10"></label>' +
+        '<label class="field"><span>单票上限（%）</span>' +
+        '<input type="number" name="max_weight_pct" step="1" value="' + esc(pctOf(c.max_weight)) + '" placeholder="15">' +
+        '<span class="hintline">填百分数：15 表示 15%</span></label>' +
+        '<label class="field"><span>成本 cost_bps</span>' +
+        '<input type="number" name="cost_bps" step="1" value="' + esc(rawVal(c.cost_bps)) + '" placeholder="10"></label>' +
+        '<label class="field"><span>持有期 hold（交易日）</span>' +
+        '<input type="number" name="hold" step="1" value="' + esc(rawVal(c.hold)) + '" placeholder="5"></label>' +
+        '<div class="form-actions">' +
+        '<button class="btn primary" type="submit">' + ICON('check') + '保存</button>' +
+        '<span class="form-msg" id="acct-msg"></span></div>' +
+        '</form>' +
+        '<p class="acct-note">' + ICON('alert') +
+        '<span>改本金只影响<b>下一次引擎运行</b>，不会重算历史净值与台账。</span></p>'
+    });
+  }
+
+  /** 提交账户配置：越界一律交给后端判定，前端不做自动纠正 */
+  async function submitAccount(ev) {
+    ev.preventDefault();
+    const form = ev.target;
+    const msg = $('#acct-msg');
+    const read = (field) => {
+      const el = form.elements[field];
+      if (!el) return null;
+      const raw = String(el.value || '').trim();
+      if (raw === '') return null;              // 留空 = 不修改这一项
+      const n = Number(raw);
+      return isFinite(n) ? n : raw;             // 非法输入原样交给后端判定
+    };
+
+    const body = {};
+    const cap = read('initial_capital');
+    const topK = read('top_k');
+    const mwPct = read('max_weight_pct');
+    const cost = read('cost_bps');
+    const hold = read('hold');
+    if (cap !== null) body.initial_capital = cap;
+    if (topK !== null) body.top_k = topK;
+    if (mwPct !== null) body.max_weight = (typeof mwPct === 'number') ? mwPct / 100 : mwPct;
+    if (cost !== null) body.cost_bps = cost;
+    if (hold !== null) body.hold = hold;
+
+    if (!Object.keys(body).length) {
+      msg.className = 'form-msg err';
+      msg.textContent = '没有可提交的字段';
+      return;
+    }
+
+    const btn = form.querySelector('button[type="submit"]');
+    if (btn) btn.disabled = true;
+    msg.className = 'form-msg';
+    msg.textContent = '保存中…';
+
+    const res = await api('/api/account/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (btn) btn.disabled = false;
+
+    if (res.ok) {
+      S.account = res.data;
+      msg.className = 'form-msg ok';
+      msg.textContent = '已保存';
+      toast('已保存，下次运行引擎生效', 'ok');
+      clearCache();
+      navigate('paper', false);
+    } else {
+      // 越界/非法：原样显示后端 detail（不做自动纠正）
+      msg.className = 'form-msg err';
+      msg.textContent = res.detail || res.hint || ('保存失败：' + (res.error || 'unknown'));
+      toast('保存失败：' + (res.detail || res.error || 'unknown'), 'err');
+    }
   }
 
   /* =============================== 总览 ================================ */
@@ -1276,7 +1424,7 @@
         '<div style="padding:0 16px 16px">' + table({
           cols: [
             { label: '决策日', key: 'as_of', mono: true },
-            { label: '代码', key: 'code', mono: true },
+            { label: '名称（代码）', key: 'code', render: (r) => codeCell(r.code) },
             { label: '综合分', key: 'score', num: true, render: (r) => esc(num(r.score, 4)) },
             { label: 'regime', key: 'regime', render: (r) => esc(regimeInfo(r.regime).name) },
             { label: '入场价', key: 'entry_price', num: true, render: (r) => esc(num(r.entry_price, 2)) },
@@ -1294,10 +1442,12 @@
   /* ============================== 模拟实盘 ============================= */
 
   async function pagePaper() {
-    const [res, tradesRes] = await Promise.all([
-      apiCached('/api/paper'), apiCached('/api/paper/trades?limit=20')
+    const [res, tradesRes, acctRes] = await Promise.all([
+      apiCached('/api/paper'), apiCached('/api/paper/trades?limit=20'),
+      apiCached('/api/account/config', 0)
     ]);
     const trades = (tradesRes.ok && tradesRes.data) ? tradesRes.data : { rows: [], n: 0 };
+    const acct = (acctRes.ok && acctRes.data) ? acctRes.data : null;
 
     let body = '';
     if (!res.ok || !res.data) {
@@ -1363,7 +1513,8 @@
       title: '录入实盘成交', sub: 'POST /api/paper/trade → data/state/live_trades.jsonl',
       body: '<form class="form" id="trade-form" autocomplete="off">' +
         '<label class="field"><span>日期</span><input type="date" name="date" required></label>' +
-        '<label class="field"><span>代码</span><input type="text" name="code" placeholder="600519 / 00700.HK" required maxlength="24"></label>' +
+        '<label class="field"><span>代码</span><input type="text" name="code" placeholder="600519 / 00700.HK" required maxlength="24">' +
+        '<span class="hintline" id="trade-name-hint"></span></label>' +
         '<label class="field"><span>方向</span><select name="side"><option value="buy">买入 buy</option><option value="sell">卖出 sell</option></select></label>' +
         '<label class="field"><span>成交价</span><input type="number" name="price" step="0.001" min="0.001" placeholder="1520.5" required></label>' +
         '<label class="field"><span>数量</span><input type="number" name="qty" step="1" min="1" placeholder="100" required></label>' +
@@ -1373,11 +1524,13 @@
     });
 
     const tradesCard = card({
-      title: '最近成交', sub: '共 ' + (trades.n || 0) + ' 笔 · 最新在前', cls: 'flush',
+      title: '最近成交',
+      sub: '共 ' + (trades.n || 0) + ' 笔 · 最新在前' + (namesEmpty() ? ' · 名称映射未导出' : ''),
+      cls: 'flush',
       body: '<div style="padding:0 16px 16px">' + table({
         cols: [
           { label: '日期', key: 'date', mono: true },
-          { label: '代码', key: 'code', mono: true },
+          { label: '名称（代码）', key: 'code', render: (r) => codeCell(r.code) },
           {
             label: '方向', key: 'side',
             render: (r) => {
@@ -1395,7 +1548,8 @@
       }) + '</div>'
     });
 
-    return body + '<div class="grid two">' + formCard + tradesCard + '</div>';
+    return '<div style="margin-bottom:14px">' + accountCardHtml(acct) + '</div>' +
+      body + '<div class="grid two">' + formCard + tradesCard + '</div>';
   }
 
   /* ============================== 行为因子 ============================= */
@@ -1986,6 +2140,39 @@
           d.value = now.getFullYear() + '-' + pad(now.getMonth() + 1) + '-' + pad(now.getDate());
         }
         form.addEventListener('submit', submitTrade);
+
+        // 输入代码 → 实时显示匹配到的名称（查不到提示「未知代码」，仍可提交）
+        const codeInput = form.elements.code;
+        const nameHint = $('#trade-name-hint');
+        if (codeInput && nameHint) {
+          codeInput.addEventListener('input', () => {
+            const c = String(codeInput.value || '').trim();
+            if (!c) { nameHint.className = 'hintline'; nameHint.textContent = ''; return; }
+            const nm = nameOf(c);
+            const ind = industryOf(c);
+            if (nm) {
+              nameHint.className = 'hintline';
+              nameHint.textContent = '→ ' + nm + (ind ? ' · ' + ind : '');
+            } else {
+              nameHint.className = 'hintline warn';
+              nameHint.textContent = '未知代码（仍可提交）';
+            }
+          });
+        }
+      }
+
+      // 账户设置表单
+      const acctForm = $('#acct-form');
+      if (acctForm) {
+        const capEl = acctForm.elements.initial_capital;
+        const capHint = $('#acct-cap-hint');
+        if (capEl && capHint) {
+          capEl.addEventListener('input', () => {
+            const n = toNum(capEl.value);
+            capHint.textContent = n === null ? '　' : fmtMoney(n);
+          });
+        }
+        acctForm.addEventListener('submit', submitAccount);
       }
     }
 
@@ -2186,7 +2373,7 @@
     const start = RENDERERS[fromHash] ? fromHash : (RENDERERS[last] ? last : 'overview');
     const use = $('#theme-ico use');
     if (use) use.setAttribute('href', document.documentElement.getAttribute('data-theme') === 'light' ? '#i-sun' : '#i-moon');
-    await Promise.all([loadVersion(), loadHealth(), loadUpdate()]);
+    await Promise.all([loadVersion(), loadHealth(), loadUpdate(), loadNames()]);
     await navigate(start, true);
   }
 

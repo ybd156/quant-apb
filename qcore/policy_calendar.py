@@ -503,7 +503,38 @@ def to_jsonl(path: str = "data/events/policy_calendar.jsonl") -> str:
     return save_events(CALENDAR, path)
 
 
+def to_state_json(path: str | None = None) -> str:
+    """
+    导出为 Web UI 直接可读的 data/state/events.json。
+    （server 的 /api/events 优先读这个文件）
+    """
+    import json as _json
+    import os as _os
+    if path is None:
+        root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        path = _os.path.join(root, "data", "state", "events.json")
+    _os.makedirs(_os.path.dirname(path), exist_ok=True)
+    rows = []
+    for e in CALENDAR:
+        d = e.__dict__.copy() if hasattr(e, "__dict__") else dict(e)
+        rows.append(d)
+    payload = {"generated_at": __import__("datetime").datetime.now().astimezone()
+               .isoformat(timespec="seconds"),
+               "n": len(rows), "source": "qcore.policy_calendar",
+               "events": rows, "rows": rows}
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, indent=1, default=str)
+    _os.replace(tmp, path)
+    return path
+
+
 if __name__ == "__main__":
+    import sys as _sys
+    if "--to-json" in _sys.argv:
+        p = to_state_json()
+        print(f"wrote {p} ({len(CALENDAR)} events)")
+        raise SystemExit(0)
     # 自查：条数 + 按年分布 + 字段完整性（全部 ASCII 输出，GBK 控制台安全）
     from qcore.events import validate_event
     print(f"total events: {len(CALENDAR)}")

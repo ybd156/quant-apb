@@ -116,7 +116,8 @@ def remove(container_id: str, sock: str = SOCK) -> bool:
 
 def create(name: str, image: str, ports: Optional[dict] = None,
            env: Optional[List[str]] = None, binds: Optional[List[str]] = None,
-           restart: str = "unless-stopped", sock: str = SOCK) -> Dict:
+           restart: str = "unless-stopped", entrypoint: Optional[List[str]] = None,
+           cmd: Optional[List[str]] = None, sock: str = SOCK) -> Dict:
     body = {
         "Image": image,
         "Env": env or [],
@@ -126,6 +127,11 @@ def create(name: str, image: str, ports: Optional[dict] = None,
             "PortBindings": ports or {},
         },
     }
+    # 覆盖入口：辅助容器需要跑 update_apply，而不是镜像默认的 start.sh
+    if entrypoint is not None:
+        body["Entrypoint"] = entrypoint
+    if cmd is not None:
+        body["Cmd"] = cmd
     st, data = request("POST", f"/containers/create?name={name}", body=body, sock=sock)
     try:
         j = json.loads(data)

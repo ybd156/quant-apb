@@ -136,11 +136,21 @@ def _rows_of(data):
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
-        for key in ("rows", "items", "data", "records"):
+        for key in ("rows", "items", "data", "records", "events"):
             value = data.get(key)
             if isinstance(value, list):
                 return value
     return []
+
+
+def _is_private_ip(ip: str) -> bool:
+    """判断是否内网/回环地址（用于更新接口的来源限制）。"""
+    try:
+        import ipaddress
+        a = ipaddress.ip_address(ip)
+        return a.is_private or a.is_loopback or a.is_link_local
+    except Exception:
+        return False
 
 
 def _read_version() -> str:
@@ -413,6 +423,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/names":
+            return self._api_names()
+        if path == "/api/account/config":
+            return self._api_account_config()
         if path == "/api/market":
             return self._api_market()
         if path == "/api/update":
@@ -497,6 +511,44 @@ class ApiHandler(BaseHTTPRequestHandler):
             "platform": _platform.platform(),
             "webui_dir": str(WEBUI_DIR),
         })
+
+    def _api_names(self):
+        """代码 -> 名称映射（UI 展示用）。文件缺失时返回空表，不报错。"""
+        data, _err = _read_json("names.json")
+        if not isinstance(data, dict):
+            return self._ok({"names": {}, "n": 0, "hint": "尚未导出，跑一次引擎即可"})
+        return self._ok(data)
+
+    def _api_account_config(self):
+        """模拟账户配置（初始资金等）。"""
+        try:
+            from qcore import account_config as AC
+            return self._ok(AC.load())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+
+    def _post_account_config(self):
+        """更新模拟账户配置：只允许内网或带 X-Token。"""
+        expected = os.environ.get("APB_TOKEN", "")
+        given = self.headers.get("X-Token") or ""
+        if expected:
+            if not hmac.compare_digest(given, expected):
+                return self._fail("unauthorized", 403, hint="X-Token 不匹配")
+        else:
+            client = (self.client_address or ("", 0))[0]
+            if not _is_private_ip(client):
+                return self._fail("forbidden", 403, hint="未设 APB_TOKEN 时只允许内网修改")
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        try:
+            from qcore import account_config as AC
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        new, verr = AC.save(body if isinstance(body, dict) else {})
+        if verr:
+            return self._fail("invalid_config", 400, detail=verr)
+        return self._ok(new)
 
     def _api_market(self):
         """实时行情与市场情绪 —— 只读 data/state/market.json，本层不做任何计算。"""
@@ -680,6 +732,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/account/config":
+            return self._post_account_config()
         if path == "/api/update/apply":
             return self._post_update_apply()
         if path.startswith("/api/"):
@@ -760,13 +814,17 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not ALLOW_RUN:
             return self._fail("run_disabled", 403, hint="服务以 --no-run 启动")
 
+        # 与 /api/update/apply 一致：设了 token 就必须匹配，没设则只放行内网
         expected = os.environ.get("APB_TOKEN", "")
-        if not expected:
-            return self._fail("token_not_configured", 403,
-                              hint="服务端未设置环境变量 APB_TOKEN，/api/run 一律拒绝")
         given = self.headers.get("X-Token") or ""
-        if not hmac.compare_digest(given, expected):
-            return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
+        if expected:
+            if not hmac.compare_digest(given, expected):
+                return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
+        else:
+            client = (self.client_address or ("", 0))[0]
+            if not _is_private_ip(client):
+                return self._fail("token_not_configured", 403,
+                                  hint=f"未设 APB_TOKEN 时只允许内网触发（来源 {client}）")
 
         with _RUN_LOCK:
             if _RUN["state"] == "running":
@@ -782,13 +840,20 @@ class ApiHandler(BaseHTTPRequestHandler):
         应用内一键更新：启动一个**辅助容器**执行自我替换（主容器不能自己停自己）。
         必须带 X-Token（与 APB_TOKEN 一致）。
         """
+        # 鉴权策略：
+        #   - 设了 APB_TOKEN  -> 必须带匹配的 X-Token（对外暴露时用）
+        #   - 没设 APB_TOKEN  -> 只允许内网来源（默认，开箱即用）
         expected = os.environ.get("APB_TOKEN", "")
-        if not expected:
-            return self._fail("token_not_configured", 403,
-                              hint="服务端未设置 APB_TOKEN，更新接口一律拒绝")
         given = self.headers.get("X-Token") or ""
-        if not hmac.compare_digest(given, expected):
-            return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
+        if expected:
+            if not hmac.compare_digest(given, expected):
+                return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
+        else:
+            client = (self.client_address or ("", 0))[0]
+            if not _is_private_ip(client):
+                return self._fail("token_not_configured", 403,
+                                  hint=f"未设 APB_TOKEN 时只允许内网更新（来源 {client}）；"
+                                       "如需公网访问请设置 APB_TOKEN")
 
         try:
             from qcore import docker_api as D
@@ -819,7 +884,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             helper, image,
             env=[f"APB_TARGET_NAME={target}", f"APB_IMAGE={repo}", f"APB_TAG={latest}"],
             binds=["/var/run/docker.sock:/var/run/docker.sock"],
-            restart="no")
+            restart="no",
+            entrypoint=["python", "-m", "qcore.update_apply"])
         if not created.get("ok"):
             return self._fail("helper_create_failed", 500, error=created.get("error"))
         st, _ = D.request("POST", f"/containers/{created['id']}/start")
