@@ -67,6 +67,10 @@ start_daemon() {
             -e APB_HOST=0.0.0.0 \
             -v "${DATA_DIR}:/app/data" \
             -v "${LOG_HOST_DIR}:/app/logs" \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e APB_CONTAINER_NAME="${CONTAINER}" \
+            -e APB_IMAGE="${img}" \
+            -e APB_MARKET=1 \
             "$img" >>"$LOG_FILE" 2>&1 || return 1
     fi
 

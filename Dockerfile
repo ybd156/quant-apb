@@ -38,11 +38,14 @@ WORKDIR /app
 # 先拷代码（数据目录由 volume 挂载，不烤进镜像）
 COPY qcore/ ./qcore/
 COPY webui/ ./webui/
+COPY docker/start.sh ./start.sh
 COPY VERSION README.md LICENSE ./
 
 RUN mkdir -p /app/data/state /app/data/raw /app/data/pred_ledger /app/logs \
  && useradd -m -u 10001 -s /usr/sbin/nologin apb \
  && chown -R apb:apb /app
+
+RUN chmod +x /app/start.sh
 
 USER apb
 
@@ -53,5 +56,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import urllib.request,sys; \
 sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/health',timeout=4).status==200 else 1)"
 
-ENTRYPOINT ["python", "-m", "webui.server"]
-CMD ["--host", "0.0.0.0", "--port", "8765"]
+ENTRYPOINT ["/app/start.sh"]

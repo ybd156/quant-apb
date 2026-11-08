@@ -60,6 +60,7 @@ STATE_FILES = {
     "performance": "performance.json",
     "paper": "paper.json",
     "source_health": "source_health.json",
+    "market": "market.json",
 }
 LIVE_TRADES_FILE = "live_trades.jsonl"
 
@@ -412,6 +413,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/market":
+            return self._api_market()
+        if path == "/api/update":
+            return self._api_update()
         if path == "/api/health":
             return self._api_health()
         if path.startswith("/api/"):
@@ -491,6 +496,26 @@ class ApiHandler(BaseHTTPRequestHandler):
             "python": _platform.python_version(),
             "platform": _platform.platform(),
             "webui_dir": str(WEBUI_DIR),
+        })
+
+    def _api_market(self):
+        """实时行情与市场情绪 —— 只读 data/state/market.json，本层不做任何计算。"""
+        data, sent = self._load_or_not_ready("market")
+        if sent is not None:
+            return sent
+        return self._ok(data)
+
+    def _api_update(self):
+        """版本检查 —— 只比对本地 VERSION 与 update.json 记录的远端版本。"""
+        cur = _read_version()
+        info, _err = _read_json("update.json")
+        info = info if isinstance(info, dict) else {}
+        latest = info.get("latest_version") if isinstance(info, dict) else None
+        return self._ok({
+            "current": cur, "latest": latest,
+            "has_update": bool(latest and cur and latest != cur),
+            "checked_at": (info or {}).get("checked_at"),
+            "command": "docker compose pull && docker compose up -d",
         })
 
     def _api_behavior(self):
@@ -649,6 +674,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/update/apply":
+            return self._post_update_apply()
         if path.startswith("/api/"):
             return self._fail("unknown_endpoint", 404, path=path)
         return self._fail("not_found", 404, path=path)
@@ -743,6 +770,58 @@ class ApiHandler(BaseHTTPRequestHandler):
                          "duration_s": None, "tail": "", "error": None})
         threading.Thread(target=_run_engine, name="apb-run", daemon=True).start()
         return self._ok({"started": True, "cmd": _run_cmd()})
+
+    def _post_update_apply(self):
+        """
+        应用内一键更新：启动一个**辅助容器**执行自我替换（主容器不能自己停自己）。
+        必须带 X-Token（与 APB_TOKEN 一致）。
+        """
+        expected = os.environ.get("APB_TOKEN", "")
+        if not expected:
+            return self._fail("token_not_configured", 403,
+                              hint="服务端未设置 APB_TOKEN，更新接口一律拒绝")
+        given = self.headers.get("X-Token") or ""
+        if not hmac.compare_digest(given, expected):
+            return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
+
+        try:
+            from qcore import docker_api as D
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:200])
+
+        if not D.available():
+            return self._fail("docker_socket_unavailable", 503,
+                              hint="容器未挂载 /var/run/docker.sock，无法应用内更新；"
+                                   "请在宿主机执行 docker compose pull && docker compose up -d")
+
+        info, _e = _read_json("update.json")
+        info = info if isinstance(info, dict) else {}
+        latest = info.get("latest_version")
+        cur = _read_version()
+        if not latest or latest == cur:
+            return self._fail("already_latest", 409, current=cur, latest=latest)
+
+        target = os.environ.get("APB_CONTAINER_NAME", "apb")
+        image = os.environ.get("APB_IMAGE", "ghcr.io/ybd156/quant-apb")
+        repo = image.rsplit(":", 1)[0] if ":" in image.rsplit("/", 1)[-1] else image
+
+        helper = f"{target}-updater"
+        old = D.find_container(helper)
+        if old:
+            D.remove(old["Id"])
+        created = D.create(
+            helper, image,
+            env=[f"APB_TARGET_NAME={target}", f"APB_IMAGE={repo}", f"APB_TAG={latest}"],
+            binds=["/var/run/docker.sock:/var/run/docker.sock"],
+            restart="no")
+        if not created.get("ok"):
+            return self._fail("helper_create_failed", 500, error=created.get("error"))
+        st, _ = D.request("POST", f"/containers/{created['id']}/start")
+        if st not in (204, 304):
+            return self._fail("helper_start_failed", 500, status=st)
+        return self._ok({"started": True, "target": target, "to": latest,
+                         "helper": helper,
+                         "note": "更新在后台进行，约 1-3 分钟后刷新页面"})
 
     # ---------------- 访问日志（精简一行） ----------------
 
