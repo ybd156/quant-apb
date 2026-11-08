@@ -94,9 +94,12 @@ def build(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     ic = AN.daily_ic_series(res["scores"], p3d.RET[horizon].T)
     ic_r = _rolling_mean(ic, 250)
     CH.line_png(os.path.join(IMG_DIR, "ic.png"),
-                {"滚动250日IC": (None, ic_r), "逐日IC": (None, np.clip(ic, -0.3, 0.3))},
-                title="横截面 Rank IC", subtitle="滚动 250 日均值；长期在 0 以下=信号方向系统性做反",
-                fmt="{:.3f}", hline=0.0)
+                {"逐日IC(淡)": (None, np.clip(ic, -0.3, 0.3)),
+                 "滚动250日IC": (None, ic_r)},
+                title="横截面 Rank IC",
+                subtitle="白线=滚动250日均值（长期在0以下即信号方向系统性做反）；暗线=逐日IC",
+                fmt="{:.3f}", hline=0.0,
+                colors={"逐日IC(淡)": (70, 34, 38), "滚动250日IC": (226, 232, 240)})
 
     # ---------------- 3. 权重演化（Top 8）
     wh = res["weights_hist"]
