@@ -1,6 +1,8 @@
 #!/bin/bash
 # APB 安装脚本：fnOS 安装时调用
-# 职责：建数据目录、拉镜像、预置默认配置。不做实际启动（启动由 install_callback 负责）
+# 职责：建数据目录、后台拉镜像、预置默认配置。不做实际启动（启动由 install_callback 负责）
+#
+# 重要：镜像约 400MB。**必须后台拉取**，否则网络慢时 fnOS 会一直显示"启用中"。
 
 CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -r "${CMD_DIR}/common" ]; then . "${CMD_DIR}/common"; fi
@@ -15,18 +17,28 @@ mkdir -p "${PKGVAR}/data" "${PKGVAR}/logs" || {
 }
 log "数据目录: ${PKGVAR}/data"
 
-# 2) 拉镜像（失败不阻断安装，首次启动时会再试）
+# 2) 后台拉镜像（带超时，不阻塞安装流程）
 if command -v docker >/dev/null 2>&1; then
-    log "拉取镜像 ${IMAGE} ..."
-    docker pull "$IMAGE" >>"$LOG_FILE" 2>&1 || log "镜像拉取失败（将在启动时重试）"
+    log "后台拉取镜像 ${IMAGE}（最多 15 分钟，不阻塞安装）"
+    (
+        if timeout 900 docker pull "$IMAGE" >>"$LOG_FILE" 2>&1; then
+            log "镜像拉取完成"
+        else
+            log "镜像拉取失败或超时。若镜像为私有，请先把 GitHub 上的容器包设为 public，"
+            log "或在 fnOS 上执行: docker login ghcr.io"
+        fi
+    ) &
+    log "安装流程继续（镜像在后台拉取）"
 else
     log "警告：docker 不可用，APB 需要 fnOS 的 Docker 服务"
 fi
 
 # 3) 清理同名旧容器，避免端口占用
-if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CONTAINER}"; then
-    log "移除同名旧容器 ${CONTAINER}"
-    docker rm -f "$CONTAINER" >>"$LOG_FILE" 2>&1 || true
+if command -v docker >/dev/null 2>&1; then
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CONTAINER}"; then
+        log "移除同名旧容器 ${CONTAINER}"
+        docker rm -f "$CONTAINER" >>"$LOG_FILE" 2>&1 || true
+    fi
 fi
 
 log "===== APB 安装完成 ====="

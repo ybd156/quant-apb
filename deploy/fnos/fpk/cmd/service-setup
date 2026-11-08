@@ -26,7 +26,7 @@ start_daemon() {
     if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
         docker start "$CONTAINER" >>"$LOG_FILE" 2>&1
     else
-        docker run -d --name "$CONTAINER" \
+        docker run -d --name "$CONTAINER" --pull=missing \
             --restart unless-stopped \
             -p "${PORT}:8765" \
             -e TZ=Asia/Shanghai \

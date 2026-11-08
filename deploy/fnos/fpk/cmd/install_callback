@@ -1,8 +1,16 @@
 #!/bin/bash
-# 安装后回调：启动服务
+# 安装后回调：尝试启动服务
+# 若镜像还在后台拉取，启动会失败 —— 这里**不阻塞、不报错退出**，
+# 让 fnOS 正常完成安装流程，用户稍后在应用中心点"启动"即可。
+
 CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
-[ -r "${CMD_DIR}/common" ] && . "${CMD_DIR}/common"
-[ -r "${CMD_DIR}/service-setup" ] && . "${CMD_DIR}/service-setup"
+if [ -r "${CMD_DIR}/common" ]; then . "${CMD_DIR}/common"; fi
+if [ -r "${CMD_DIR}/service-setup" ]; then . "${CMD_DIR}/service-setup"; fi
+
 log "安装后启动 ${APPNAME}"
-start_daemon
+if start_daemon; then
+    log "启动成功，端口 ${PORT:-8765}"
+else
+    log "启动未成功（镜像可能仍在拉取，或镜像为私有需先 docker login）。稍后重试即可。"
+fi
 exit 0
