@@ -503,7 +503,7 @@ def to_jsonl(path: str = "data/events/policy_calendar.jsonl") -> str:
     return save_events(CALENDAR, path)
 
 
-def to_state_json(path: str | None = None) -> str:
+def to_state_json(path: str | None = None, impact=None) -> str:
     """
     导出为 Web UI 直接可读的 data/state/events.json。
     （server 的 /api/events 优先读这个文件）
@@ -522,6 +522,13 @@ def to_state_json(path: str | None = None) -> str:
                .isoformat(timespec="seconds"),
                "n": len(rows), "source": "qcore.policy_calendar",
                "events": rows, "rows": rows}
+    if impact is not None:
+        payload["impact"] = impact
+        try:
+            from .impact import summary as _imp_sum
+            payload["impact_summary"] = _imp_sum(impact)
+        except Exception:
+            pass
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         _json.dump(payload, f, ensure_ascii=False, indent=1, default=str)

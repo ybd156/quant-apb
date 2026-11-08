@@ -186,7 +186,15 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
         pass
     try:
         from .policy_calendar import to_state_json as _events_to_state
-        _events_to_state()
+        _imp = []
+        try:
+            from . import impact as _IMP
+            print("      impact: 事件研究计算中 ...", flush=True)
+            _imp = _IMP.compute(pool, start="2016-01-01", max_stocks=min(len(pool), 300))
+            print(f"      impact: {len(_imp)} 组（事件×板块×周期）", flush=True)
+        except Exception as _e:  # noqa: BLE001
+            print(f"      impact skipped: {_e}", flush=True)
+        _events_to_state(impact=_imp)
     except Exception as _e:  # noqa: BLE001
         print(f"      events export skipped: {_e}", flush=True)
     from .signals import signal_zoo

@@ -133,6 +133,21 @@ def check_state() -> None:
     except Exception as e:  # noqa: BLE001
         rec("state.names", FAIL, str(e)[:80])
 
+    # events.impact
+    try:
+        with open(os.path.join(sd, "events.json"), encoding="utf-8") as f:
+            ev = json.load(f)
+        imp = ev.get("impact")
+        nev = ev.get("n") or len(ev.get("rows") or [])
+        if not nev:
+            rec("state.events", FAIL, "事件数为 0")
+        elif not isinstance(imp, list) or not imp:
+            rec("state.impact", FAIL, "impact 表为空（事件研究未跑）")
+        else:
+            rec("state.impact", PASS, f"{nev} 个事件 / {len(imp)} 组影响因子")
+    except Exception as e:  # noqa: BLE001
+        rec("state.impact", FAIL, str(e)[:80])
+
     # performance.behavior
     try:
         with open(os.path.join(sd, "performance.json"), encoding="utf-8") as f:
