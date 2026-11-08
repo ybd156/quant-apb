@@ -287,6 +287,15 @@ def poll(codes: List[str], interval: float = 3.0, save: bool = True,
 if __name__ == "__main__":
     import sys
     codes = ["600519", "000001", "300750"]
+    interval = 3.0
+    for arg in sys.argv[1:]:
+        if arg.startswith("--codes="):
+            codes = [c.strip() for c in arg.split("=", 1)[1].split(",") if c.strip()]
+        elif arg.startswith("--interval="):
+            try:
+                interval = float(arg.split("=", 1)[1])
+            except ValueError:
+                pass
     p = snapshot(codes)
     print(json.dumps({k: v for k, v in p.items() if k != "rows"},
                      ensure_ascii=False, indent=1))
@@ -294,4 +303,4 @@ if __name__ == "__main__":
         print(f"  {r['name']:<8} {r.get('price')}  {r.get('chg_pct')}%  "
               f"ts={r.get('ts_raw')} src={r['source']}")
     if "--loop" in sys.argv:
-        poll(codes, interval=3.0)
+        poll(codes, interval=interval)

@@ -50,6 +50,16 @@
     const x = Math.abs(n) <= 1.0000001 ? n * 100 : n;
     return (x > 0 ? '+' : '') + x.toFixed(d === undefined ? 2 : d) + '%';
   }
+  /**
+   * 明确按「百分点」格式化：输入 0.83 表示 0.83%，不做 ×100 猜测。
+   * signedPct 有歧义启发式（|v|≤1 就当小数），对已经换算好的百分数会翻 100 倍。
+   * 凡是后端已经给出百分数的字段，一律用这个。
+   */
+  function pctPoints(v, d) {
+    const n = toNum(v);
+    if (n === null) return '—';
+    return (n > 0 ? '+' : '') + n.toFixed(d === undefined ? 2 : d) + '%';
+  }
   function signClass(v) {
     const n = toNum(v);
     if (n === null || n === 0) return '';
@@ -1092,7 +1102,7 @@
           },
           {
             label: '涨跌', key: 'chg_pct', num: true,
-            render: (r) => '<span class="' + signClass(r.chg_pct) + '">' + esc(signedPct(r.chg_pct)) + '</span>'
+            render: (r) => '<span class="' + signClass(r.chg_pct) + '">' + esc(pctPoints(r.chg_pct)) + '</span>'
           },
           { label: '权重', key: 'weight', num: true, render: (r) => esc(pct(r.weight)) },
           {

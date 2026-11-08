@@ -105,7 +105,19 @@ def main(argv=None) -> int:
     # ---- 信号质量 ----
     ic = bench._ic(scores, d["y"])
 
+    # 名称映射要用足够大的池子，否则 CSI300 里大半查不到名字
     nm = _load_name_map()
+    try:
+        from qcore.data import get_pool as _gp
+        _big = _gp(top_n=1200)
+        for r in _big.itertuples(index=False):
+            c = str(getattr(r, "code", "")).zfill(6)
+            n_ = getattr(r, "name", None)
+            if c and isinstance(n_, str) and n_ and c not in nm:
+                nm[c] = n_
+        print(f"  名称池扩充到 {len(nm)} 条", flush=True)
+    except Exception as e:
+        print(f"  名称池扩充失败（用原映射）: {e}", flush=True)
 
     # ---- 最新一期推荐 ----
     last = len(dates) - 1
@@ -122,6 +134,9 @@ def main(argv=None) -> int:
         px = close[last, j]
         prev_px = close[last - 1, j] if last > 0 else px
         chg = (px / prev_px - 1.0) if (np.isfinite(px) and np.isfinite(prev_px) and prev_px) else None
+        # 单日 |涨跌| > 21% 必是复权/除权伪影（A股涨跌停 10%/20%），置 None 不展示假数
+        if chg is not None and abs(chg) > 0.21:
+            chg = None
         rows.append({
             "rank": rank, "code": bare, "qlib_code": code,
             "name": nm.get(bare) or nm.get(bare.zfill(6)) or "",
@@ -133,7 +148,7 @@ def main(argv=None) -> int:
         })
 
     _write("model.json", {
-        "model": "Alpha158+GBDT", "version": "v0.3.0",
+        "model": "Alpha158+GBDT", "version": "v" + open(os.path.join(ROOT, "VERSION")).read().strip() if os.path.isfile(os.path.join(ROOT, "VERSION")) else "v0.6.0",
         "n_factors": 158, "n_trees": int(a.trees),
         "train_period": f"2008-01-01..{a.train_end}",
         "test_period": f"{str(dates[0].date())}..{str(dates[-1].date())}",
@@ -143,7 +158,9 @@ def main(argv=None) -> int:
         "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "backtest": {
             "annual": round(float(m["annual"]), 6),
-            "sharpe": round(float(m["sharpe"]), 4),
+            # 夏普显示「超额夏普」——绝对夏普含 beta，对选股策略没有意义
+            "sharpe": round(float(m["excess_sharpe"]), 4),
+            "abs_sharpe": round(float(m["sharpe"]), 4),
             "mdd": round(float(m["mdd"]), 6),
             "turnover": round(float(m["avg_turnover"]), 4),
             "hold_days": a.hold_days, "top_k": a.top_k, "band": a.band,
@@ -151,6 +168,7 @@ def main(argv=None) -> int:
             "excess_annual": round(float(m["excess_annual"]), 6),
             "excess_sharpe": round(float(m["excess_sharpe"]), 4),
             "excess_mdd": round(float(m["excess_mdd"]), 6),
+            "excess": round(float(m["excess_annual"]), 6),
             "cost_bps": 19.28,
         },
     })

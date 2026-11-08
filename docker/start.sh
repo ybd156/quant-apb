@@ -1,27 +1,66 @@
 #!/bin/sh
-# APB 容器入口：后台跑行情采集与版本检查，前台跑 Web 服务
+# APB 容器入口：后台跑四类采集/演算，前台跑 Web 服务
 #
 # 为什么不把采集放进 webui：
 #   INV-8 规定 UI 只做 IO、不做计算。采集是独立进程，只负责写 data/state/*.json，
 #   Web 服务只读 JSON。两者解耦，采集挂了也不影响页面。
+#
+# 四类后台任务（按频率从高到低）：
+#   1. 秒级快照   qcore.tick        —— 交易时段轮询，落盘 data/tick/
+#   2. 行情情绪   qcore.market_live —— 60 秒，写 market.json
+#   3. 版本检查   qcore.update_check—— 6 小时，写 update.json
+#   4. 收盘演算   qcore.live_model  —— 每日 15:10 打分+盯市；每周重训
+#   5. 数据源探活 qcore.health      —— 6 小时，写 source_health.json
+#   6. 告警检查   qcore.alert       —— 30 分钟，写 alerts.jsonl
 set -e
 
 HOST="${APB_HOST:-0.0.0.0}"
 PORT="${APB_PORT:-8765}"
 MARKET_INTERVAL="${APB_MARKET_INTERVAL:-60}"
 ENABLE_MARKET="${APB_MARKET:-1}"
-UPDATE_INTERVAL="${APB_UPDATE_INTERVAL:-21600}"   # 6 小时检查一次新版本
+UPDATE_INTERVAL="${APB_UPDATE_INTERVAL:-21600}"
 ENABLE_UPDATE_CHECK="${APB_UPDATE_CHECK:-1}"
+ENABLE_TICK="${APB_TICK:-1}"
+TICK_INTERVAL="${APB_TICK_INTERVAL:-3}"
+ENABLE_LIVE="${APB_LIVE:-1}"
+LIVE_MAX_AGE="${APB_LIVE_MAX_AGE_DAYS:-7}"
+ENABLE_HEALTH="${APB_HEALTH:-1}"
+HEALTH_INTERVAL="${APB_HEALTH_INTERVAL:-21600}"
+ENABLE_ALERT="${APB_ALERT:-1}"
+ALERT_INTERVAL="${APB_ALERT_INTERVAL:-1800}"
 
-echo "[entrypoint] APB starting, version=$(cat /app/VERSION 2>/dev/null || echo unknown)"
-echo "[entrypoint] web  : ${HOST}:${PORT}"
-echo "[entrypoint] market collector: ${ENABLE_MARKET} (interval ${MARKET_INTERVAL}s)"
-echo "[entrypoint] update checker  : ${ENABLE_UPDATE_CHECK} (interval ${UPDATE_INTERVAL}s)"
+echo "[entrypoint] APB $(cat /app/VERSION 2>/dev/null || echo unknown) on ${HOST}:${PORT}"
+echo "[entrypoint] market=${ENABLE_MARKET} tick=${ENABLE_TICK} live=${ENABLE_LIVE} health=${ENABLE_HEALTH} alert=${ENABLE_ALERT}"
 
-MARKET_PID=""
-UPDATE_PID=""
+PIDS=""
 
-# 后台：实时行情与市场情绪采集
+# 1) 秒级快照：只盯「模型推荐 + 自选」的票，不扫全市场（N100 扛不住）
+if [ "$ENABLE_TICK" = "1" ]; then
+    (
+        sleep 20
+        while true; do
+            python -c "
+import json,sys
+codes=[]
+try:
+    d=json.load(open('/app/data/state/picks.json'))
+    codes=[r['code'] for r in (d.get('rows') or [])][:20]
+except Exception: pass
+try:
+    w=json.load(open('/app/data/state/watchlist.json'))
+    codes+= [it['code'] for it in (w.get('items') or [])][:10]
+except Exception: pass
+print(','.join(dict.fromkeys(codes)) or '600519')
+" > /tmp/tick_codes.txt 2>/dev/null
+            python -m qcore.tick --loop --interval="${TICK_INTERVAL}" \
+                --codes="$(cat /tmp/tick_codes.txt 2>/dev/null || echo 600519)" || true
+            sleep 10
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
+# 2) 行情与市场情绪
 if [ "$ENABLE_MARKET" = "1" ]; then
     (
         while true; do
@@ -29,27 +68,62 @@ if [ "$ENABLE_MARKET" = "1" ]; then
             sleep 5
         done
     ) &
-    MARKET_PID=$!
-    echo "[entrypoint] market collector pid=${MARKET_PID}"
+    PIDS="$PIDS $!"
 fi
 
-# 后台：版本检查（写 data/state/update.json，供 UI 显示"有新版本"）
-# 启动后先跑一次，之后每 UPDATE_INTERVAL 秒一次
+# 3) 版本检查
 if [ "$ENABLE_UPDATE_CHECK" = "1" ]; then
     (
-        sleep 15                       # 等网络就绪
+        sleep 15
         while true; do
-            python -m qcore.update_check 2>&1 | tail -3 || true
+            python -m qcore.update_check 2>&1 | tail -2 || true
             sleep "${UPDATE_INTERVAL}"
         done
     ) &
-    UPDATE_PID=$!
-    echo "[entrypoint] update checker pid=${UPDATE_PID}"
+    PIDS="$PIDS $!"
+fi
+
+# 4) 收盘演算（每日打分 + 每周重训）
+if [ "$ENABLE_LIVE" = "1" ]; then
+    (
+        sleep 30
+        while true; do
+            python -c "
+from qcore import live_model as LM
+LM.loop(interval_s=1800, max_age_days=${LIVE_MAX_AGE})
+" || true
+            sleep 60
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
+# 5) 数据源探活
+if [ "$ENABLE_HEALTH" = "1" ]; then
+    (
+        sleep 45
+        while true; do
+            python -m qcore.health 2>&1 | tail -6 || true
+            sleep "${HEALTH_INTERVAL}"
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
+# 6) 告警检查
+if [ "$ENABLE_ALERT" = "1" ]; then
+    (
+        sleep 60
+        while true; do
+            python -c "from qcore import alert as A; print(A.run_once('file'))" 2>&1 | tail -2 || true
+            sleep "${ALERT_INTERVAL}"
+        done
+    ) &
+    PIDS="$PIDS $!"
 fi
 
 cleanup() {
-    [ -n "$MARKET_PID" ] && kill "$MARKET_PID" 2>/dev/null || true
-    [ -n "$UPDATE_PID" ] && kill "$UPDATE_PID" 2>/dev/null || true
+    for p in $PIDS; do kill "$p" 2>/dev/null || true; done
 }
 trap cleanup INT TERM
 
