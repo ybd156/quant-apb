@@ -1,42 +1,45 @@
-#!/bin/sh
-# APB 服务控制脚本（fnOS 调用）
-# 采用 Docker 后端：宿主机不需要 Python/numpy/pandas，全部在容器里。
-set -e
+#!/bin/bash
+# APB 服务控制：Docker 后端
+# 由 cmd/main 通过 source 引入，需提供 start_daemon / stop_daemon / daemon_status
 
-APP_NAME="apb"
-IMAGE="ghcr.io/ybd156/quant-apb:${APB_TAG:-latest}"
-PKGVAR="${TRIM_PKGVAR:-/var/packages/${APP_NAME}/var}"
-DATA_DIR="${PKGVAR}/data"
-LOG_DIR="${PKGVAR}/logs"
+CONTAINER="${APPNAME:-apb}"
+IMAGE="${APB_IMAGE:-ghcr.io/ybd156/quant-apb:latest}"
+DATA_DIR="${PKGVAR:-/tmp}/data"
+LOG_HOST_DIR="${PKGVAR:-/tmp}/logs"
 PORT="${APB_PORT:-8765}"
 
-mkdir -p "$DATA_DIR" "$LOG_DIR"
+docker_available() {
+    command -v docker >/dev/null 2>&1
+}
 
-start_service() {
-    if docker ps -a --format '{{.Names}}' | grep -qx "$APP_NAME"; then
-        docker start "$APP_NAME" >/dev/null 2>&1 || true
+daemon_status() {
+    docker_available || return 1
+    docker ps --filter "name=^${CONTAINER}$" --filter "status=running" -q | grep -q .
+}
+
+start_daemon() {
+    if ! docker_available; then
+        log "docker 不可用，无法启动"
+        return 1
+    fi
+    mkdir -p "$DATA_DIR" "$LOG_HOST_DIR"
+    if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+        docker start "$CONTAINER" >>"$LOG_FILE" 2>&1
     else
-        docker run -d --name "$APP_NAME" \
+        docker run -d --name "$CONTAINER" \
             --restart unless-stopped \
             -p "${PORT}:8765" \
             -e TZ=Asia/Shanghai \
             -e APB_HOST=0.0.0.0 \
             -v "${DATA_DIR}:/app/data" \
-            -v "${LOG_DIR}:/app/logs" \
-            "$IMAGE" >/dev/null
+            -v "${LOG_HOST_DIR}:/app/logs" \
+            "$IMAGE" >>"$LOG_FILE" 2>&1
     fi
-    echo "APB started on port ${PORT}"
+    log "APB 已启动，端口 ${PORT}"
 }
 
-stop_service() {
-    docker stop "$APP_NAME" >/dev/null 2>&1 || true
-    echo "APB stopped"
+stop_daemon() {
+    docker_available || return 0
+    docker stop "$CONTAINER" >>"$LOG_FILE" 2>&1 || true
+    log "APB 已停止"
 }
-
-case "$1" in
-    start)   start_service ;;
-    stop)    stop_service ;;
-    restart) stop_service; start_service ;;
-    status)  docker ps --filter "name=^${APP_NAME}$" --format '{{.Status}}' ;;
-    *)       echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
-esac

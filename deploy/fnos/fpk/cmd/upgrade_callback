@@ -1,0 +1,11 @@
+#!/bin/bash
+# 升级回调：拉新镜像并重启
+CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
+[ -r "${CMD_DIR}/common" ] && . "${CMD_DIR}/common"
+[ -r "${CMD_DIR}/service-setup" ] && . "${CMD_DIR}/service-setup"
+log "升级 ${APPNAME}：拉取新镜像"
+docker pull "${IMAGE}" >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+stop_daemon
+docker rm -f "${CONTAINER:-apb}" >>"${LOG_FILE:-/dev/null}" 2>&1 || true
+start_daemon
+exit 0

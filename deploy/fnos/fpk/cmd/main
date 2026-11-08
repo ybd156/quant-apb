@@ -1,0 +1,54 @@
+#!/bin/bash
+# APB 应用入口：fnOS 调用 `main <start|stop|status|log>`
+# 说明：按 fnOS 应用接口契约自行实现。
+
+CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ -r "${CMD_DIR}/common" ]; then
+    . "${CMD_DIR}/common"
+fi
+if [ -r "${CMD_DIR}/service-setup" ]; then
+    . "${CMD_DIR}/service-setup"
+fi
+
+case "$1" in
+    start)
+        if daemon_status; then
+            log "${APPNAME} 已在运行"
+            exit 0
+        fi
+        log "启动 ${APPNAME} ..."
+        start_daemon
+        exit $?
+        ;;
+    stop)
+        log "停止 ${APPNAME} ..."
+        stop_daemon
+        exit 0
+        ;;
+    status)
+        if daemon_status; then
+            echo "${APPNAME} is running"
+            exit 0
+        else
+            echo "${APPNAME} is not running"
+            exit 3
+        fi
+        ;;
+    log)
+        LINES="${2:-100}"
+        if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER:-apb}"; then
+            docker logs --tail "$LINES" "${CONTAINER:-apb}" 2>&1
+        elif [ -f "$LOG_FILE" ]; then
+            tail -n "$LINES" "$LOG_FILE"
+        else
+            echo "no log available"
+            exit 1
+        fi
+        exit 0
+        ;;
+    *)
+        echo "usage: $0 {start|stop|status|log [lines]}"
+        exit 1
+        ;;
+esac

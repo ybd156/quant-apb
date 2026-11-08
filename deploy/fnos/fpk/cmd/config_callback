@@ -1,0 +1,9 @@
+#!/bin/bash
+# 配置变更回调：重启使新配置生效
+CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
+[ -r "${CMD_DIR}/common" ] && . "${CMD_DIR}/common"
+[ -r "${CMD_DIR}/service-setup" ] && . "${CMD_DIR}/service-setup"
+log "配置变更，重启 ${APPNAME}"
+stop_daemon
+start_daemon
+exit 0

@@ -1,0 +1,8 @@
+#!/bin/bash
+# 安装后回调：启动服务
+CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
+[ -r "${CMD_DIR}/common" ] && . "${CMD_DIR}/common"
+[ -r "${CMD_DIR}/service-setup" ] && . "${CMD_DIR}/service-setup"
+log "安装后启动 ${APPNAME}"
+start_daemon
+exit 0

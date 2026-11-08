@@ -1,0 +1,33 @@
+#!/bin/bash
+# APB 安装脚本：fnOS 安装时调用
+# 职责：建数据目录、拉镜像、预置默认配置。不做实际启动（启动由 install_callback 负责）
+
+CMD_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -r "${CMD_DIR}/common" ]; then . "${CMD_DIR}/common"; fi
+if [ -r "${CMD_DIR}/service-setup" ]; then . "${CMD_DIR}/service-setup"; fi
+
+log "===== APB 安装开始 ====="
+
+# 1) 数据目录
+mkdir -p "${PKGVAR}/data" "${PKGVAR}/logs" || {
+    log "创建数据目录失败: ${PKGVAR}"
+    exit 1
+}
+log "数据目录: ${PKGVAR}/data"
+
+# 2) 拉镜像（失败不阻断安装，首次启动时会再试）
+if command -v docker >/dev/null 2>&1; then
+    log "拉取镜像 ${IMAGE} ..."
+    docker pull "$IMAGE" >>"$LOG_FILE" 2>&1 || log "镜像拉取失败（将在启动时重试）"
+else
+    log "警告：docker 不可用，APB 需要 fnOS 的 Docker 服务"
+fi
+
+# 3) 清理同名旧容器，避免端口占用
+if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "${CONTAINER}"; then
+    log "移除同名旧容器 ${CONTAINER}"
+    docker rm -f "$CONTAINER" >>"$LOG_FILE" 2>&1 || true
+fi
+
+log "===== APB 安装完成 ====="
+exit 0

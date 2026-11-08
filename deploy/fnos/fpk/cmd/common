@@ -1,0 +1,27 @@
+#!/bin/bash
+# APB fnOS 应用公共环境
+# 说明：本文件为按 fnOS 应用接口契约自行实现，未复制任何第三方代码。
+
+# fnOS 启动应用时环境里没有 PATH，必须显式导出，否则子进程找不到命令
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+APPNAME="${TRIM_APPNAME:-apb}"
+PKGVAR="${TRIM_PKGVAR:-}"
+PKGDEST="${TRIM_APPDEST:-}"
+LOG_DIR="${TRIM_PKGVAR:-/tmp}/logs"
+LOG_FILE="${LOG_DIR}/${APPNAME}.log"
+
+# 数据目录安全校验：必须落在 fnOS 的合法卷路径下
+if [ -z "$PKGVAR" ]; then
+    echo "ERROR: TRIM_PKGVAR 未设置，无法确定数据目录" >&2
+    exit 1
+fi
+case "$PKGVAR" in
+    /vol*) ;;
+    /usr/local/apps/@appdata/*) ;;
+    *) echo "ERROR: TRIM_PKGVAR=$PKGVAR 不是合法的应用数据路径" >&2; exit 1 ;;
+esac
+
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+log() { echo "[$(date '+%F %T')] $*" | tee -a "$LOG_FILE"; }

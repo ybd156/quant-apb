@@ -64,8 +64,9 @@ mkdir -p "$PKG/cmd" "$PKG/config" "$PKG/ui/images"
 cp "$WORK/app.tgz" "$PKG/app.tgz"
 cp -a "$SRC/config/." "$PKG/config/"
 cp -a "$SRC/ui/." "$PKG/ui/"
-cp "$SRC/cmd/service-setup" "$PKG/cmd/"
-chmod +x "$PKG/cmd/service-setup"
+# fnOS 要求完整的生命周期脚本集：main/installer/service-setup/common + 各 callback
+cp -a "$SRC/cmd/." "$PKG/cmd/"
+chmod +x "$PKG"/cmd/* 2>/dev/null || true
 cp "$SRC/APB.sc" "$PKG/"
 cp "$SRC/ICON.PNG" "$SRC/ICON_256.PNG" "$PKG/"
 cp "$SRC/ICON_256.PNG" "$PKG/ui/images/256.png"
@@ -90,7 +91,7 @@ echo "[fpk] built $OUT ($(wc -c < "$OUT" | tr -d " ") bytes)"
 tar tzf "$OUT" >/dev/null || { echo "[fpk] ERROR corrupted"; exit 1; }
 LIST="$(tar tzf "$OUT")"
 echo "[fpk] contents:"; echo "$LIST" | head -20
-for f in manifest app.tgz cmd/service-setup config/privilege config/resource ICON.PNG; do
+for f in manifest app.tgz cmd/main cmd/installer cmd/service-setup cmd/common          cmd/install_callback cmd/uninstall_callback cmd/upgrade_callback          cmd/config_callback config/privilege config/resource ICON.PNG; do
   echo "$LIST" | grep -q "$f" || { echo "[fpk] ERROR missing $f in fpk"; exit 1; }
 done
 echo "[fpk] OK"
