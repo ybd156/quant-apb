@@ -1,3 +1,7 @@
+/* APB-GLOBAL-HIDDEN: 作者样式的 display 会覆盖浏览器默认 [hidden]{display:none}，
+   必须显式声明，否则弹窗/徽章会一直显示 */
+[hidden] { display: none !important; }
+
 /* ==========================================================================
    APB 控制台 — 设计系统
    零依赖：无 CDN / 无网络字体 / 无构建步骤。深色为默认，亮色为覆盖。
@@ -713,6 +717,10 @@ select { cursor: pointer; }
 }
 
 /* -------------------------------- 弹窗 --------------------------------- */
+
+/* 注意：必须显式处理 [hidden]，否则 author 的 display:grid 会覆盖
+   浏览器默认的 [hidden]{display:none}，导致弹窗一开始就显示并盖住页面 */
+.modal-mask[hidden] { display: none !important; }
 
 .modal-mask {
   position: fixed; inset: 0; z-index: 70;

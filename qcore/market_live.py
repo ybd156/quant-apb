@@ -147,6 +147,9 @@ def _pct_rank(series: List[float], v: float) -> Optional[float]:
     arr = np.array([x for x in series if x is not None and np.isfinite(x)], dtype=float)
     if arr.size < 20 or v is None:
         return None
+    # 历史完全没有变化时分位恒为 0，会误导成"冰点"，直接判为不可用
+    if float(arr.std()) < 1e-9:
+        return None
     return float((arr < v).mean())
 
 
@@ -157,6 +160,12 @@ def sentiment_temperature(up_ratio: float, limit_up: int, amount_yi: float) -> D
     hist = _load_history()
     if len(hist) < 20:
         return {"ok": False, "reason": f"历史样本 {len(hist)} < 20，暂不计算温度",
+                "temperature": None}
+    # 去重后仍无变化 -> 分位无意义（例如采集到的都是同一时刻的重复快照）
+    _u = {round(float(h.get("up_ratio") or 0), 6) for h in hist}
+    if len(_u) < 5:
+        return {"ok": False,
+                "reason": f"历史值几乎无变化（{len(_u)} 个不同取值），分位不可用",
                 "temperature": None}
     p1 = _pct_rank([h.get("up_ratio") for h in hist], up_ratio)
     p2 = _pct_rank([h.get("limit_up") for h in hist], limit_up)
