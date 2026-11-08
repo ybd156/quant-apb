@@ -76,8 +76,11 @@ def build(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     ls = AN.long_short_series(res["scores"], p3d.RET[horizon].T, horizon)
     cost = 0.7 * 19.28 / 1e4
     nav_ls = np.cumprod(1 + np.nan_to_num(ls - cost)) if ls.size else np.array([1.0])
-    pool_ret = np.nanmean(p3d.RET[horizon], axis=1)
-    nav_pool = np.cumprod(1 + np.nan_to_num(pool_ret)) / horizon
+    # 基准必须用**日频**收益连乘；用 h 日重叠收益连乘会把同一段行情算 h 次（实测会飙到 56 倍）
+    with np.errstate(invalid="ignore", divide="ignore"):
+        daily = p3d.CLOSE[1:] / p3d.CLOSE[:-1] - 1.0
+    ew = np.nanmean(np.where(np.isfinite(daily), daily, np.nan), axis=1)
+    nav_pool = np.cumprod(1.0 + np.nan_to_num(ew))
     idx = load_index("000300").set_index("date")["close"].reindex(pd.DatetimeIndex(dates))
     nav_idx = (idx / idx.iloc[0]).to_numpy()
     CH.line_png(os.path.join(IMG_DIR, "nav.png"),
