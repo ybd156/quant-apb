@@ -52,6 +52,8 @@ python tests/test_no_lookahead.py                        # 泄漏检验（必须
 | `qcore/forecast.py` | 前景与空间测算（Grinold 基本法则） | 无 |
 | `qcore/claims.py` | 判断台账（先登记后验证） | `data/claims/` |
 | `qcore/paper.py` | 模拟盘 vs 实盘对账 | `data/state/live_trades.jsonl` |
+| `qcore/slippage.py` | 滑点追踪：回测假设价 vs 实盘成交价，验证回测可信度 | `data/slippage/*.jsonl` |
+| `qcore/alert.py` | 告警规则 + 1h 去重 + file/webhook 分发 | `data/state/alerts.jsonl`、`alert_state.json` |
 | `qcore/context.py` | 当时形势 / 历史类比 | 无 |
 | `qcore/store.py` | 状态落盘（原子写 + NaN→null） | `data/state/` |
 | `qcore/pipeline.py` | 全流程编排 | 无 |
