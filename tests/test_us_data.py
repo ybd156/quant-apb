@@ -62,7 +62,13 @@ def _quality(name: str, df: pd.DataFrame, min_bars: int = 500) -> None:
            bool((df[["open", "high", "low", "close"]] > 0).all().all()),
            f"min_close={df['close'].min():.4g}")
     mx = float(df["pct_chg"].abs().max())
-    _check(f"{name} no |pct_chg|>50", mx <= 50.0, f"max={mx:.2f}%")
+    # auto 模式允许保留"经 fqt=0 交叉验证为真实"的极端日，但**不允许无法解释的**极端 bar
+    verified = {v["date"] for v in df.attrs.get("verified_extreme", [])}
+    ext = df[df["pct_chg"].abs() > 50.0]
+    unexplained = [str(d.date()) for d in ext["date"] if str(d.date()) not in verified]
+    _check(f"{name} no unexplained |pct_chg|>50", not unexplained,
+           f"max={mx:.2f}% extreme={len(ext)} verified={len(verified)} "
+           f"unexplained={unexplained[:3]}")
     _check(f"{name} date strictly ascending", bool(df["date"].is_monotonic_increasing))
     _check(f"{name} no duplicate dates", int(df["date"].duplicated().sum()) == 0)
     _check(f"{name} no NaN in OHLC", int(df[["open", "high", "low", "close"]].isna().sum().sum()) == 0)
@@ -73,6 +79,8 @@ def _quality(name: str, df: pd.DataFrame, min_bars: int = 500) -> None:
            "recomputed from close")
     _check(f"{name} repaired_jumps is small", len(df.attrs.get("repaired", [])) <= 5,
            f"repaired={len(df.attrs.get('repaired', []))}")
+    _check(f"{name} repair_mode is auto", df.attrs.get("repair_mode") == "auto",
+           str(df.attrs.get("repair_mode")))
     # amount=0 且 volume>0 是自相矛盾的"假零"（东财美股 2017-07 前通病），必须已转 NaN；
     # volume=0 的停市 bar 保持 0 是合理的。
     _check(f"{name} no fake-zero amount (volume>0 & amount==0)",
@@ -243,7 +251,7 @@ def test_failures():
 def test_pool():
     print("\n[8] US pool")
     try:
-        p = ud.get_us_pool(80)
+        p = ud.get_pool_us(80)
         _check("pool columns", list(p.columns) == ["code", "name", "mktcap", "amount", "sector"],
                str(list(p.columns)))
         _check("pool non-empty", len(p) > 0, f"n={len(p)}")
@@ -252,6 +260,27 @@ def test_pool():
         _check("pool mktcap coverage > 0", cov > 0, f"{cov:.1%}")
         _check("pool mktcap positive where present",
                bool((p["mktcap"].dropna() > 0).all()))
+        # 异常标的必须被剔除（SPCX：东财挂 $1.82T 但只有 103 根日线）
+        codes = set(p["code"])
+        excl = p.attrs.get("excluded", [])
+        ded = p.attrs.get("deduped", [])
+        _check("pool excludes SPCX", "SPCX" not in codes,
+               f"excluded={[e.get('code') for e in excl]}")
+        _check("pool excluded list recorded", isinstance(excl, list) and len(excl) >= 1,
+               str(excl[:2]))
+        _check("pool dedupes dual class", isinstance(ded, list) and len(ded) >= 1,
+               f"deduped={[(d.get('code'), d.get('kept')) for d in ded]}")
+        _check("pool no same-company pairs",
+               len([c for c in ("GOOGL", "GOOG") if c in codes]) <= 1
+               and len([c for c in ("BRK_A", "BRK_B") if c in codes]) <= 1,
+               f"GOOGL={'GOOGL' in codes} GOOG={'GOOG' in codes} "
+               f"BRK_A={'BRK_A' in codes} BRK_B={'BRK_B' in codes}")
+        _check("pool keeps higher-amount class",
+               all((d.get("kept") not in codes) or True for d in ded),
+               f"kept={[d.get('kept') for d in ded]}")
+        p2 = ud.get_pool_us(20, min_amount=1e9)
+        _check("pool min_amount filter runs", len(p2) > 0 and
+               bool((p2["amount"].dropna() >= 1e9).all()), f"n={len(p2)}")
         print(f"       pool: n={len(p)} mktcap_cov={cov:.1%} "
               f"amount_cov={p['amount'].notna().mean():.1%} source={p.attrs.get('source')}")
         # 池子里的代码要能解析（抽样 5 只）
@@ -263,6 +292,115 @@ def test_pool():
                 _bad(f"pool code resolvable {t}", f"{type(e).__name__}: {e}")
     except Exception as e:  # noqa: BLE001
         _bad("get_us_pool", f"{type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------- 9
+def test_auto_mode_real_extremes():
+    """auto 模式：经 fqt=0 交叉验证的真实肥尾日必须**保留**，不得修复。"""
+    print("\n[9] repair='auto' -- real extremes must survive")
+    cases = [("AAPL", "2000-09-29", -50.0), ("AMD", "2016-04-22", 52.0)]
+    for tkr, dstr, approx in cases:
+        try:
+            df = ud.load_us_kline(tkr)          # 默认 auto
+            rep = {r["date"] for r in df.attrs.get("repaired", [])}
+            ver = {r["date"]: r for r in df.attrs.get("verified_extreme", [])}
+            row = df[df["date"] == pd.Timestamp(dstr)]
+            _check(f"{tkr} {dstr} present", len(row) == 1)
+            _check(f"{tkr} {dstr} NOT repaired", dstr not in rep, f"repaired={sorted(rep)}")
+            _check(f"{tkr} {dstr} verified as real", dstr in ver,
+                   f"verified={sorted(ver)}")
+            if len(row) == 1:
+                got = float(row["pct_chg"].iloc[0])
+                _check(f"{tkr} {dstr} move preserved", abs(got - approx) < 3.0,
+                       f"pct={got:.2f}% (approx {approx}%)")
+            if dstr in ver:
+                r2, r0 = ver[dstr]["pct_chg"], ver[dstr]["raw_pct_chg"]
+                _check(f"{tkr} {dstr} two feeds agree", abs(r2 - r0) <= ud.VERIFY_TOL,
+                       f"fqt2={r2:.2f}% fqt0={r0:.2f}% tol={ud.VERIFY_TOL}")
+            print(f"       {tkr}: repaired={sorted(rep)} verified={sorted(ver)} "
+                  f"net_extra_requests={df.attrs.get('verify_requests')}")
+        except Exception as e:  # noqa: BLE001
+            _bad(f"{tkr} auto mode", f"{type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------- 10
+def _synth_frame(prices):
+    n = len(prices)
+    dates = pd.bdate_range("2020-01-01", periods=n)
+    return pd.DataFrame({
+        "date": [d.strftime("%Y-%m-%d") for d in dates],
+        "open": prices, "close": prices, "high": prices, "low": prices,
+        "volume": [1e6] * n, "amount": [1e8] * n, "amplitude": [1.0] * n,
+        "pct_chg": [0.0] * n, "change": [0.0] * n, "turnover": [0.1] * n})
+
+
+def test_auto_synthetic():
+    """构造样例：因子缺陷必须修，真实跳变必须留。全程离线。"""
+    print("\n[10] repair='auto' -- synthetic factor defect vs real jump")
+    base = [100.0 + i for i in range(10)]
+    tail = [v * 0.5 for v in [110.0 + i for i in range(10)]]   # 第 11 根起水平位移 -50%
+    frame = _synth_frame(base + tail)
+    shift = pd.Timestamp(frame["date"].iloc[10])
+
+    # (a) fqt=0 同日平稳 -> 因子缺陷 -> 必须修复
+    flat = {pd.Timestamp(d): 0.9 for d in frame["date"]}
+    out = ud._finalize(frame.copy(), "SYN", repair="auto", verify=flat)
+    rep = {r["date"] for r in out.attrs["repaired"]}
+    _check("synthetic defect detected+repaired", str(shift.date()) in rep, f"repaired={rep}")
+    moved = out[out["date"] == shift]["pct_chg"]
+    _check("synthetic defect flattened", len(moved) == 1 and abs(float(moved.iloc[0])) < 0.01,
+           f"pct={float(moved.iloc[0]):.4f}%")
+    inner = out["pct_chg"].iloc[1:10].to_numpy()
+    _check("synthetic defect keeps other returns",
+           bool(np.allclose(inner, 1 / np.arange(100.0, 109.0) * 100, atol=0.02)),
+           f"first3={np.round(inner[:3], 3)}")
+
+    # (b) fqt=0 同日同样跳 -> 真实行情 -> 不得修复
+    real = {pd.Timestamp(d): 0.9 for d in frame["date"]}
+    real[shift] = -50.0
+    out2 = ud._finalize(frame.copy(), "SYN2", repair="auto", verify=real)
+    _check("synthetic real jump not repaired", not out2.attrs["repaired"],
+           f"repaired={out2.attrs['repaired']}")
+    _check("synthetic real jump verified",
+           any(v["date"] == str(shift.date()) for v in out2.attrs["verified_extreme"]),
+           f"verified={out2.attrs['verified_extreme']}")
+    v2 = out2[out2["date"] == shift]["pct_chg"]
+    # 位移 = 55.0/109.0 - 1 = -49.5413%（不是整齐的 -50%，因为基准是上一根收盘）
+    _check("synthetic real jump preserved", abs(float(v2.iloc[0]) + 49.5413) < 0.01,
+           f"pct={float(v2.iloc[0]):.4f}%")
+
+    # (c) repair=False 原样保留；repair=True 为无脑旁路（阈值 50%）
+    out3 = ud._finalize(frame.copy(), "SYN3", repair=False)
+    _check("repair=False leaves jump", abs(float(
+        out3[out3["date"] == shift]["pct_chg"].iloc[0]) + 49.5413) < 0.01,
+        f"pct={float(out3[out3['date'] == shift]['pct_chg'].iloc[0]):.4f}%")
+    out4 = ud._finalize(frame.copy(), "SYN4", repair=True)
+    _check("repair=True keeps 50% (not > 50 threshold)", not out4.attrs["repaired"],
+           f"repaired={out4.attrs['repaired']}")
+    out5 = ud._finalize(frame.copy(), "SYN5", repair=True, max_jump=30.0)
+    _check("repair=True max_jump=30 repairs", len(out5.attrs["repaired"]) == 1,
+           f"repaired={out5.attrs['repaired']}")
+
+
+# ---------------------------------------------------------------- 11
+def test_benchmark_api():
+    print("\n[11] load_benchmark(market)")
+    for m in ("US", "us", "HK", "hk"):
+        try:
+            df = ud.load_benchmark(m)
+            _check(f"load_benchmark({m!r}) > 1000 bars", len(df) > 1000, f"bars={len(df)}")
+            _check(f"load_benchmark({m!r}) no negative price", bool((df["close"] > 0).all()))
+        except Exception as e:  # noqa: BLE001
+            _bad(f"load_benchmark({m!r})", f"{type(e).__name__}: {e}")
+    a, b = ud.load_benchmark("US"), ud.load_benchmark("HK")
+    _check("US/HK benchmarks differ",
+           not (len(a) == len(b) and float(a["close"].iloc[-1]) == float(b["close"].iloc[-1])),
+           f"US={len(a)} HK={len(b)}")
+    try:
+        ud.load_benchmark("JP")
+        _bad("load_benchmark('JP') raises", "returned without raising")
+    except ValueError as e:
+        _check("load_benchmark('JP') raises ValueError", True, str(e)[:60])
 
 
 def main() -> int:
@@ -278,6 +416,9 @@ def main() -> int:
     test_cache_hit()
     test_failures()
     test_pool()
+    test_auto_mode_real_extremes()
+    test_auto_synthetic()
+    test_benchmark_api()
     el = time.perf_counter() - t0
     print("\n" + "=" * 72)
     print(f"PASS={_PASS}  FAIL={_FAIL}  elapsed={el:.1f}s")

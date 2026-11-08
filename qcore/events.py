@@ -92,6 +92,7 @@ class Event:
     pit_backfillable: bool = True   # 该事件当时是否可点对点观测（事后补录=False）
     catalyst_window: int = 20       # 催化窗口（交易日）
     note: str = ""                  # 失效条件 / 首个验证变量 / 备注
+    lag: int = 0                    # date -> 首个可交易日 的偏移；盘后公告=1
 
     def __post_init__(self) -> None:
         self.date = _to_date_str(self.date)
@@ -117,6 +118,11 @@ class Event:
         self.evidence_level = (self.evidence_level
                                if self.evidence_level in EVIDENCE_LEVELS else "weak")
         self.pit_backfillable = bool(self.pit_backfillable)
+        try:
+            self.lag = int(self.lag)
+        except (TypeError, ValueError):
+            self.lag = 0
+        self.lag = min(5, max(0, self.lag))
 
     @property
     def year(self) -> int:
@@ -143,6 +149,8 @@ def validate_event(ev: Event) -> List[str]:
         bad.append(f"bad direction: {ev.direction!r}")
     if not (0.0 <= ev.source_reliability <= 1.0):
         bad.append(f"reliability out of range: {ev.source_reliability!r}")
+    if not (0 <= ev.lag <= 5):
+        bad.append(f"bad lag: {ev.lag!r}")
     if ev.scope in ("sector", "stock") and not ev.sectors:
         bad.append("scope requires sectors")
     if not ev.source.startswith(("http://", "https://")):
@@ -715,6 +723,8 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
     * `mean_car_raw` 是不乘方向的原始 CAR（用于看绝对幅度与符号）。
     * direction == 0 的事件**不入表**（没有方向假设就无法定义 signed CAR），
       只在 warnings 里计数。
+    * 每个事件用**自己的** `Event.lag`（盘后公告=1）；传进来的 `lag` 只作为
+      事件未指定时的默认值。否则一批"周末公告 + 盘后公告"混在一起会错位一天。
     * 同一 (type, sector, horizon) 内事件日可能重叠 -> HAC lags = h-1。
     * n < min_n 的行仍保留但 `insufficient=True`。
 
@@ -739,6 +749,7 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
     max_h = int(max(list(horizons) + [1]))
 
     for ev in evs:
+        ev_lag = int(getattr(ev, "lag", 0) or lag)
         secs = list(ev.sectors) if ev.sectors else []
         if not secs and single:
             secs = [str(getattr(sector_ret, "name", "SECTOR") or "SECTOR")]
@@ -759,14 +770,14 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
                 n_skip_data += 1
                 warnings.append(f"{ev.eid}/{sec}: sector series missing")
                 continue
-            key = (sec, ev.date)
+            key = (sec, ev.date, ev_lag)
             if key not in cache:
                 al = _align(ser, market_ret)
                 if al is None:
                     cache[key] = None
                 else:
                     sv, mv, idx = al
-                    pos = _pos_on_or_after(idx, ev.date, lag=lag)
+                    pos = _pos_on_or_after(idx, ev.date, lag=ev_lag)
                     cache[key] = None if pos is None else _event_payload(
                         sv, mv, pos, window, est_window, MIN_EST, max_off=max_h)
                 if cache[key] is None:

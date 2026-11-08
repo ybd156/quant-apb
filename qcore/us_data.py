@@ -19,11 +19,19 @@
 |pct_chg| 巨大、与真实拆股/分红日无关）。`_repair_level_shifts` 按 k=close[t]/close[t-1]
 把该 bar **之前的整段**缩放（等价一次拆股调整）：只抹掉该 bar 自身那一天，
 其余 bar 的收益分毫不动、不留日期缺口。修复清单进 `df.attrs["repaired"]`。
-⚠️ 该规则也会抹掉"真实的单日 ±50% 极端行情"（实测 AAPL 2000-09-29 −50.1% 是真跌）——
-收益率/波动率类信号受不了这种 bar，故按规则剔除并登记；要保留原始口径就传 `repair=False`。
+
+⚠️ 但"一律修复"会把**真实肥尾日**一起抹掉（AAPL 2000-09-29 −50.1% 是真跌、
+AMD 2016-04-22 +52.3% 是真涨），而肥尾本身就是信号。所以默认 `repair="auto"`：
+  1. 检出 |日收益| > 30% 的跳变；
+  2. 此时**才**额外拉一次 `fqt=0`（原始未复权）序列做交叉验证（结果落盘 `_h0.csv`，
+     常态 0 次额外请求）；
+  3. 两口径同日收益同方向且相差 <= 2.5pp -> **真实行情，保留**（`attrs["verified_extreme"]`）；
+     否则 -> 供应商复权因子缺陷，执行缩放修复（`attrs["repaired"]`）。
+  `repair=True` 是无脑修复旁路（阈值 50%，会把真实肥尾一起抹掉）；
+  `repair=False` 保留原始口径。
 
 其他设计
-  1. 单只失败抛清晰异常；批量函数（get_us_pool 的逐只补数、download）try/except 继续；
+  1. 单只失败抛清晰异常；批量函数（`download_us`、池子的逐只补数）try/except 继续；
   2. 限速 0.22s + 5 次指数退避**复用 data.py 的 `_get_json`**（同一个 push2his 主机，
      必须共享同一个限速器，否则 A股+美股并发会直接把连接打断）；
   3. 缓存文件名带复权标记 `_h{adjust}`，避免新旧口径混用。
@@ -83,6 +91,7 @@ BENCH_HK_SECID = "100.HSI"       # 恒生指数
 MAX_JUMP = 50.0                  # repair=True（无脑修复）的检出阈值（%）
 AUTO_JUMP = 30.0                 # repair="auto" 的检出阈值（%）：先检出，再用 fqt=0 交叉验证
 VERIFY_TOL = 2.5                 # 交叉验证容差（百分点）：两口径同日收益差 > 此值即判为因子缺陷
+VERIFY_SPARSE = 20.0             # 验证表稀疏阈值（%）：|原始日收益| <= 此值的日期不落盘（永远判不出"真实"）
 MEGA_CAP = 1.0e12                # 异常标的筛查起点：市值 > $1T
 POOL_MIN_BARS = 500              # 进池最少历史 bar 数
 DEFAULT_BEG = "19900101"
@@ -158,10 +167,12 @@ def _raw_frame(secid: str, adjust: int, beg: str, end: str,
 
 
 def _returns_from_raw(raw: pd.DataFrame) -> Dict[pd.Timestamp, float]:
-    """原始 frame -> {date: 日收益%}，用于 fqt=2 / fqt=0 交叉验证。"""
+    """原始 frame -> {date: 日收益%}，用于 fqt=2 / fqt=0 交叉验证。
+
+    只依赖 date/close 两列（缓存命中时只读这两列，省掉解析 11 列的开销）。
+    """
     df = raw.copy()
-    for c in ("open", "close", "high", "low"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date", "close"])
     df = df[df["close"] > 0].sort_values("date").drop_duplicates("date")
@@ -271,7 +282,9 @@ def _finalize(df: pd.DataFrame, code: str, repair: "str | bool" = "auto",
     for c in ("amplitude", "turnover"):
         if c in df:
             df[c] = df[c].astype(float)
-    df.attrs["repaired"] = fixed
+    df.attrs["repaired"] = repaired
+    df.attrs["verified_extreme"] = verified
+    df.attrs["repair_mode"] = mode
     df.attrs["amount_missing"] = int(fake_zero.sum())
     return df[KLINE_COLS + ["code"]]
 
@@ -319,23 +332,47 @@ def _load_raw_returns(secid: str, cache_path: str, max_age_days: float = 5.0,
                       ) -> Tuple[Optional[Dict[pd.Timestamp, float]], int]:
     """fqt=0（原始未复权）日收益 {date: pct}，落盘缓存。
 
-    `repair="auto"` 的交叉验证底座：只在主序列检出跳变时才需要，
-    且结果落盘（`{code}_h0.csv`），所以**常态 0 次额外请求**，冷启动最多 1 次。
+    `repair="auto"` 的交叉验证底座。两层缓存：
+      1. `{code}_h0.csv`  —— fqt=0 原始行情（只在首次需要时拉一次）；
+      2. `{code}_h0_verify.json` —— **稀疏**验证表，只保留 |原始日收益| > 20% 的日期。
+    为什么要稀疏：验证只在主序列检出 |收益|>30% 时才用，而"两口径相差 <= 2.5pp"要求
+    |原始收益| > 27.5% 才可能成立 —— 所以 |r0| <= 20% 的日期**永远不可能**被判为真实行情，
+    丢掉它们对结论零影响，却让缓存命中从"解析 9000 行 CSV"降到"读 2KB JSON"。
     返回 (dict|None, 网络请求次数)。
     """
+    jpath = cache_path[:-4] + "_verify.json"
+    if not refresh and _cache_fresh(jpath, max_age_days):
+        try:
+            with open(jpath, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            return {pd.Timestamp(k): float(v) for k, v in d.items()}, 0
+        except Exception:  # noqa: BLE001
+            pass
+
+    raw = None
+    net = 0
     if not refresh and _cache_fresh(cache_path, max_age_days):
-        raw = _cache_read(cache_path)
-        if raw is not None:
-            try:
-                return _returns_from_raw(raw), 0
-            except Exception:  # noqa: BLE001 —— 缓存坏了就重拉
-                pass
+        try:
+            raw = pd.read_csv(cache_path, usecols=lambda c: c in ("date", "close"))
+            if len(raw) <= 1:
+                raw = None
+        except Exception:  # noqa: BLE001
+            raw = None
+    if raw is None:
+        try:
+            _name, raw = _raw_frame(secid, 0, DEFAULT_BEG, DEFAULT_END)
+            _write_cache(raw, cache_path)
+            net = 1
+        except Exception:  # noqa: BLE001 —— 验证失败：auto 退化为"一律修复"
+            return None, net
+    full = _returns_from_raw(raw)
+    sparse = {k: v for k, v in full.items() if abs(v) > VERIFY_SPARSE}
     try:
-        _name, raw = _raw_frame(secid, 0, DEFAULT_BEG, DEFAULT_END)
-        _write_cache(raw, cache_path)
-        return _returns_from_raw(raw), 1
-    except Exception:  # noqa: BLE001 —— 验证失败：auto 退化为"一律修复"
-        return None, 1
+        with open(jpath, "w", encoding="utf-8") as f:
+            json.dump({k.strftime("%Y-%m-%d"): v for k, v in sparse.items()}, f)
+    except Exception:  # noqa: BLE001
+        pass
+    return sparse, net
 
 
 # ---------------------------------------------------------------- resolve
@@ -575,18 +612,22 @@ _KNOWN_DUAL = ({"GOOGL", "GOOG"}, {"BRK_A", "BRK_B"}, {"FOX", "FOXA"},
                {"NWS", "NWSA"}, {"LEN", "LEN_B"})
 
 
-def _probe_listing(secid: str, min_bars: int = POOL_MIN_BARS) -> dict:
+def _probe_listing(secid: str, min_bars: int = POOL_MIN_BARS, years: int = 3) -> dict:
     """轻量探测某 secid 是否"正常挂牌 + 历史够长"。
 
-    只取最后 min_bars+1 根（lmt 截断），payload 很小。
+    ⚠️ 东财 kline 的 `lmt` 在给了 `beg`/`end` 时**会被忽略**（实测 lmt=501 仍返回 9282 根），
+    所以这里用 `beg=3 年前` 收窄窗口来压缩 payload：3 年约 750 根，
+    够 500 根即认为历史充足。
     """
+    beg = (pd.Timestamp.today().normalize()
+           - pd.Timedelta(days=int(365.25 * years))).strftime("%Y%m%d")
     try:
-        _n, raw = _raw_frame(secid, ADJUST, DEFAULT_BEG, DEFAULT_END, lmt=min_bars + 1)
+        _n, raw = _raw_frame(secid, ADJUST, beg, DEFAULT_END)
     except Exception:  # noqa: BLE001
         return {"ok": False, "bars": 0, "reason": "kline_unavailable"}
     bars = len(raw)
     if bars <= min_bars:
-        return {"ok": False, "bars": bars, "reason": f"history_lt_{min_bars}"}
+        return {"ok": False, "bars": bars, "reason": f"history_lt_{min_bars}_in_{years}y"}
     tail = raw.tail(60)
     amt = pd.to_numeric(tail["amount"], errors="coerce").fillna(0.0)
     if float(amt.max()) <= 0:
@@ -722,6 +763,7 @@ def get_pool_us(top_n: int = 80, min_amount: float = 0.0,
     所以 2017 年前 amount **全部是 NaN**；拿它做排名/分位/滚动均值，NaN 会被
     排名逻辑错误处理（要么整段被丢掉，要么被当 0 排到最后）。
     `min_amount` 参数因此对 2017 年前的美股是"无差别剔除"，请勿依赖。
+    `min_amount > 0` 时**绕过池缓存**（缓存按 min_amount=0 的口径落盘，混用会拿到未过滤的行）。
 
     其他口径：
       * mktcap / amount 单位都是**美元**（A 股 data.py 里是元/手，别混用）；
@@ -732,7 +774,8 @@ def get_pool_us(top_n: int = 80, min_amount: float = 0.0,
         清单在 `attrs["excluded"]`；
       * 拿不到的字段留 NaN —— 不猜、不填零。
     """
-    if not refresh and _cache_fresh(US_POOL_PATH, cache_days):
+    use_cache = (not refresh) and cache_days and cache_days > 0 and float(min_amount or 0) <= 0
+    if use_cache and _cache_fresh(US_POOL_PATH, cache_days):
         try:
             df = pd.read_csv(US_POOL_PATH, dtype={"code": str})
             if len(df) >= min(int(top_n), 100):
@@ -746,11 +789,13 @@ def get_pool_us(top_n: int = 80, min_amount: float = 0.0,
         except Exception:  # noqa: BLE001
             pass
     df = _build_pool_us(top_n=top_n, min_amount=min_amount)
-    out = df.copy()
-    attrs = dict(df.attrs)
-    out.attrs = {}
-    out.to_csv(US_POOL_PATH, index=False, encoding="utf-8")
-    _write_pool_meta(attrs.get("excluded", []), attrs.get("deduped", []))
+    if use_cache:
+        # 只有"默认口径"才落盘缓存；min_amount>0 的过滤结果不能污染缓存
+        out = df.copy()
+        attrs = dict(df.attrs)
+        out.attrs = {}
+        out.to_csv(US_POOL_PATH, index=False, encoding="utf-8")
+        _write_pool_meta(attrs.get("excluded", []), attrs.get("deduped", []))
     return df
 
 
@@ -777,18 +822,20 @@ def download_us(tickers: List[str], adjust: int = ADJUST, verbose: bool = True) 
 
 if __name__ == "__main__":
     print("resolve:", {t: resolve_ticker(t) for t in ("AAPL", "MSFT", "SPY", "0700.HK")})
-    for t in ("AAPL", "MSFT", "NVDA"):
+    for t in ("AAPL", "MSFT", "NVDA", "AMD"):
         d = load_us_kline(t)
         print(f"{t}: bars={len(d)} {d['date'].iloc[0].date()}..{d['date'].iloc[-1].date()} "
-              f"last={d['close'].iloc[-1]:.4g} repaired={len(d.attrs.get('repaired', []))}")
+              f"last={d['close'].iloc[-1]:.4g} repaired={len(d.attrs.get('repaired', []))} "
+              f"verified={len(d.attrs.get('verified_extreme', []))} "
+              f"net_extra={d.attrs.get('verify_requests', 0)}")
     for c in ("00700", "09988"):
         d = load_hk_kline(c)
         print(f"{c}: bars={len(d)} {d['date'].iloc[0].date()}..{d['date'].iloc[-1].date()} "
-              f"last={d['close'].iloc[-1]:.4g}")
-    b = load_us_benchmark()
-    print(f"SPY: bars={len(b)} {b['date'].iloc[0].date()}..{b['date'].iloc[-1].date()}")
-    b = load_hk_benchmark()
-    print(f"HSI: bars={len(b)} {b['date'].iloc[0].date()}..{b['date'].iloc[-1].date()}")
-    p = get_us_pool(80)
+              f"last={d['close'].iloc[-1]:.4g} repaired={len(d.attrs.get('repaired', []))}")
+    for m in ("US", "HK"):
+        b = load_benchmark(m)
+        print(f"{m}: bars={len(b)} {b['date'].iloc[0].date()}..{b['date'].iloc[-1].date()}")
+    p = get_pool_us(80)
     print(f"pool: n={len(p)} mktcap_cov={p['mktcap'].notna().mean():.2%} "
-          f"source={p.attrs.get('source')}")
+          f"source={p.attrs.get('source')} excluded={p.attrs.get('excluded')} "
+          f"deduped={p.attrs.get('deduped')}")

@@ -34,3 +34,8 @@ tmp/
 
 # 本地临时脚本
 data/tmp*
+
+# 信息快照与盘中台账（可再生，体积大）
+data/info/
+data/intraday/
+data/claims/

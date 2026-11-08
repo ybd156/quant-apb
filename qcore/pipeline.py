@@ -20,6 +20,7 @@ from . import store
 from . import analysis as AN
 from . import confidence as C
 from . import costs as CO
+from . import risk as RK
 from . import meta as MT
 from . import stats as ST
 from .backtest import run_baselines, run_long_short
@@ -159,7 +160,51 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
 
     print("[7/7] export", flush=True)
     from .signals import signal_zoo
-    fam = {s.sid: s.family for s in signal_zoo()}
+    _zoo = signal_zoo()
+    fam = {s.sid: s.family for s in _zoo}
+    fam_list = [s.family for s in _zoo]
+
+    # 风险分摊体检：信号族集中度 + 组合分散度 + **相关性调整后的有效独立数**
+    w_final = res["weights_hist"][-1]
+    try:
+        _T, _N, _S = p3d.shape
+        _ret = p3d.RET[horizon]
+        _pay = np.full((_T, _S), np.nan)
+        for _t in range(_T):
+            _d = p3d.DIR[_t].astype(np.float32)
+            _s = p3d.STR[_t].astype(np.float32) * (1.0 / 255.0)
+            _r = _ret[_t]; _sg = p3d.SIGMA[_t]
+            _ok = np.isfinite(_r) & np.isfinite(_sg) & (_sg > 1e-9)
+            if _ok.sum() < 3:
+                continue
+            _y = _d[_ok] * (_r[_ok][:, None] / (_sg[_ok][:, None] * np.sqrt(horizon)))
+            _act = _d[_ok] != 0
+            _cnt = _act.sum(axis=0)
+            _m = _cnt > 0
+            _pay[_t, _m] = np.where(_act, _y, 0.0).sum(axis=0)[_m] / _cnt[_m]
+        _corr = pd.DataFrame(_pay).corr().fillna(0.0).to_numpy()
+        np.fill_diagonal(_corr, 1.0)
+        eff_corr = RK.effective_n_corr(w_final, _corr)
+        _abs = np.abs(_corr - np.eye(_S))
+        mirror_frac = float((_abs > 0.8).sum() / max(_S * (_S - 1), 1))
+        corr_info = {"effective_n_corr": eff_corr,
+                     "effective_n_weight": RK.effective_n(w_final),
+                     "mirror_pair_frac": round(mirror_frac, 4),
+                     "note": "按相关性算的有效独立下注数，远小于按权重算的数字"}
+    except Exception as e:  # noqa: BLE001
+        corr_info = {"error": f"{type(e).__name__}: {e}"}
+    div_sig = RK.diversification_report(w_final, family_map=fam_list, min_effective=10.0)
+    pw = RK.portfolio_weights(res["scores"][:, -1], p3d.SIGMA[-1],
+                              sectors=None, top_k=10, max_weight=0.15)
+    div_port = RK.diversification_report(pw["weights"], min_effective=5.0) if pw.get("ok") else {}
+    div_sig["corr_adjusted"] = corr_info
+    if corr_info.get("effective_n_corr") and corr_info["effective_n_corr"] < 45:
+        div_sig["warnings"].append(
+            f"相关性调整后有效独立信号仅 {corr_info['effective_n_corr']:.0f}/73，"
+            "表面分散实则高度同质")
+    risk_rep = {"signal_level": div_sig, "portfolio_level": div_port,
+                "n_positions": pw.get("n_positions"),
+                "note": "信号层只削峰（alpha 仍由学习器决定）；组合层逆波动 + 单票/行业上限"}
     paths = store.export_ui_bundle(res, p3d, family_of=fam, paper=paper_ui)
 
     perf = {
@@ -171,6 +216,7 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
                                     if not isinstance(v, np.ndarray)},
                      "baselines": bt["baselines"].to_dict("records") if hasattr(bt["baselines"], "to_dict") else bt["baselines"]},
         "confidence": calrep,
+        "risk": risk_rep,
         "costs": {"market": market, "round_trip_bps": cost_bps,
                   "breakdown": rt["breakdown"], "verified_on": rt["verified_on"],
                   "table": CO.summary_table(),
