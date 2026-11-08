@@ -7,10 +7,11 @@
             {
                 "name": "APB",
                 "permission": {
-                    "rw": ["apb"]
+                    "rw": [
+                        "apb"
+                    ]
                 }
             }
         ]
-    },
-    "systemd-unit": {}
+    }
 }
