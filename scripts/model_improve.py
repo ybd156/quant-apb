@@ -52,7 +52,8 @@ sys.path.insert(0, ROOT)
 from qcore.ensemble_model import BlendModel                      # noqa: E402
 from qcore.feature_select import select_by_stability, stability_scores  # noqa: E402
 from qcore.gbdt import GBDT                                      # noqa: E402
-from qcore.neutral import industry_neutralize, group_sizes       # noqa: E402
+from qcore.neutral import (industry_neutralize, industry_rank,       # noqa: E402
+                           group_sizes)
 from qcore.sample_weight import resample_by_weight, time_decay_weights  # noqa: E402
 from scripts.benchmark_alpha158 import _cs_rank_norm, _ic        # noqa: E402
 
@@ -68,6 +69,7 @@ TEST = ("2021-01-01", "2026-12-31")
 EXPS = [
     ("A", "基线（158 因子 + GBDT）"),
     ("B", "行业中性化（标签 -> 行业残差）"),
+    ("B2", "行业中性化（标签 -> 行业内 rank）"),
     ("C", "特征筛选（158 -> 60，按 IC 稳定性）"),
     ("D", "时间衰减（半衰期 250 天，重采样近似）"),
     ("E", "多模型集成（BlendModel）"),
@@ -82,9 +84,34 @@ GBDT_KW = dict(max_depth=4, learning_rate=0.1, min_samples_leaf=200,
 # ---------------------------------------------------------------------- #
 # 数据
 # ---------------------------------------------------------------------- #
+def build_panel_if_missing(max_stocks: int = 300) -> None:
+    """首次运行时构建面板缓存（Alpha158 特征 + 行业映射），约 3 分钟。"""
+    from qcore import qlib_data as QD
+    from scripts.benchmark_alpha158 import build_features
+
+    os.makedirs(CACHE, exist_ok=True)
+    print("面板缓存不存在，开始构建（Alpha158 × 300 只，约 3 分钟）...", flush=True)
+    codes = QD.universe_codes("csi300", start="2017-06-01")
+    d = build_features(codes, start="2008-01-01", horizon=1,
+                       max_stocks=max_stocks, verbose=True)
+    if not d.get("ok"):
+        raise SystemExit(f"构建失败: {d.get('reason')}")
+    if not os.path.exists(IND_CSV):
+        from qcore import data as D
+        u = D.fetch_universe(max_pages=60, page_size=100)
+        u["code"] = u["code"].astype(str).str.zfill(6)
+        u[["code", "industry"]].drop_duplicates("code").to_csv(
+            IND_CSV, index=False, encoding="utf-8")
+    np.savez(PANEL, X=d["X"].astype(np.float32), y=d["y"].astype(np.float32),
+             dates=d["dates"].to_numpy(dtype="datetime64[ns]").astype(np.int64),
+             codes=np.array(d["codes"], dtype=object),
+             names=np.array(d["names"], dtype=object))
+    print(f"  已写入 {PANEL}", flush=True)
+
+
 def load_panel():
-    if not os.path.exists(PANEL):
-        raise SystemExit(f"面板缓存不存在：{PANEL}\n先运行 python tmp/build_panel.py")
+    if not os.path.exists(PANEL) or not os.path.exists(IND_CSV):
+        build_panel_if_missing()
     z = np.load(PANEL, allow_pickle=True)
     X = z["X"]
     y = z["y"]
@@ -180,15 +207,19 @@ def run_experiment(tag, ctx, trees=250, top_n=60, half_life=250.0,
     info = {}
 
     use_neutral = tag in ("B", "F")
+    use_rank = tag == "B2"
     use_select = tag in ("C", "F")
     use_decay = tag in ("D", "F")
     use_blend = tag in ("E", "F")
 
-    # ---- 标签：行业残差 ----
+    # ---- 标签：行业残差 / 行业内 rank ----
     ytr, yva = ytr_raw, yva_raw
     if use_neutral:
         ytr = ctx["ytr_neu"]
         yva = ctx["yva_neu"]
+    elif use_rank:
+        ytr = ctx["ytr_rk"]
+        yva = ctx["yva_rk"]
 
     # ---- 特征：稳定性筛选（只用训练窗口，绝不含测试期）----
     if use_select:
@@ -235,11 +266,12 @@ def run_experiment(tag, ctx, trees=250, top_n=60, half_life=250.0,
 
 
 # ---------------------------------------------------------------------- #
-def fmt_line(tag, res, base_ic=None):
+def fmt_line(tag, res, base_ic=None, half_life=250.0):
     d = ""
     if base_ic is not None and np.isfinite(base_ic):
         d = f"  ΔIC={res['ic'] - base_ic:+.4f}"
-    return (f"{tag} {EXP_DESC[tag]:<26s} IC={res['ic']:+.4f}  t={res['t']:+6.2f}  "
+    desc = EXP_DESC[tag] + (f" HL={half_life:g}d" if tag == "D" else "")
+    return (f"{tag} {desc:<26s} IC={res['ic']:+.4f}  t={res['t']:+6.2f}  "
             f"RankIC={res['rank_ic']:+.4f}  ICIR={res['icir']:+.3f}{d}  "
             f"[{res['n_features']}特征 {res['train_rows']:,}行 {res['sec']}s]")
 
@@ -310,6 +342,16 @@ def main(argv=None) -> int:
                tdays=tdays, dates=dates.to_numpy(),
                ytr_neu=ytr_neu, yva_neu=yva_neu)
 
+    if "B2" in only:      # 备选：行业内 rank 作为标签
+        t0 = time.time()
+        y_rk = industry_rank(y, industry).astype(np.float32)
+        ctx["ytr_rk"] = y_rk[dtr, ctr]
+        ctx["yva_rk"] = y_rk[dva, cva]
+        print(f"行业内 rank 标签：train 范围 "
+              f"[{float(np.nanmin(ctx['ytr_rk'])):.3f}, "
+              f"{float(np.nanmax(ctx['ytr_rk'])):.3f}]  {time.time()-t0:.0f}s",
+              flush=True)
+
     # 特征筛选（只跑一次，C 和 F 共用）
     if any(t in ("C", "F") for t in only):
         print(f"特征稳定性筛选（{a.folds} 折，训练窗口内）...", flush=True)
@@ -342,7 +384,7 @@ def main(argv=None) -> int:
     for tag in only:
         key = f"{tag}|{a.trees}|{a.top_n}|{a.half_life}|{a.smoke}"
         if key in results and not a.force:
-            print(fmt_line(tag, results[key], base_ic) + "   [缓存]")
+            print(fmt_line(tag, results[key], base_ic, a.half_life) + "   [缓存]")
             if tag == "A":
                 base_ic = results[key]["ic"]
             continue
@@ -354,7 +396,7 @@ def main(argv=None) -> int:
                   ensure_ascii=False, indent=1)
         if tag == "A":
             base_ic = res["ic"]
-        print(fmt_line(tag, res, base_ic), flush=True)
+        print(fmt_line(tag, res, base_ic, a.half_life), flush=True)
 
     # ---- 汇总表 ----
     print()
@@ -368,6 +410,8 @@ def main(argv=None) -> int:
         r = results.get(key)
         if r is None:
             continue
+        if tag == "D":
+            desc = desc + f" HL={a.half_life:g}d"
         rows.append((tag, desc, r))
     if rows:
         b_ic = next((r["ic"] for t, _, r in rows if t == "A"), None)

@@ -127,27 +127,25 @@ def industry_neutralize(y: np.ndarray, industry: np.ndarray) -> np.ndarray:
 
 
 def _rank_pct_within_row(vals: np.ndarray, codes: np.ndarray, G: int) -> np.ndarray:
-    """单行内：按组分别做 (rank-0.5)/n 的百分位排名，NaN 保持 NaN。"""
+    """单行内：按组分别做 (rank-0.5)/n 的百分位排名，NaN 保持 NaN。
+
+    n 只数**该组内的有效值**（NaN 不占名次）。实现上把 NaN 换成 +inf 后按
+    (组, 值) 做一次 lexsort：组内值有序 → 组内名次 = 当前位置 − 该组起点。
+    """
     n = vals.size
     m = np.isfinite(vals)
     out = np.full(n, np.nan, dtype=np.float64)
     if not m.any():
         return out
     v = np.where(m, vals, np.inf)
-    # 先按组、再按值排序：组内值有序后，名次 = 当前位置 - 该组起点
-    order = np.lexsort((v, codes))
-    cs = codes[order]
-    # 每组在 order 中的起点（组已连续）
-    starts = np.zeros(G, dtype=np.int64)
-    seen = np.zeros(G, dtype=bool)
-    for pos in range(n - 1, -1, -1):          # 倒序写起点，最后一次写入即最小位置
-        g = cs[pos]
-        starts[g] = pos
-        seen[g] = True
-    # 组内名次（0-based）
+    order = np.lexsort((v, codes))      # 先按组、再按值
+    cs = codes[order]                   # 组已连续（组内值升序，NaN 的 inf 排在组尾）
+    # 每组在 order 中的起点：cs 升序，用 searchsorted 一次算出
+    starts = np.searchsorted(cs, np.arange(G), side="left")
     pos = np.arange(n, dtype=np.int64)
-    rank0 = pos - starts[cs]
-    cnt = np.bincount(cs, minlength=G).astype(np.float64)
+    rank0 = pos - starts[cs]            # 组内 0-based 名次
+    cnt = np.bincount(cs[np.isfinite(v[order])], minlength=G).astype(np.float64)  # 只数有效值
+    cnt = np.maximum(cnt, 1.0)
     pct = (rank0 + 0.5) / cnt[cs]
     tmp = np.full(n, np.nan, dtype=np.float64)
     tmp[order] = pct
@@ -213,6 +211,7 @@ def _selfcheck() -> None:
     p = industry_rank(np.array([3.0, 1.0, 2.0, 7.0, np.nan, 9.0]), ind)
     assert np.allclose(p[:3], [5 / 6, 1 / 6, 3 / 6]), p
     assert np.isnan(p[4])
+    assert p[3] == 0.5, f"组内只有 1 个有效值时 rank 应为 0.5，实际 {p[3]}"
     print("industry_rank           ok:", np.round(p, 4))
 
     # 单元素行业 -> 残差 0
