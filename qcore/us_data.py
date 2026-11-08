@@ -655,8 +655,11 @@ def _dedupe_dual_class(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[dict]]:
     d = d.sort_values(["_grp", "_amt"], ascending=[True, False])
     keep_mask = ~d["_grp"].duplicated(keep="first")
     kept = d[keep_mask].set_index("_grp")["code"]
+    kept_amt = d[keep_mask].set_index("_grp")["amount"]
     dropped = [{"code": r["code"], "kept": str(kept.get(r["_grp"], "")),
-                "amount": (None if pd.isna(r["amount"]) else float(r["amount"]))}
+                "amount": (None if pd.isna(r["amount"]) else float(r["amount"])),
+                "kept_amount": (None if pd.isna(kept_amt.get(r["_grp"], np.nan))
+                                else float(kept_amt.get(r["_grp"])))}
                for _, r in d[~keep_mask].iterrows()]
     return d[keep_mask].drop(columns=["_grp", "_amt"]).reset_index(drop=True), dropped
 

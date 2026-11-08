@@ -71,7 +71,7 @@ apb/
 ### 2.1 本地网页服务
 
 ```powershell
-cd D:\Documents\量化预知
+cd C:\apb
 py -3 -m webui.server --port 8765
 ```
 
@@ -90,7 +90,7 @@ A 股 15:00 收盘，行情落地通常 15:10 之后。**15:30 是稳妥起点**
 ```bat
 @echo off
 setlocal
-cd /d D:\Documents\量化预知
+cd /d C:\apb
 set LOG=logs\live_%DATE:~0,4%%DATE:~5,2%%DATE:~8,2%.log
 echo [%DATE% %TIME%] start >> "%LOG%"
 .venv\Scripts\python.exe -m qcore.live --once >> "%LOG%" 2>&1
@@ -102,7 +102,7 @@ exit /b %RC%
 注册任务（管理员 PowerShell / CMD）：
 
 ```bat
-schtasks /Create /TN "APB-Daily" /TR "D:\Documents\量化预知\scripts\daily.bat" ^
+schtasks /Create /TN "APB-Daily" /TR "C:\apb\scripts\daily.bat" ^
   /SC DAILY /ST 15:30 /RL HIGHEST /F
 ```
 
@@ -124,10 +124,10 @@ schtasks /Create /TN "APB-Daily" /TR "D:\Documents\量化预知\scripts\daily.ba
 - **NSSM 注册为服务**（无需登录、可崩溃重启）：
 
 ```bat
-nssm install APB-Web "D:\Documents\量化预知\.venv\Scripts\python.exe" "-m webui.server --port 8765"
-nssm set APB-Web AppDirectory "D:\Documents\量化预知"
-nssm set APB-Web AppStdout "D:\Documents\量化预知\logs\web.log"
-nssm set APB-Web AppStderr "D:\Documents\量化预知\logs\web.err"
+nssm install APB-Web "C:\apb\.venv\Scripts\python.exe" "-m webui.server --port 8765"
+nssm set APB-Web AppDirectory "C:\apb"
+nssm set APB-Web AppStdout "C:\apb\logs\web.log"
+nssm set APB-Web AppStderr "C:\apb\logs\web.err"
 nssm set APB-Web AppRotateFiles 1
 nssm set APB-Web AppRotateBytes 10485760
 nssm start APB-Web
@@ -341,7 +341,7 @@ h = RotatingFileHandler("logs/web.log", maxBytes=10 * 1024 * 1024, backupCount=1
 **（3）Windows 定期清理**（任务计划每周日 03:00）
 
 ```powershell
-Get-ChildItem D:\Documents\量化预知\logs\*.log |
+Get-ChildItem C:\apb\logs\*.log |
   Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-30) } |
   Remove-Item -Force
 ```
@@ -362,9 +362,9 @@ Get-ChildItem D:\Documents\量化预知\logs\*.log |
 **Windows（robocopy，镜像到移动硬盘或 NAS）**
 
 ```bat
-robocopy "D:\Documents\量化预知\configs"          "E:\apb-bak\configs"          /MIR /R:2 /W:5 /LOG+:E:\apb-bak\bak.log
-robocopy "D:\Documents\量化预知\data\pred_ledger" "E:\apb-bak\pred_ledger"     /MIR /R:2 /W:5 /LOG+:E:\apb-bak\bak.log
-robocopy "D:\Documents\量化预知\data\state"       "E:\apb-bak\state"            /MIR /R:2 /W:5 /LOG+:E:\apb-bak\bak.log
+robocopy "C:\apb\configs"          "E:\apb-bak\configs"          /MIR /R:2 /W:5 /LOG+:E:\apb-bak\bak.log
+robocopy "C:\apb\data\pred_ledger" "E:\apb-bak\pred_ledger"     /MIR /R:2 /W:5 /LOG+:E:\apb-bak\bak.log
+robocopy "C:\apb\data\state"       "E:\apb-bak\state"            /MIR /R:2 /W:5 /LOG+:E:\apb-bak\bak.log
 ```
 
 **fnOS（rsync 到另一块盘 / 另一台机器）**

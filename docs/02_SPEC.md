@@ -124,7 +124,7 @@ def compute_signals(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 ---
 
-## 3. 数据集契约（`qcore/dataset.py`，Lead 负责）
+## 3. 数据集契约（`qcore/dataset.py`）
 
 ```python
 @dataclass
@@ -247,14 +247,14 @@ def run_walkforward(p3d: Panel3D, cfg: RunConfig) -> dict:
 
 ```
 qcore/
-  data.py        # 数据层（Lead，已完成）
-  signals.py     # 信号库（signal-smith）
-  dataset.py     # 3D 面板 + regime（Lead）
-  learner.py     # 自学习权重器（Lead）
-  engine.py      # 走样外引擎（Lead）
-  metrics.py     # 指标（metrics-dev）
-  backtest.py    # 组合回测（metrics-dev）
-  report.py      # 报告生成（metrics-dev）
+  data.py        # 数据层（多源、后复权、缓存）
+  signals.py     # 信号库（73 个参数化变体）
+  dataset.py     # 3D 面板 + regime
+  learner.py     # 自学习权重器
+  engine.py      # 走样外引擎
+  metrics.py     # 指标（IC/命中率/分层收益）
+  backtest.py    # 组合回测
+  report.py      # 报告生成
 tests/           # 单测（各自负责）
 docs/            # 调研与设计文档
 configs/         # 参数配置

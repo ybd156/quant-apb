@@ -92,7 +92,7 @@ UNIV shape (2877, 39)  True share = 0.8297
 
 ---
 
-## 3. 复权口径踩坑记录（工程日志，Lead 指定）
+## 3. 复权口径踩坑记录（工程日志）
 
 这是本项目**最危险的一次**数据缺陷，差一点让全部回测数字变成垃圾。
 
@@ -330,7 +330,7 @@ A 股长期停牌（重组、股改、借壳）后复牌首日**没有涨跌幅�
 | 2 | `qcore/data.py`（已修） | ~~致命~~ | `fqt=1` 减法复权导致负价格/近零价，4023 个假收益，最大 +17400%。已改 `ADJUST=2`。 |
 | 3 | `qcore/dataset.py` `RET` 构造 | 高 | 停牌复牌结构性跳变（176 次，最大 +394%）未从 `RET` 剔除。 |
 | 4 | `qcore/dataset.py` UNIV | 中 | `n_univ=100 > N=39`，点对点选池**恒真、空转**；生存者偏差实际未修正。 |
-| 5 | `qcore/engine.py` placebo | 已修 | 原 `size=(N,T,S)` 与 `DIR (T,N,S)` 维度不符，必然 `ValueError`；且逐日独立翻符号会摧毁自相关。Lead 已改为 `placebo_kind` 并保留结构性。 |
+| 5 | `qcore/engine.py` placebo | 已修 | 原 `size=(N,T,S)` 与 `DIR (T,N,S)` 维度不符，必然 `ValueError`；且逐日独立翻符号会摧毁自相关。已改为 `placebo_kind` 并保留结构性。 |
 | 6 | `qcore/dataset.py:truncate()` | 中 | 切的是**已算好的** `RET`，含未来开盘价。**不得**用作泄漏检验底座（会假通过）；应用 `build_dataset(cutoff=...)`。 |
 | 7 | `audit/leak_scan.py`（本审计） | 已修 | 初版把 docstring 里的 "shift(-n)" 当代码报 HIGH（假阳性），且 `np.where` 噪声淹没结果。已加 docstring 屏蔽 + 分级。 |
 

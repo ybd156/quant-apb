@@ -13,7 +13,7 @@
     render(res, metrics, bt, 'reports/report.md')
 
 产出为 UTF-8 中文 Markdown，表格全部用管道表格，便于直接贴进 README 或文档。
-「结论 / 局限」两节留占位段落，由 Lead 按实际结果填写。
+「结论 / 局限」两节留占位段落，按实际结果填写。
 """
 from __future__ import annotations
 

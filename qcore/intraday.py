@@ -75,7 +75,7 @@ def _ensure_dirs() -> None:
 
 
 def _log(msg: str) -> None:
-    """控制台是 GBK —— 这里只允许 ASCII。中文一律写进 .md 文件。"""
+    """日志只输出 ASCII；中文一律写进 .md 文件，避免编码问题。"""
     line = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
     print(line, flush=True)
     try:
@@ -402,6 +402,7 @@ def step(codes: Optional[Sequence[str]] = None, horizon_min: int = 1, klt: int =
         return {"ok": False, "reason": "no_data", "codes": codes, "seconds": 0.0}
 
     learner = IntradayLearner.load(horizon_min=horizon_min)
+    _expire_stale(now.strftime("%Y-%m-%d"), verbose=verbose)
     ledgers: Dict[str, List[dict]] = {}
     new_by_date: Dict[str, List[dict]] = {}
     frames_used: Dict[str, pd.DataFrame] = {}
@@ -642,6 +643,7 @@ def session_review(date: Optional[str] = None, horizon_min: int = 1,
         mean_gross = float(gross_bps.mean()) if gross_bps.size else float("nan")
         mean_net = float(net_bps.mean()) if net_bps.size else float("nan")
         total_net_bps = float(net_bps.sum()) if net_bps.size else 0.0
+        avg_abs_move = float(np.abs(rets[bets]).mean() * 1e4) if gross_bps.size else float("nan")
         # 分时段
         seg: Dict[str, List[float]] = {}
         for r in scored:
@@ -669,6 +671,7 @@ def session_review(date: Optional[str] = None, horizon_min: int = 1,
     else:
         gross = np.zeros(0)
         hit_gross = hit_net = mean_gross = mean_net = float("nan")
+        avg_abs_move = float("nan")
         total_net_bps = 0.0
         seg_rows = []
         ic_mean = ic_std = icir = float("nan")
@@ -696,6 +699,8 @@ def session_review(date: Optional[str] = None, horizon_min: int = 1,
         "hit_gross": hit_gross, "hit_net": hit_net,
         "mean_gross_bps": mean_gross, "mean_net_bps": mean_net,
         "total_net_bps": total_net_bps,
+        "avg_abs_move_bps": avg_abs_move,
+        "edge_at_60_bps": (0.2 * avg_abs_move) if np.isfinite(avg_abs_move) else float("nan"),
         "ic_mean": ic_mean, "ic_std": ic_std, "icir": icir,
         "segments": seg_rows, "signals": sig_stats, "top_weights": top,
         "per_day_bets": per_day_bets, "daily_cost_pct": daily_cost_pct,
@@ -713,11 +718,69 @@ def session_review(date: Optional[str] = None, horizon_min: int = 1,
     return res
 
 
-def _signal_stats(scored: List[dict]) -> List[Tuple[str, int, float]]:
-    """每条信号在台账窗口内的毛方向命中率（用台账里的 contrib 反推太重，直接重算）。"""
+def _signal_stats(scored: List[dict]) -> List[Tuple[str, int, float, float]]:
+    """每条信号在台账上的毛方向命中率与毛均值（用封存的 dir_vec，样本外）。"""
     if not scored:
         return []
-    return []
+    sids = list(INTRADAY_SIDS)
+    n = len(sids)
+    hits = np.zeros(n)
+    cnt = np.zeros(n)
+    pnl = np.zeros(n)
+    for r in scored:
+        v = r.get("dir_vec")
+        ret = r.get("ret")
+        if v is None or ret is None:
+            continue
+        d = np.asarray(v, dtype=np.float64)
+        if d.size != n:
+            continue
+        sgn = np.sign(float(ret))
+        m = d != 0
+        if not m.any():
+            continue
+        hits[m] += (np.sign(d[m]) == sgn)
+        cnt[m] += 1.0
+        pnl[m] += np.sign(d[m]) * float(ret)
+    rows: List[Tuple[str, int, float, float]] = []
+    for j, sid in enumerate(sids):
+        if cnt[j] > 0:
+            rows.append((sid, int(cnt[j]), float(hits[j] / cnt[j]),
+                         float(pnl[j] / cnt[j] * 1e4)))
+    rows.sort(key=lambda x: -x[1])
+    return rows
+
+
+def _expire_stale(today: str, verbose: bool = True) -> int:
+    """把历史日期里永远不会到期的 pending 记录标记为 expired（诚实：不伪造回填）。
+
+    分钟线隔夜即消失 ⇒ 昨天没评估完的样本永远无法评估，只能标 expired，
+    绝不参与命中率/IC/权重更新。
+    """
+    n = 0
+    try:
+        files = [f for f in os.listdir(INTRADAY_DIR)
+                 if f.startswith("ledger_") and f.endswith(".jsonl")]
+    except Exception:      # noqa: BLE001
+        return 0
+    for f in files:
+        d = f[len("ledger_"):-len(".jsonl")]
+        date = f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        if date >= today:
+            continue
+        recs = load_ledger(date)
+        changed = False
+        for r in recs:
+            if r.get("status") == "pending":
+                r["status"] = "expired"
+                r["expired_reason"] = "minute data gone (no historical minutes)"
+                changed = True
+                n += 1
+        if changed:
+            write_ledger(date, recs)
+            if verbose:
+                _log(f"expire: {date} marked stale pending -> expired")
+    return n
 
 
 def _latest_ledger_date() -> Optional[str]:
@@ -758,6 +821,8 @@ def _render_md(res: Dict, learner: IntradayLearner) -> str:
     L.append("")
     L.append(f"- 单笔往返成本：**{res['rt_bps']:.2f} bps**"
              f"（`effective_cost_bps(\"CN\", 1e5)`，含佣金/印花税/过户费/半价差）")
+    L.append(f"- 1 分钟平均绝对波动：**{_f(res['avg_abs_move_bps'], 2)} bps**"
+             f"（= 方向全对时每笔能赚到的上限量级）")
     L.append(f"- 盈亏平衡所需毛边际：**{res['breakeven_bps']:.2f} bps/笔**")
     L.append(f"- 每标的每日下注次数：{res['per_day_bets']:.1f}")
     L.append(f"- **日成本拖累：{res['daily_cost_pct']:.2f}%** ⇒ "
@@ -773,6 +838,17 @@ def _render_md(res: Dict, learner: IntradayLearner) -> str:
                  f"1 分钟频率下每天最多 {res['per_day_bets']:.0f} 次换仓，"
                  f"仅成本一项就要吃掉日 {res['daily_cost_pct']:.2f}%、年 {res['annual_cost_pct']:.0f}%。"
                  "这不是参数问题，是**频率问题**。")
+        L.append("")
+        L.append(f"**为什么命中率再高也救不回来**：1 分钟的平均绝对波动只有 "
+                 f"**{_f(res['avg_abs_move_bps'], 2)} bps**。即使命中率做到 60%（远超任何分钟级信号的实测水平），"
+                 f"毛边际也只有 (2×0.60−1)×{_f(res['avg_abs_move_bps'], 2)} ≈ "
+                 f"**{_f(res['edge_at_60_bps'], 2)} bps**，仍不到 {res['rt_bps']:.1f} bps 成本的 "
+                 f"{_f(res['edge_at_60_bps'] / res['rt_bps'] * 100, 1)}%。"
+                 "分子（1 分钟能提供的波动）比分母（一次往返成本）小一个数量级 —— 频率本身就是错的。")
+        L.append("")
+        L.append(f"注：当日毛命中率 {_f(res['hit_gross'], 3)} 低于 50%，说明该日集成方向系统性偏反"
+                 "（单日单样本，不做因果解释）。但**结论不依赖命中率**："
+                 "只要毛边际跨不过成本门槛，这个频率就不可交易。")
     L.append("")
     L.append("## 4. 分时段")
     L.append("")
@@ -789,7 +865,20 @@ def _render_md(res: Dict, learner: IntradayLearner) -> str:
     L.append(f"- IC 均值 {_f(res['ic_mean'], 4)}，标准差 {_f(res['ic_std'], 4)}，"
              f"ICIR {_f(res['icir'], 3)}（同一 bar 上跨标的的 Spearman，需 ≥3 只才有值）")
     L.append("")
-    L.append("## 6. 各信号权重 Top5（当前状态）")
+    L.append("## 6. 各信号毛表现（样本外）")
+    L.append("")
+    if res["signals"]:
+        L.append("| 信号 | 发声笔数 | 毛命中率 | 毛均值 (bps) | 扣成本后 (bps) |")
+        L.append("|---|---|---|---|---|")
+        for sid, n, h, m in res["signals"]:
+            L.append(f"| {sid} | {n} | {h:.3f} | {m:.2f} | {m - res['rt_bps']:.2f} |")
+        L.append("")
+        L.append("> 每一条的\"扣成本后\"都是负的 —— 单笔 19 bps 的成本门槛，"
+                 "任何分钟级信号都跨不过去。")
+    else:
+        L.append("_无样本_")
+    L.append("")
+    L.append("## 7. 各信号权重 Top5（当前状态）")
     L.append("")
     L.append("| 信号 | 权重 | 后验命中率 | 更新次数 | 平均 payoff |")
     L.append("|---|---|---|---|---|")
@@ -797,7 +886,7 @@ def _render_md(res: Dict, learner: IntradayLearner) -> str:
         L.append(f"| {t['sid']} | {t['weight']:.4f} | {t['hit_rate']:.3f} | "
                  f"{t['n_updates']} | {t['mean_payoff']:+.4f} |")
     L.append("")
-    L.append("## 7. 局限（必须读）")
+    L.append("## 8. 局限（必须读）")
     L.append("")
     L.append("1. **无法回测**：分钟数据只有当日，样本量按天累积，一天最多 240×N 条；"
              "任何\"历史分钟回测\"都是伪造。")

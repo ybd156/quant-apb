@@ -182,7 +182,7 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
             _cnt = _act.sum(axis=0)
             _m = _cnt > 0
             _pay[_t, _m] = np.where(_act, _y, 0.0).sum(axis=0)[_m] / _cnt[_m]
-        _corr = pd.DataFrame(_pay).corr().fillna(0.0).to_numpy()
+        _corr = pd.DataFrame(_pay).corr().fillna(0.0).to_numpy().copy()
         np.fill_diagonal(_corr, 1.0)
         eff_corr = RK.effective_n_corr(w_final, _corr)
         _abs = np.abs(_corr - np.eye(_S))

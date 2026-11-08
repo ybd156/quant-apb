@@ -10,7 +10,7 @@
   7. 可信度不是常数：至少出现 3 个不同取值，且 news < announcement < kline
   8. daily_summary 扁平摘要可用
 
-注意：控制台为 GBK，**print 一律 ASCII**，中文只进数据不进口志。
+注意：**print 一律 ASCII**，中文只进数据不进日志。
 """
 from __future__ import annotations
 

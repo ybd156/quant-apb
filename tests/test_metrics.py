@@ -4,7 +4,7 @@
 运行：python -m tests.test_metrics
 
 原则：每个断言都有解析可算的真值（完全正相关 -> IC=1、命中率=1），
-而不是"跑通就行"。所有 print 只用英文（控制台 GBK，中文会炸）。
+而不是"跑通就行"。所有 print 只用 ASCII。
 """
 from __future__ import annotations
 

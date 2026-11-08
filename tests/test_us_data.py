@@ -276,8 +276,10 @@ def test_pool():
                f"GOOGL={'GOOGL' in codes} GOOG={'GOOG' in codes} "
                f"BRK_A={'BRK_A' in codes} BRK_B={'BRK_B' in codes}")
         _check("pool keeps higher-amount class",
-               all((d.get("kept") not in codes) or True for d in ded),
-               f"kept={[d.get('kept') for d in ded]}")
+               all((d.get("kept") in codes and d.get("code") not in codes
+                    and (d.get("kept_amount") or 0) >= (d.get("amount") or 0))
+                   for d in ded),
+               f"deduped={[(d.get('code'), d.get('kept')) for d in ded]}")
         p2 = ud.get_pool_us(20, min_amount=1e9)
         _check("pool min_amount filter runs", len(p2) > 0 and
                bool((p2["amount"].dropna() >= 1e9).all()), f"n={len(p2)}")
