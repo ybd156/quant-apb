@@ -468,6 +468,36 @@ def expand_sector(name: str, available: Iterable[str]) -> List[str]:
     return hit if hit else [name]
 
 
+def _resolve_series(sec: str, sector_ret: Dict[str, pd.Series]
+                    ) -> Optional[Tuple[str, pd.Series, str]]:
+    """
+    把日历里的通用板块名落到实际可用的行业序列上。
+
+    返回 (用于取数的 key, 序列, 说明)：
+      * 精确命中 -> 直接用
+      * 模糊命中多个行业（如 医药 -> 化学制药+医疗服务）-> **等权平均**成一条合成序列
+      * 一个都没命中 -> None（调用方按"缺数据"降级，绝不偷换成别的板块）
+    """
+    if not isinstance(sector_ret, dict) or not sector_ret:
+        return None
+    if sec in sector_ret:
+        return sec, sector_ret[sec], sec
+    hits = [k for k in expand_sector(sec, sector_ret.keys()) if k in sector_ret]
+    if not hits:
+        return None
+    if len(hits) == 1:
+        return hits[0], sector_ret[hits[0]], hits[0]
+    mats = [_to_ret_series(sector_ret[k]) for k in hits]
+    mats = [m for m in mats if m is not None and len(m)]
+    if not mats:
+        return None
+    comp = pd.concat(mats, axis=1).mean(axis=1, skipna=True).dropna()
+    if len(comp) < 30:
+        return None
+    comp.name = sec
+    return sec, comp, "+".join(hits)
+
+
 # ------------------------------------------------------------------ 小工具
 def _to_date_str(d) -> str:
     ts = pd.Timestamp(d)
@@ -787,6 +817,9 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
     * n < min_n 的行仍保留但 `insufficient=True`。
 
     sector_ret : dict[str, Series] 或单个 Series（单板块场景）
+                 字典的键是**实际行业字段**（东财 f100，如 银行Ⅱ/证券Ⅱ/化学制药）；
+                 事件里的通用板块名（银行/券商/医药）经 `_resolve_series` 模糊映射，
+                 命中多个行业时按**等权平均**合成一条序列（口径见 expand_sector）。
     返回 DataFrame，列：
       type, sector, horizon, n, mean_car, mean_car_raw, median_car, se, t, p,
       ci_lo, ci_hi, win_rate, mean_pre_car, conflict_rate, stability, n_years,
@@ -821,13 +854,15 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
                 n_skip_dir += 1
                 continue
             if single:
-                ser = sector_ret
+                ser, used = sector_ret, str(getattr(sector_ret, "name", sec) or sec)
             else:
-                ser = sector_ret.get(sec)
-            if ser is None:
-                n_skip_data += 1
-                warnings.append(f"{ev.eid}/{sec}: sector series missing")
-                continue
+                res = _resolve_series(sec, sector_ret)
+                if res is None:
+                    n_skip_data += 1
+                    warnings.append(f"{ev.eid}/{sec}: sector series missing "
+                                    f"(no exact/alias match in sector_ret keys)")
+                    continue
+                _rk, ser, used = res
             key = (sec, ev.date, ev_lag)
             if key not in cache:
                 al = _align(ser, market_ret)
@@ -854,7 +889,7 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
                     "type": ev.type, "subtype": ev.subtype, "sector": sec,
                     "horizon": int(h), "eid": ev.eid, "date": ev.date,
                     "year": ev.year, "direction": d,
-                    "car": float(car), "signed_car": float(d * car),
+                    "car": float(car), "signed_car": float(d * car), "series": used,
                     "pre_car": float(pre) if np.isfinite(pre) else float("nan"),
                 })
 
@@ -899,8 +934,10 @@ def _factor_row(g: pd.DataFrame, typ: str, sec: str, h: int,
     conflict = float("nan")
     if len(pre_ok) and np.isfinite(st["mean"]) and st["mean"] != 0:
         conflict = float((np.sign(pre_ok) != np.sign(st["mean"])).mean())
+    series_used = ("+".join(sorted(set(g["series"]))) if "series" in g.columns else "")
     return {
         "type": typ, "sector": sec, "horizon": int(h), "n": st["n"],
+        "series": series_used,
         "mean_car": st["mean"], "mean_car_raw": float(g["car"].mean()),
         "median_car": st["median"], "se": st["se"], "t": st["t"], "p": st["p"],
         "ci_lo": st["lo"], "ci_hi": st["hi"], "win_rate": st["win_rate"],
@@ -911,7 +948,7 @@ def _factor_row(g: pd.DataFrame, typ: str, sec: str, h: int,
 
 
 def _empty_factor_table() -> pd.DataFrame:
-    cols = ["type", "sector", "horizon", "n", "mean_car", "mean_car_raw", "median_car",
+    cols = ["type", "sector", "horizon", "n", "series", "mean_car", "mean_car_raw", "median_car",
             "se", "t", "p", "ci_lo", "ci_hi", "win_rate", "mean_pre_car",
             "conflict_rate", "stability", "n_years", "insufficient", "level"]
     return pd.DataFrame(columns=cols)

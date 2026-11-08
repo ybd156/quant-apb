@@ -39,3 +39,7 @@ data/tmp*
 data/info/
 data/intraday/
 data/claims/
+
+# 临时脚本
+_*.py
+tmp/
