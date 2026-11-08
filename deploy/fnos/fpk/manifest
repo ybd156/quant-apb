@@ -1,0 +1,15 @@
+appname         = apb
+version         = 0.0.1
+display_name    = APB 量化预知
+platform        = x86
+maintainer      = ybd156
+maintainer_url  = https://github.com/ybd156/quant-apb
+distributor     = ybd156
+distributor_url = https://github.com/ybd156/quant-apb
+install_type    = root
+desktop_uidir   = ui
+desktop_applaunchname = apb.Application
+service_port    = 8765
+desc            = 自学习参数体：信号权重在线学习 + 点对点重放 + 统计严谨评估。研究工具，不构成投资建议。
+source          = thirdparty
+checksum        =

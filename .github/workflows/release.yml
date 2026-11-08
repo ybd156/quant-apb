@@ -1,6 +1,7 @@
 name: Release
 
 # 打 tag 即发布：git tag v0.0.1 && git push origin v0.0.1
+# 所有构建（Docker 镜像 + fnOS .fpk）都在 GitHub 上完成，本地不产出任何二进制。
 on:
   push:
     tags: ["v*"]
@@ -30,7 +31,7 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: 单元测试
+      - name: 单元测试（离线夹具，不依赖行情缓存）
         run: |
           python -m tests.test_signals
           python -m tests.test_metrics
@@ -41,18 +42,18 @@ jobs:
         run: |
           V=$(cat VERSION)
           PYV=$(python -c "import qcore;print(qcore.__version__)")
-          echo "VERSION=$V qcore=$PYV tag=${{ github.ref_name }}"
+          echo "VERSION=$V qcore=$PYV"
           test "$V" = "$PYV" || { echo "VERSION 与 qcore.__version__ 不一致"; exit 1; }
 
-  # ---------------- 2. 多架构构建并推 GHCR ----------------
-  build:
+  # ---------------- 2. 解析版本 ----------------
+  meta:
     needs: test
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: 解析版本
-        id: ver
+      - id: ver
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ github.event.inputs.tag }}"
@@ -62,33 +63,28 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "version=${TAG#v}" >> $GITHUB_OUTPUT
 
-      - name: QEMU（支持 arm64，很多 NAS 是 ARM）
-        uses: docker/setup-qemu-action@v3
-
-      - name: Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: 登录 GHCR
-        uses: docker/login-action@v3
+  # ---------------- 3. Docker 镜像（多架构）----------------
+  docker:
+    needs: meta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 镜像元数据
-        id: meta
+      - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=raw,value=${{ steps.ver.outputs.version }}
-            type=raw,value=${{ steps.ver.outputs.tag }}
+            type=raw,value=${{ needs.meta.outputs.version }}
+            type=raw,value=${{ needs.meta.outputs.tag }}
             type=raw,value=latest
-          labels: |
-            org.opencontainers.image.version=${{ steps.ver.outputs.version }}
-
-      - name: 构建并推送（amd64 + arm64）
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -98,59 +94,104 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: 打包发布附件
+  # ---------------- 4. fnOS .fpk 安装包 ----------------
+  fpk:
+    needs: meta
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [x86, arm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 生成图标（可复现）
         run: |
-          mkdir -p dist
+          pip install --quiet pillow
+          python scripts/make_icons.py
+      - name: 构建 fpk
+        run: |
+          chmod +x scripts/build-fpk.sh
+          ./scripts/build-fpk.sh "${{ needs.meta.outputs.version }}" "${{ matrix.platform }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fpk-${{ matrix.platform }}
+          path: apb_*_${{ matrix.platform }}.fpk
+          if-no-files-found: error
+
+  # ---------------- 5. 汇总发布 ----------------
+  release:
+    needs: [meta, docker, fpk]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 准备附件
+        run: |
           cp docker-compose.yml dist/
-          cp deploy/fnos/*.md dist/ 2>/dev/null || true
-          cat > dist/INSTALL.md <<EOF
-          # APB v${{ steps.ver.outputs.version }} 安装
+          cp deploy/fnos/README.md dist/FNOS-INSTALL.md
+          cat > dist/INSTALL.md <<'EOF'
+          # APB 安装
 
-          ## 方式一：Docker Compose（推荐，飞牛 fnOS 用这个）
-          \`\`\`bash
+          ## 方式一：fnOS .fpk（推荐给飞牛用户）
+          在 fnOS「应用中心 → 手动安装」选择 `apb_<version>_x86.fpk`（ARM 设备选 `_arm`）。
+          安装后会自动拉取 Docker 镜像并启动，端口 8765。
+
+          ## 方式二：Docker Compose
+          ```bash
           mkdir -p /vol1/docker/apb && cd /vol1/docker/apb
-          # 把本包的 docker-compose.yml 放进来
+          # 放入本包的 docker-compose.yml
           docker compose up -d
-          \`\`\`
+          ```
+
+          ## 方式三：直接跑镜像
+          ```bash
+          docker run -d --name apb --restart unless-stopped \
+            -p 8765:8765 -v ./data:/app/data -e TZ=Asia/Shanghai \
+            ghcr.io/ybd156/quant-apb:latest
+          ```
+
+          ## 首次初始化
+          ```bash
+          docker exec -it apb python -m qcore.pipeline --pool 300 --start 2013-01-01
+          ```
+
           打开 http://<NAS-IP>:8765
-
-          ## 方式二：直接跑镜像
-          \`\`\`bash
-          docker run -d --name apb --restart unless-stopped \\
-            -p 8765:8765 -v ./data:/app/data \\
-            -e TZ=Asia/Shanghai \\
-            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
-          \`\`\`
-
-          镜像同时提供 amd64 与 arm64。
           EOF
-          zip -r dist/apb-${{ steps.ver.outputs.version }}.zip docker-compose.yml deploy VERSION README.md
+          (cd dist && zip -r apb-source.zip docker-compose.yml VERSION README.md INSTALL.md FNOS-INSTALL.md)
           ls -la dist
 
-      - name: 创建 GitHub Release
+      - name: 创建 / 更新 GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ steps.ver.outputs.tag }}"
+          TAG="${{ needs.meta.outputs.tag }}"
+          VER="${{ needs.meta.outputs.version }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "release $TAG 已存在，上传附件"
             gh release upload "$TAG" dist/* --clobber
           else
             gh release create "$TAG" dist/* \
               --title "APB $TAG" \
               --generate-notes \
-              --notes-start-tag "$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo '')" \
-              --notes "
-          ## 安装
+              --notes "## 安装
 
+          ### fnOS（飞牛）原生安装包
+          下载 \`apb_${VER}_x86.fpk\`（ARM 设备用 \`_arm\`），在「应用中心 → 手动安装」导入。
+
+          ### Docker
           \`\`\`bash
           docker run -d --name apb --restart unless-stopped \\
             -p 8765:8765 -v ./data:/app/data -e TZ=Asia/Shanghai \\
-            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
+            ghcr.io/${{ github.repository }}:${VER}
           \`\`\`
 
-          支持 **amd64 / arm64**（NAS 常见两种架构都覆盖）。
+          支持 **amd64 / arm64**。
 
-          > 本项目是研究工具，输出为统计检验结果，不构成投资建议。
-          "
+          > 研究工具，输出为统计检验结果，不构成投资建议。"
           fi

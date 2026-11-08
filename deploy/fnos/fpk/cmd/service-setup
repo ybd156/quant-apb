@@ -1,0 +1,42 @@
+#!/bin/sh
+# APB 服务控制脚本（fnOS 调用）
+# 采用 Docker 后端：宿主机不需要 Python/numpy/pandas，全部在容器里。
+set -e
+
+APP_NAME="apb"
+IMAGE="ghcr.io/ybd156/quant-apb:${APB_TAG:-latest}"
+PKGVAR="${TRIM_PKGVAR:-/var/packages/${APP_NAME}/var}"
+DATA_DIR="${PKGVAR}/data"
+LOG_DIR="${PKGVAR}/logs"
+PORT="${APB_PORT:-8765}"
+
+mkdir -p "$DATA_DIR" "$LOG_DIR"
+
+start_service() {
+    if docker ps -a --format '{{.Names}}' | grep -qx "$APP_NAME"; then
+        docker start "$APP_NAME" >/dev/null 2>&1 || true
+    else
+        docker run -d --name "$APP_NAME" \
+            --restart unless-stopped \
+            -p "${PORT}:8765" \
+            -e TZ=Asia/Shanghai \
+            -e APB_HOST=0.0.0.0 \
+            -v "${DATA_DIR}:/app/data" \
+            -v "${LOG_DIR}:/app/logs" \
+            "$IMAGE" >/dev/null
+    fi
+    echo "APB started on port ${PORT}"
+}
+
+stop_service() {
+    docker stop "$APP_NAME" >/dev/null 2>&1 || true
+    echo "APB stopped"
+}
+
+case "$1" in
+    start)   start_service ;;
+    stop)    stop_service ;;
+    restart) stop_service; start_service ;;
+    status)  docker ps --filter "name=^${APP_NAME}$" --format '{{.Status}}' ;;
+    *)       echo "usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

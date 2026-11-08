@@ -1,11 +1,46 @@
 # 飞牛 fnOS 部署指南
 
+> ⚠️ **构建全部在 GitHub Actions 完成，本地不构建、不产出任何二进制。**
+> 所有安装包（`.fpk` 与 Docker 镜像）都从 [Releases](https://github.com/ybd156/quant-apb/releases) 下载。
+> 本地只需要 `git clone` 读源码，不需要装 Docker、不需要 Python 打包工具。
+
+---
+
+## 方式一：fpk 原生安装包（最省事）
+
+1. 打开 [Releases](https://github.com/ybd156/quant-apb/releases) 页面
+2. 按设备架构下载：
+   - x86_64（绝大多数 N100/NAS）→ `apb_<version>_x86.fpk`
+   - ARM（部分 ARM NAS）→ `apb_<version>_arm.fpk`
+3. fnOS → **应用中心 → 手动安装** → 选择该 `.fpk`
+4. 安装完成后自动拉取镜像并启动，浏览器打开 `http://<NAS-IP>:8765`
+
+fpk 内部结构（源码在 `deploy/fnos/fpk/`，构建脚本 `scripts/build-fpk.sh`）：
+
+```
+manifest            元数据（appname/version/platform/checksum）
+app.tgz             应用载荷（qcore + webui + VERSION）
+cmd/service-setup   服务控制（Docker 后端，宿主机无需 Python）
+config/privilege    运行权限
+config/resource     端口映射 + 数据共享目录
+ui/config           桌面入口
+ui/images/256.png   图标
+APB.sc              端口转发
+```
+
+> fpk 采用 **Docker 后端**：安装包很小（约 200 KB），真正运行的是 GHCR 上的镜像。
+> 好处是宿主机不需要 Python/numpy/pandas，也不会因为系统 Python 版本不同而崩。
+
+---
+
+## 方式二：Docker Compose
+
 > fnOS（飞牛私有云）基于 Debian，自带 Docker 应用中心。
 > 本项目以**容器**方式交付，amd64 / arm64 都有镜像。
 
 ---
 
-## 一、准备
+## 三、准备（以下为 Docker 方式）
 
 | 项 | 要求 |
 |---|---|
@@ -17,7 +52,7 @@
 
 ---
 
-## 二、安装（推荐：Docker Compose）
+### 3.1 安装（Docker Compose）
 
 ### 1. 建目录
 
@@ -69,7 +104,7 @@ docker exec -it apb python -m qcore.pipeline --pool 300 --start 2013-01-01
 
 ---
 
-## 三、安装（备选：图形界面）
+### 3.2 安装（图形界面）
 
 1. fnOS → **应用中心** → **Docker** → **Compose**
 2. 新建项目，粘贴上面的 `docker-compose.yml`

@@ -1,0 +1,16 @@
+{
+    "port-config": {
+        "protocol-file": "APB.sc"
+    },
+    "data-share": {
+        "shares": [
+            {
+                "name": "APB",
+                "permission": {
+                    "rw": ["apb"]
+                }
+            }
+        ]
+    },
+    "systemd-unit": {}
+}
