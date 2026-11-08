@@ -1,0 +1,60 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>APB 每日研判 · 2026-11-06</title>
+<style>
+body{background:#11141a;color:#e2e8f0;font:14px/1.7 -apple-system,"Microsoft YaHei",sans-serif;margin:0;padding:24px}
+.wrap{max-width:1040px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px} h2{font-size:17px;margin:28px 0 10px;border-left:3px solid #60a5fa;padding-left:10px}
+.muted{color:#8c98aa;font-size:12px}
+.card{background:#181c24;border:1px solid #2d3440;border-radius:10px;padding:16px;margin:12px 0}
+.kpi{display:flex;gap:12px;flex-wrap:wrap}
+.kpi div{flex:1;min-width:150px;background:#181c24;border:1px solid #2d3440;border-radius:10px;padding:14px}
+.kpi b{display:block;font-size:22px;margin-top:4px}
+img{width:100%;border-radius:8px;margin:8px 0;border:1px solid #2d3440}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:6px 8px;border-bottom:1px solid #2d3440;text-align:left}
+th{color:#8c98aa;font-weight:500} .num{text-align:right;font-variant-numeric:tabular-nums}
+.warn{background:#3a2d12;border-color:#7a5a12} .ok{background:#12301f;border-color:#1f5a34}
+</style></head><body><div class="wrap">
+<h1>APB 每日研判</h1>
+<div class="muted">决策日 2026-11-06 · 只用当日及以前数据 · 样本 283 只 / 3360 个交易日 · 预测周期 5 日</div>
+
+<h2>一、结论</h2>
+<div class="card ">
+<p><b>信号方向系统性做反（IC t=-2.48）→ 系统已自动反向使用；但反向后的优势尚未达到显著，只可小仓位验证</b></p>
+<p class="muted">Meta 层方向：反着用（IC t=-2.51）</p>
+</div>
+
+<h2>二、关键数字</h2>
+<div class="kpi">
+<div>当前市场状态<b>下跌·高波</b></div>
+<div>关注标的<b>600039</b><span class="muted">综合分 +0.457</span></div>
+<div>可信度<b>48.5%</b><span class="muted">low · n=36478</span></div>
+<div>横截面 IC<b>-0.0185</b><span class="muted">HAC t=-2.48</span></div>
+</div>
+
+<h2>三、当前形态</h2>
+<div class="card"></div>
+<img src="img/candle_600039.png" alt="当前形态">
+
+<h2>四、市场状态与净值</h2>
+<img src="img/regime.png" alt="市场状态">
+<img src="img/nav.png" alt="净值">
+
+<h2>五、预测力与权重演化</h2>
+<img src="img/ic.png" alt="IC">
+<img src="img/weights.png" alt="权重">
+
+<h2>六、当前最受信任的信号</h2>
+<table><thead><tr><th>信号</th><th>族</th><th>权重</th><th>命中率</th><th>更新次数</th></tr></thead>
+<tbody><tr><td>ma_align_5_10_20_60</td><td>ma_slope</td><td class='num'>0.0254</td><td class='num'>0.534</td><td class='num'>3334</td></tr><tr><td>mom_20</td><td>mom</td><td class='num'>0.0225</td><td class='num'>0.532</td><td class='num'>3334</td></tr><tr><td>pat_engulf_bear</td><td>pattern</td><td class='num'>0.0216</td><td class='num'>0.546</td><td class='num'>3001</td></tr><tr><td>rs_60</td><td>rs</td><td class='num'>0.0214</td><td class='num'>0.534</td><td class='num'>3334</td></tr><tr><td>vol_shrink_10_0p8_60</td><td>vol_shrink</td><td class='num'>0.0211</td><td class='num'>0.519</td><td class='num'>3035</td></tr><tr><td>atr_sq_14_0p6</td><td>atr_stop</td><td class='num'>0.0206</td><td class='num'>0.577</td><td class='num'>1712</td></tr><tr><td>rs_20</td><td>rs</td><td class='num'>0.0206</td><td class='num'>0.518</td><td class='num'>3334</td></tr><tr><td>vol_shrink_20_0p7_60</td><td>vol_shrink</td><td class='num'>0.0197</td><td class='num'>0.535</td><td class='num'>2811</td></tr><tr><td>ma_slope_20_5</td><td>ma_slope</td><td class='num'>0.0195</td><td class='num'>0.503</td><td class='num'>3334</td></tr><tr><td>dist_ma_20_pos8</td><td>dist_ma</td><td class='num'>0.0191</td><td class='num'>0.551</td><td class='num'>3244</td></tr></tbody></table>
+
+<h2>七、这张图怎么看 / 怎么用</h2>
+<div class="card">
+<p>1. <b>先看结论</b>：如果写着"统计上无优势"，就<b>不要下单</b>——这不是保守，这是纪律。</p>
+<p>2. <b>再看 IC 图</b>：滚动 250 日 IC 长期在 0 以下，说明技术信号方向是反的，系统会自动反向使用（Meta 层）。</p>
+<p>3. <b>然后看形态</b>：趋势/波动/距高点 + 历史类比分布，比"我觉得会涨"更有信息量。</p>
+<p>4. <b>最后看权重</b>：权重变化说明学习器在重新分配信任，突然放大的信号值得单独复核。</p>
+<p class="muted">本页为研究工具输出，不构成投资建议。所有结论均附统计检验，样本外表现未知。</p>
+</div>
+</div></body></html>

@@ -630,7 +630,7 @@ def _probe_listing(secid: str, min_bars: int = POOL_MIN_BARS, years: int = 3) ->
         return {"ok": False, "bars": bars, "reason": f"history_lt_{min_bars}_in_{years}y"}
     tail = raw.tail(60)
     amt = pd.to_numeric(tail["amount"], errors="coerce").fillna(0.0)
-    if float(amt.max()) <= 0:
+    if float(amt.max()) <= 0:  # leak-scan: ok 数据质量探针，只判"最近60根成交额是否全缺失"，不参与任何信号/标准化
         return {"ok": False, "bars": bars, "reason": "amount_all_missing_last60"}
     return {"ok": True, "bars": bars, "reason": ""}
 
@@ -711,6 +711,9 @@ def _build_pool_us(top_n: int, min_amount: float = 0.0) -> pd.DataFrame:
             df = df[df["amount"].notna() & (df["amount"] >= float(min_amount))]
         df, deduped = _dedupe_dual_class(df)
         df, excluded = _screen_anomalies(df)
+        # ⚠️ 去重内部按"公司名分组"排序，会打乱市值顺序 —— 必须重新按市值降序，
+        # 否则 head(top_n) 取到的是"字母序前 80 只"而不是"市值前 80 只"。
+        df = df.sort_values("mktcap", ascending=False, na_position="last")
         out = df[["code", "name", "mktcap", "amount", "sector"]].head(top_n)
         out = out.reset_index(drop=True)
         out.attrs["source"] = "eastmoney_clist"

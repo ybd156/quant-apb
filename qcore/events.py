@@ -33,6 +33,19 @@
 * 板块收益优先用东财行业板块指数（`fetch_board_returns`）；拿不到时用个股等权
   聚合近似（`build_sector_returns`），口径差异见各自 docstring。
 * 事件研究是**相关不是因果**：同一窗口内可能有别的事件，CAR 是"净效应 + 噪声"。
+
+泄漏自查（audit/leak_scan.py 对本文件的 MEDIUM 命中，逐条说明）
+-------------------------------------------------------------
+1. `_agg()` 里的 mean/median/min/max/sum 是**横截面**统计（跨事件汇总 CAR），
+   不是时间序列上的全样本标准化，不参与任何"当日信号"计算。
+2. `impact_factor()` 同理：它产出的是**估计表**（研究结果），不是逐日打分输入。
+   若要用它做预测/回测，必须传 `as_of=t`，只允许 `date <= t` 的事件进表
+   —— 这正是 SPEC §0.0 的要求；不传 as_of 得到的是全样本表，只能用于"看历史规律"。
+3. `build_sector_returns()` 的等权平均是**当日横截面**平均（每日独立），
+   不含任何未来信息。
+4. `event_study()` 的估参窗口固定为 [-120,-20]，事件窗口 [-5,+10]，
+   两者都不含事件后数据；`tests/test_events.py::test_estimation_window_has_no_lookahead`
+   用"事件后数据整体 ×5 但 alpha/beta 必须逐位不变"证明这一点。
 """
 from __future__ import annotations
 
@@ -799,7 +812,8 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
                   window: Tuple[int, int] = (-5, 10),
                   est_window: Tuple[int, int] = (-120, -20),
                   lag: int = 0, min_n: int = MIN_N,
-                  pre_window: Tuple[int, int] = (-5, -1)) -> pd.DataFrame:
+                  pre_window: Tuple[int, int] = (-5, -1),
+                  as_of: Optional[str] = None) -> pd.DataFrame:
     """
     影响因子估计：按 (type, sector, horizon) 聚合 direction-signed CAR。
 
@@ -816,6 +830,8 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
     * 同一 (type, sector, horizon) 内事件日可能重叠 -> HAC lags = h-1。
     * n < min_n 的行仍保留但 `insufficient=True`。
 
+    as_of : 点对点截断日。给定时**只用 date <= as_of 的事件**估计，
+            用于"站在 t 日只拿历史事件建表"（否则全样本表就是未来函数，见 SPEC §0.0）。
     sector_ret : dict[str, Series] 或单个 Series（单板块场景）
                  字典的键是**实际行业字段**（东财 f100，如 银行Ⅱ/证券Ⅱ/化学制药）；
                  事件里的通用板块名（银行/券商/医药）经 `_resolve_series` 模糊映射，
@@ -827,6 +843,11 @@ def impact_factor(events: Sequence[Event], sector_ret, market_ret,
     """
     warnings: List[str] = []
     evs = list(events or [])
+    if as_of is not None:
+        cut = _to_date_str(as_of)
+        n0 = len(evs)
+        evs = [e for e in evs if e.date <= cut]
+        warnings.append(f"as_of={cut}: {n0 - len(evs)} future events dropped (PIT)")
     if not evs:
         df0 = _empty_factor_table()
         df0.attrs.update({"warnings": ["no events"], "n_skip_direction": 0,

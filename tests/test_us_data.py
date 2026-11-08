@@ -283,6 +283,13 @@ def test_pool():
         p2 = ud.get_pool_us(20, min_amount=1e9)
         _check("pool min_amount filter runs", len(p2) > 0 and
                bool((p2["amount"].dropna() >= 1e9).all()), f"n={len(p2)}")
+        # 去重/剔除不能打乱市值排序（否则 head(top_n) 变成"字母序前 N 只"）
+        mv = p["mktcap"].to_numpy()
+        _check("pool sorted by mktcap desc", bool(np.all(mv[:-1] >= mv[1:])),
+               f"head={list(np.round(mv[:5] / 1e12, 2))}T")
+        _check("pool top10 are mega caps", float(p["mktcap"].iloc[:10].min()) > 1e11,
+               f"min_top10={float(p['mktcap'].iloc[:10].min()) / 1e12:.2f}T")
+        print(f"       top10={p['code'].head(10).tolist()}")
         print(f"       pool: n={len(p)} mktcap_cov={cov:.1%} "
               f"amount_cov={p['amount'].notna().mean():.1%} source={p.attrs.get('source')}")
         # 池子里的代码要能解析（抽样 5 只）

@@ -136,25 +136,40 @@ def _minute_cache_path(code: str, klt: int, date: str) -> str:
     return os.path.join(MINUTE_DIR, f"{code}_{klt}_{date}.csv")
 
 
+def _find_cached(code: str, klt: int) -> Optional[pd.DataFrame]:
+    """找最近一份**已收满**的当日缓存（只在非交易时段使用）。"""
+    import glob
+    need = 240 if klt == 1 else 48
+    try:
+        paths = sorted(glob.glob(os.path.join(MINUTE_DIR, f"{code}_{klt}_*.csv")),
+                       key=os.path.getmtime, reverse=True)[:3]
+    except Exception:      # noqa: BLE001
+        return None
+    for p in paths:
+        try:
+            df = pd.read_csv(p, parse_dates=["datetime"])
+            if len(df) >= need:
+                return df
+        except Exception:      # noqa: BLE001
+            continue
+    return None
+
+
 def fetch_minute(code: str, klt: int = 1, fqt: int = 2,
                  use_cache: bool = True) -> pd.DataFrame:
     """抓当日分钟线 -> DataFrame[datetime,open,close,high,low,volume,amount]。
 
-    东财 klt=1 只给**当日** 240 根，没有历史。抓到的当日完整数据会落盘缓存，
-    这样复盘/重跑不需要再打网络（缓存只复用"已收满 240 根"的文件）。
+    东财 klt=1 只给**当日** 240 根，没有历史。
+    缓存策略：**盘中永远重新抓**（数据还在长），收盘后复用最后一份收满的当日文件，
+    这样复盘/重跑不再打网络，也不会把昨天的数据当成今天的。
     """
     from .sources import _em_secid, _get
 
     code = str(code).zfill(6)
-    today = datetime.now().strftime("%Y%m%d")
-    cache = _minute_cache_path(code, klt, today)
-    if use_cache and os.path.exists(cache):
-        try:
-            old = pd.read_csv(cache, parse_dates=["datetime"])
-            if len(old) >= (240 if klt == 1 else 48):
-                return old
-        except Exception:      # noqa: BLE001
-            pass
+    if use_cache and not in_session():
+        hit = _find_cached(code, klt)
+        if hit is not None:
+            return hit
 
     url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
            f"?secid={_em_secid(code)}&fields1=f1,f2,f3"
@@ -175,7 +190,7 @@ def fetch_minute(code: str, klt: int = 1, fqt: int = 2,
 
     try:
         _ensure_dirs()
-        d0 = df["datetime"].iloc[-1].strftime("%Y%m%d") if len(df) else today
+        d0 = df["datetime"].iloc[-1].strftime("%Y%m%d") if len(df) else "unknown"
         if len(df) >= (240 if klt == 1 else 48):
             df.to_csv(_minute_cache_path(code, klt, d0), index=False, encoding="utf-8")
     except Exception:      # noqa: BLE001
@@ -849,6 +864,14 @@ def _render_md(res: Dict, learner: IntradayLearner) -> str:
         L.append(f"注：当日毛命中率 {_f(res['hit_gross'], 3)} 低于 50%，说明该日集成方向系统性偏反"
                  "（单日单样本，不做因果解释）。但**结论不依赖命中率**："
                  "只要毛边际跨不过成本门槛，这个频率就不可交易。")
+        if res.get("signals"):
+            best = max(res["signals"], key=lambda x: x[3])
+            L.append("")
+            L.append(f"**最强单信号也只有成本的零头**：{best[0]} 的毛边际 "
+                     f"{best[3]:.2f} bps，仅为往返成本 {res['rt_bps']:.2f} bps 的 "
+                     f"{best[3] / res['rt_bps'] * 100:.1f}%。"
+                     f"换句话说，把 13 个信号换成 1 个最好的、再把命中率提高一倍，"
+                     "这个频率依然亏。")
     L.append("")
     L.append("## 4. 分时段")
     L.append("")

@@ -28,6 +28,11 @@ from qcore.events import (MIN_N, POLICY_TRANSMISSION, Event, build_sector_return
 DRIFT = 0.05          # 人造事件后漂移（CAR(0,10) 真值）
 
 
+def _asc(x) -> str:
+    """把可能含中文的字符串转成纯 ASCII（GBK 控制台安全）。"""
+    return str(x).encode("unicode_escape").decode("ascii")
+
+
 # --------------------------------------------------------------------------- #
 # 合成世界
 # --------------------------------------------------------------------------- #
@@ -410,11 +415,62 @@ def test_transmission_and_sector_helpers():
         panel[code] = pd.DataFrame({"date": idx, "close": px})
         pool.append({"code": code, "industry": "银行"})
     sec = build_sector_returns(panel, pd.DataFrame(pool), min_names=3)
-    print(f"  [sect ] sectors={list(sec)} n={len(sec.get('银行', []))}")
+    print(f"  [sect ] sectors={[_asc(x) for x in sec]} n={len(sec.get('银行', []))}")
     assert "银行" in sec and len(sec["银行"]) >= 50
     # 只有 2 只 -> 达不到 min_names=3，丢弃
     assert build_sector_returns(panel, pd.DataFrame(pool).head(2), min_names=3) == {}
     assert build_sector_returns({}, pd.DataFrame(pool)) == {}
+
+
+# --------------------------------------------------------------------------- #
+# 13. 点对点：as_of 之后的事件不许进表
+# --------------------------------------------------------------------------- #
+def test_as_of_pit_filter():
+    idx, mr, sr = make_world(n_days=1500, idio=0.004, seed=21)
+    dates = event_dates_from(idx, 400, 60, 16)
+    evs = mk_events(dates, sectors=("SEC",))
+    full = impact_factor(evs, {"SEC": sr}, mr, horizons=(5,))
+    cut = str(dates[7].date())
+    part = impact_factor(evs, {"SEC": sr}, mr, horizons=(5,), as_of=cut)
+    n_full = int(full[full["level"] == "type_sector"]["n"].iloc[0])
+    n_part = int(part[part["level"] == "type_sector"]["n"].iloc[0])
+    print(f"  [pit2 ] n_full={n_full} n_as_of({cut})={n_part}")
+    assert n_full == 16
+    assert n_part == 8                      # dates[0..7] 含端点
+    assert any("future events dropped" in w for w in part.attrs["warnings"])
+    # as_of 早于所有事件 -> 空表且不崩
+    early = impact_factor(evs, {"SEC": sr}, mr, horizons=(5,), as_of="1990-01-01")
+    assert len(early) == 0
+
+
+# --------------------------------------------------------------------------- #
+# 14. 通用板块名 -> 实际行业字段（单命中/多命中/无命中）
+# --------------------------------------------------------------------------- #
+def test_sector_resolution():
+    idx, mr, sr = make_world(n_days=1200, idio=0.004, seed=23)
+    pos = [300 + 60 * i for i in range(10)]
+    dates = event_dates_from(idx, 300, 60, 10)
+    srd = add_drift(sr, idx, pos, 0.03)
+    evs = mk_events(dates, sectors=("银行",))
+    # 只有 "银行Ⅱ" 存在 -> 必须解析成功（不是跳过）
+    tab = impact_factor(evs, {"银行Ⅱ": srd}, mr, horizons=(5,))
+    assert len(tab) > 0, tab.attrs.get("warnings")
+    r = tab[tab["level"] == "type_sector"].iloc[0]
+    print(f"  [sres ] sector={_asc(r['sector'])} series={_asc(r['series'])} "
+          f"n={int(r['n'])} mean={r['mean_car']:+.4f}")
+    assert r["sector"] == "银行" and r["series"] == "银行Ⅱ"
+    assert int(r["n"]) == 10
+    # 多命中：医药 -> 化学制药 + 医疗服务（等权平均）
+    evs2 = mk_events(dates, sectors=("医药",), subtype="collection_bid", direction=-1)
+    tab2 = impact_factor(evs2, {"化学制药": srd, "医疗服务": srd}, mr, horizons=(5,))
+    r2 = tab2[tab2["level"] == "type_sector"].iloc[0]
+    print(f"  [sres ] multi series={_asc(r2['series'])} n={int(r2['n'])}")
+    assert "+" in r2["series"] and int(r2["n"]) == 10
+    # 无命中：不许偷换成别的板块
+    evs3 = mk_events(dates, sectors=("不存在的板块",))
+    tab3 = impact_factor(evs3, {"银行Ⅱ": srd}, mr, horizons=(5,))
+    assert len(tab3) == 0
+    assert tab3.attrs["n_skip_data"] == len(dates)
 
 
 # --------------------------------------------------------------------------- #
