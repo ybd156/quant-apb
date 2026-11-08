@@ -451,10 +451,18 @@ def _load_index_arrays(code: str = "000300") -> Tuple[np.ndarray, np.ndarray]:
     try:
         import os
         from .data import INDEX_DIR
-        for name in (f"{code}_h2.csv", f"{code}.csv"):
-            p = os.path.join(INDEX_DIR, name)
-            if os.path.exists(p):
-                out = _index_arrays(pd.read_csv(p, parse_dates=["date"]))
+        # 依次尝试：正式缓存目录 → 仓库内置夹具（保证 CI/离线环境 rs 族也能算）
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        dirs = [INDEX_DIR, os.path.join(root, "tests", "fixtures")]
+        found = False
+        for d in dirs:
+            for name in (f"{code}_h2.csv", f"{code}.csv"):
+                p = os.path.join(d, name)
+                if os.path.exists(p):
+                    out = _index_arrays(pd.read_csv(p, parse_dates=["date"]))
+                    found = True
+                    break
+            if found:
                 break
     except Exception:      # noqa: BLE001
         out = None
