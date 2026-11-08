@@ -72,6 +72,14 @@ OPTIONAL_FILES = {
 # 政策日历的备用来源：qcore.policy_calendar.to_jsonl() 的真实落盘位置
 EVENTS_JSONL_FALLBACK = PROJECT_ROOT / "data" / "events" / "policy_calendar.jsonl"
 
+# 模型（Alpha158+GBDT）产物：优先专用文件，其次合并进 model.json 的段
+MODEL_FILES = {
+    "model": ("model.json", "model_meta.json"),
+    "picks": ("picks.json", "model_picks.json"),
+    "importance": ("factor_importance.json", "importance.json"),
+}
+MODEL_BUNDLE = "model.json"
+
 DEFAULT_VERSION = "0.0.0"
 
 MAX_BODY_BYTES = 64 * 1024
@@ -208,6 +216,41 @@ def _read_jsonl(path: Path):
     except OSError:
         return None
     return rows
+
+
+def _read_first(names):
+    """按顺序尝试多个文件名，返回 (data, 命中文件名, error)。
+
+    error: None / 'not_ready' / 'read_error' / 'bad_json'（取第一个非 not_ready 的错误）
+    """
+    first_err = None
+    for name in names:
+        data, err = _read_json(name)
+        if err is None:
+            return data, name, None
+        if err != "not_ready" and first_err is None:
+            first_err = (name, err)
+    if first_err:
+        return None, first_err[0], first_err[1]
+    return None, names[0], "not_ready"
+
+
+def _rows_from_importance(obj):
+    """把「factor -> importance」字典整形成行；已经是列表就原样返回。
+
+    只做结构整形，不计算任何指标（数值原样保留）。
+    """
+    if isinstance(obj, list):
+        return [r for r in obj if isinstance(r, dict)]
+    if isinstance(obj, dict):
+        rows = []
+        for k, v in obj.items():
+            if isinstance(v, dict):
+                rows.append(dict({"factor": k}, **v))
+            elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                rows.append({"factor": k, "importance": float(v)})
+        return rows
+    return []
 
 
 def _file_meta(path: Path) -> dict:
@@ -423,6 +466,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/tick":
+            return self._api_tick(query)
+        if path == "/api/watch":
+            return self._api_watch()
         if path == "/api/names":
             return self._api_names()
         if path == "/api/account/config":
@@ -431,6 +478,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_market()
         if path == "/api/update":
             return self._api_update()
+        if path == "/api/model":
+            return self._api_model()
+        if path == "/api/picks":
+            return self._api_picks(query)
+        if path == "/api/factors/importance":
+            return self._api_factor_importance(query)
         if path == "/api/health":
             return self._api_health()
         if path.startswith("/api/"):
@@ -512,6 +565,46 @@ class ApiHandler(BaseHTTPRequestHandler):
             "webui_dir": str(WEBUI_DIR),
         })
 
+    def _api_tick(self, query):
+        """秒级快照：现取现返回（不落盘，避免每次请求都写文件）。"""
+        codes = (query.get("codes") or ["600519"])[0].split(",")
+        try:
+            from qcore import tick
+            return self._ok(tick.snapshot([c.strip() for c in codes if c.strip()][:30]))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("tick_failed", 200, detail=str(e)[:160])
+
+    def _api_watch(self):
+        """自选跟踪：列表 + 汇总。"""
+        try:
+            from qcore import watch
+            cur = watch.load()
+            return self._ok({"items": cur.get("items") or [],
+                             "updated_at": cur.get("updated_at"),
+                             "summary": watch.summary()})
+        except Exception as e:  # noqa: BLE001
+            return self._fail("watch_failed", 200, detail=str(e)[:160])
+
+    def _post_watch(self):
+        """添加/移除自选。body: {"add":["600519"],"remove":[]}"""
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        if not isinstance(body, dict):
+            return self._fail("bad_body", 400)
+        try:
+            from qcore import watch
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        out = {}
+        if body.get("add"):
+            out["add"] = watch.add(body["add"])
+        if body.get("remove"):
+            out["remove"] = watch.remove(body["remove"])
+        if not out:
+            return self._fail("nothing_to_do", 400, hint="需要 add 或 remove")
+        return self._ok(out)
+
     def _api_names(self):
         """代码 -> 名称映射（UI 展示用）。文件缺失时返回空表，不报错。"""
         data, _err = _read_json("names.json")
@@ -575,6 +668,75 @@ class ApiHandler(BaseHTTPRequestHandler):
             "checked_at": (info or {}).get("checked_at"),
             "command": "docker compose pull && docker compose up -d",
         })
+
+    # ---------------- 模型（Alpha158+GBDT）----------------
+
+    def _api_model(self):
+        """模型元信息：model.json（或 model_meta.json）原样转发。"""
+        data, name, err = _read_first(MODEL_FILES["model"])
+        if err == "not_ready":
+            return self._not_ready(name, "模型尚未训练，请先运行回测脚本生成 data/state/model.json")
+        if err:
+            return self._fail(err, 200, file=name)
+        if not isinstance(data, dict):
+            return self._fail("bad_schema", 200, file=name, hint="期望 JSON 对象")
+        # 合并形态：{"model": {...}, "picks": [...], "factors": [...]}
+        inner = data.get("model")
+        payload = inner if isinstance(inner, dict) else data
+        return self._ok(payload)
+
+    def _api_picks(self, query):
+        """当前推荐持仓：picks.json，其次 model.json 的 picks 段。"""
+        limit = _clamp_int(query.get("limit"), 500, 1, 2000)
+        data, name, err = _read_first(MODEL_FILES["picks"])
+        rows, meta = None, {}
+        if err is None:
+            rows = _rows_of(data)
+            meta = data if isinstance(data, dict) else {}
+        else:
+            bundle, bname, berr = _read_first((MODEL_BUNDLE,))
+            if berr is None and isinstance(bundle, dict):
+                cand = bundle.get("picks")
+                if isinstance(cand, dict):
+                    rows = _rows_of(cand)
+                    meta = cand
+                elif isinstance(cand, list):
+                    rows = [r for r in cand if isinstance(r, dict)]
+            if rows is None:
+                if err == "not_ready" and berr in (None, "not_ready"):
+                    return self._not_ready(
+                        name, "推荐列表尚未生成，请先运行模型打分（data/state/picks.json）")
+                return self._fail(err if err != "not_ready" else (berr or "not_ready"),
+                                  200, file=name)
+        payload = {"rows": rows[:limit], "n": len(rows)}
+        for key in ("as_of", "top_k", "hold_days", "note", "generated_at"):
+            if isinstance(meta, dict) and key in meta:
+                payload[key] = meta[key]
+        return self._ok(payload)
+
+    def _api_factor_importance(self, query):
+        """GBDT 因子重要性：factor_importance.json，其次 model.json 的 factors/importance 段。"""
+        limit = _clamp_int(query.get("top"), 500, 1, 2000)
+        data, name, err = _read_first(MODEL_FILES["importance"])
+        rows = None
+        if err is None:
+            if isinstance(data, dict) and isinstance(data.get("rows"), list):
+                rows = [r for r in data["rows"] if isinstance(r, dict)]
+            else:
+                rows = _rows_from_importance(data)
+        else:
+            bundle, bname, berr = _read_first((MODEL_BUNDLE,))
+            if berr is None and isinstance(bundle, dict):
+                cand = bundle.get("factors", bundle.get("importance"))
+                if cand is not None:
+                    rows = _rows_from_importance(cand)
+            if rows is None:
+                if err == "not_ready" and berr in (None, "not_ready"):
+                    return self._not_ready(
+                        name, "因子重要性尚未导出（data/state/factor_importance.json）")
+                return self._fail(err if err != "not_ready" else (berr or "not_ready"),
+                                  200, file=name)
+        return self._ok({"rows": rows[:limit], "n": len(rows)})
 
     def _api_behavior(self):
         """行为因子：原样转发 performance.json 的 edge / behavior 段（不做任何计算）。"""
@@ -732,6 +894,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/watch":
+            return self._post_watch()
         if path == "/api/account/config":
             return self._post_account_config()
         if path == "/api/update/apply":

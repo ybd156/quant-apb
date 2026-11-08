@@ -525,6 +525,7 @@
     { id: 'overview', label: '总览', icon: 'overview', title: '总览', sub: '这台测量仪现在读数是多少' },
     { id: 'market', label: '市场', icon: 'market', title: '实时行情', sub: '指数 / 情绪温度 / 市场宽度' },
     { id: 'signals', label: '信号', icon: 'signals', title: '信号权重', sub: '每个「信号 × 参数」专家当前权重' },
+    { id: 'model', label: '模型', icon: 'model', title: '模型', sub: 'Alpha158 + GBDT · 当前推荐持仓' },
     { id: 'ledger', label: '预测台账', icon: 'ledger', title: '预测台账', sub: '先封存，后对账' },
     { id: 'paper', label: '模拟实盘', icon: 'paper', title: '模拟实盘', sub: '模拟盘 vs 实盘对账' },
     { id: 'behavior', label: '行为因子', icon: 'behavior', title: '行为因子', sub: '10 个行为金融因子的横截面表现' },
@@ -692,10 +693,8 @@
         kvItem('最近检查', u.checked_at || '未检查') +
         '</div>' +
         '<p>更新会在后台拉取新镜像并重启容器，<b>约 1–3 分钟</b>内本页面不可用，随后自动恢复。</p>' +
-        '<p class="muted" style="margin-top:6px">需要服务端设置 <code>APB_TOKEN</code>，并已挂载 <code>/var/run/docker.sock</code>；' +
-        '否则请用命令行：<code>' + esc(u.command || 'docker compose pull && docker compose up -d') + '</code></p>' +
-        '<label class="field" style="margin-top:12px"><span>APB_TOKEN（存本机 localStorage，只填一次）</span>' +
-        '<input id="upd-token" type="password" placeholder="与服务器环境变量一致" autocomplete="off" value="' + esc(getToken()) + '"></label>' +
+        '<p class="muted" style="margin-top:6px">内网访问可直接更新（服务端未设 APB_TOKEN 时只放行内网）；' +
+        '如需公网访问请设置 <code>APB_TOKEN</code>。也可用命令行：<code>' + esc(u.command || 'docker compose pull && docker compose up -d') + '</code></p>' +
         '<p class="form-msg" id="upd-msg" style="margin-top:8px"></p>',
       foot: '<button class="btn ghost" type="button" data-close="1">取消</button>' +
         '<button class="btn primary" id="upd-confirm" type="button">' + ICON('download') + '确认更新</button>'
@@ -707,20 +706,16 @@
   async function applyUpdate() {
     const msg = $('#upd-msg');
     const btn = $('#upd-confirm');
-    const input = $('#upd-token');
-    const token = ((input && input.value) || getToken() || '').trim();
-    if (!token) {
-      if (msg) { msg.className = 'form-msg err'; msg.textContent = '请填写 APB_TOKEN'; }
-      if (input) input.focus();
-      return;
-    }
-    setToken(token);
+    // 内网默认免 token：没设 APB_TOKEN 时服务端只放行内网。
+    // 若服务端确实设了 token，会返回 unauthorized，这里给出提示而不是强制填。
+    const token = (getToken() || '').trim();
     if (btn) btn.disabled = true;
     if (msg) { msg.className = 'form-msg'; msg.textContent = '正在提交…'; }
 
     const res = await api('/api/update/apply', {
       method: 'POST',
-      headers: { 'X-Token': token, Accept: 'application/json' }
+      headers: token ? { 'X-Token': token, Accept: 'application/json' }
+                     : { Accept: 'application/json' }
     });
     if (btn) btn.disabled = false;
 
@@ -826,15 +821,25 @@
   function nameOf(code) {
     const raw = String(code === null || code === undefined ? '' : code).trim();
     if (!raw) return '';
-    const rec = S.names[raw] || S.names[raw.toUpperCase()] || null;
-    return (rec && rec.name) ? String(rec.name) : '';
+    const bare = bareCode(raw);                       // sh600519 -> 600519
+    const tries = [raw, raw.toUpperCase(), bare, bare.toUpperCase()];
+    for (let i = 0; i < tries.length; i++) {
+      const rec = S.names[tries[i]];
+      if (rec && rec.name) return String(rec.name);
+    }
+    return '';
   }
 
   function industryOf(code) {
     const raw = String(code === null || code === undefined ? '' : code).trim();
     if (!raw) return '';
-    const rec = S.names[raw] || S.names[raw.toUpperCase()] || null;
-    return (rec && rec.industry) ? String(rec.industry) : '';
+    const bare = bareCode(raw);
+    const tries = [raw, raw.toUpperCase(), bare, bare.toUpperCase()];
+    for (let i = 0; i < tries.length; i++) {
+      const rec = S.names[tries[i]];
+      if (rec && rec.industry) return String(rec.industry);
+    }
+    return '';
   }
 
   /** 统一渲染「名称(代码)」；无名称时只显示代码 */
@@ -965,12 +970,196 @@
     }
   }
 
+  /* =============================== 模型 ================================ */
+
+  /** sh600519 / SZ000001 -> 600519（仅用于展示与名称查表） */
+  function bareCode(code) {
+    const c = String(code === null || code === undefined ? '' : code).trim();
+    const m = c.match(/^(sh|sz|bj)(\d{6})$/i);
+    return m ? m[2] : c;
+  }
+
+  /** 推荐行：优先用后端给的 name，其次 names.json，最后只显示代码 */
+  function pickCell(row) {
+    const code = String((row && row.code) || '').trim();
+    const nm = (row && row.name && String(row.name).trim()) || nameOf(code);
+    const bare = bareCode(code);
+    if (!nm || nm === code) return '<span class="mono">' + esc(bare || '—') + '</span>';
+    return '<span class="name-cell"><span class="nm">' + esc(nm) + '</span>' +
+      '<span class="cd">(' + esc(bare) + ')</span></span>';
+  }
+
+  /** 回测四项是否还是占位（全 0 / 缺失 → 视为「待回测」） */
+  function backtestPending(bt) {
+    if (!bt || typeof bt !== 'object') return true;
+    const keys = ['annual', 'sharpe', 'mdd', 'turnover'];
+    return keys.every((k) => {
+      const v = toNum(bt[k]);
+      return v === null || v === 0;
+    });
+  }
+
+  async function pageModel() {
+    const [modelRes, picksRes, impRes] = await Promise.all([
+      apiCached('/api/model'),
+      apiCached('/api/picks?limit=500'),
+      apiCached('/api/factors/importance?top=200')
+    ]);
+
+    const m = (modelRes.ok && modelRes.data) ? modelRes.data : null;
+    const picks = (picksRes.ok && picksRes.data) ? picksRes.data : null;
+    const imp = (impRes.ok && impRes.data) ? impRes.data : null;
+
+    if (!m) {
+      setSub('模型尚未训练');
+      return notReadyBox(modelRes, '模型元信息缺失') + '<div style="height:14px"></div>' + banner({
+        tone: 'warn', icon: 'alert',
+        title: '模型尚未训练，请先运行回测脚本',
+        text: '期望 <code>data/state/model.json</code>（模型元信息）、<code>picks.json</code>（推荐持仓）、' +
+          '<code>factor_importance.json</code>（因子重要性）。三者缺失时本页只显示占位，其他页面不受影响。',
+        meta: '契约：{model, version, n_factors, n_trees, train_period, test_period, ic, ic_t, rank_ic, universe, n_stocks, backtest{...}}'
+      });
+    }
+
+    setSub('v' + (m.version || '—') + ' · ' + (m.universe || '—') + ' · ' +
+      (m.n_factors || '—') + ' 因子 × ' + (m.n_trees || '—') + ' 棵树');
+
+    /* --- 顶部模型卡 --- */
+    const ic = toNum(m.ic);
+    const icT = toNum(m.ic_t);
+    const ric = toNum(m.rank_ic);
+    const icCls = ic === null ? '' : ic > 0 ? 'down-text' : ic < 0 ? 'up-text' : '';
+
+    const heroCard = card({
+      title: (m.model || '模型') + (m.version ? ' · ' + m.version : ''),
+      sub: m.updated_at ? '更新于 ' + esc(m.updated_at) : '',
+      tools: '<span class="tag info">' + esc(m.universe || '—') + '</span>' +
+        '<span class="tag na">' + esc(num(m.n_stocks, 0)) + ' 只</span>',
+      body:
+        '<div class="grid two" style="gap:18px;align-items:center">' +
+        '<div>' + kv([
+          kvItem('训练期', m.train_period || '—'),
+          kvItem('样本外', m.test_period || '—'),
+          kvItem('因子数', num(m.n_factors, 0)),
+          kvItem('树数', num(m.n_trees, 0))
+        ]) + '</div>' +
+        '<div class="hero-metrics">' +
+        '<div class="hm"><span class="hm-k">IC</span>' +
+        '<span class="hm-v ' + icCls + '">' + (ic === null ? '—' : (ic > 0 ? '+' : '') + num(ic, 4)) + '</span></div>' +
+        '<div class="hm"><span class="hm-k">t 值</span>' +
+        '<span class="hm-v ' + icCls + '">' + (icT === null ? '—' : (icT > 0 ? '+' : '') + num(icT, 2)) + '</span></div>' +
+        '<div class="hm"><span class="hm-k">RankIC</span>' +
+        '<span class="hm-v ' + (ric === null ? '' : ric > 0 ? 'down-text' : ric < 0 ? 'up-text' : '') + '">' +
+        (ric === null ? '—' : (ric > 0 ? '+' : '') + num(ric, 4)) + '</span></div>' +
+        '</div></div>'
+    });
+
+    /* --- 回测摘要（6 个 KPI） --- */
+    const bt = m.backtest || {};
+    const pending = backtestPending(bt);
+    const btKpis = [
+      kpi({ k: '净年化', v: pending ? '—' : pct(bt.annual), cls: pending ? '' : signClass(bt.annual), tone: pending ? 'neutral' : (toNum(bt.annual) > 0 ? 'good' : 'bad') }),
+      kpi({ k: '夏普', v: pending ? '—' : num(bt.sharpe, 2), tone: pending ? 'neutral' : 'brand' }),
+      kpi({ k: '最大回撤', v: pending ? '—' : pct(bt.mdd), tone: pending ? 'neutral' : 'warn' }),
+      kpi({ k: '平均换手', v: pending ? '—' : pct(bt.turnover), tone: pending ? 'neutral' : 'brand' }),
+      kpi({ k: '持有期', v: num(bt.hold_days, 0) + ' 日', sm: true, tone: 'neutral' }),
+      kpi({ k: '持仓数', v: num(bt.top_k, 0) + ' 只', sm: true, tone: 'neutral' })
+    ].join('');
+    const btCard = card({
+      title: '回测摘要', sub: 'backtest · 样本外',
+      tools: pending ? '<span class="tag warn">待回测</span>' : '<span class="tag ok">已回测</span>',
+      body: '<div class="grid four" style="gap:12px">' + btKpis + '</div>'
+    });
+
+    /* --- 推荐持仓 --- */
+    const rows = (picks && Array.isArray(picks.rows)) ? picks.rows : [];
+    const picksCard = card({
+      title: '当前推荐持仓',
+      sub: picks
+        ? 'as_of ' + esc(picks.as_of || '—') + ' · 共 ' + esc(num(picks.n, 0)) + ' 只' +
+          (picks.top_k ? ' · top_k ' + esc(num(picks.top_k, 0)) : '') +
+          (picks.hold_days ? ' · 持有 ' + esc(num(picks.hold_days, 0)) + ' 日' : '')
+        : '未就绪',
+      cls: 'flush',
+      tools: '<span class="tag ok">持有中 = 缓冲带内不动</span>',
+      body: '<div style="padding:0 16px 16px">' + table({
+        cols: [
+          { label: '#', key: 'rank', num: true, render: (r) => esc(num(r.rank, 0)) },
+          { label: '名称（代码）', key: 'code', render: (r) => pickCell(r) },
+          {
+            label: '分数', key: 'score', num: true,
+            render: (r) => '<span class="' + signClass(r.score) + '">' + esc(num(r.score, 4)) + '</span>'
+          },
+          {
+            label: '涨跌', key: 'chg_pct', num: true,
+            render: (r) => '<span class="' + signClass(r.chg_pct) + '">' + esc(signedPct(r.chg_pct)) + '</span>'
+          },
+          { label: '权重', key: 'weight', num: true, render: (r) => esc(pct(r.weight)) },
+          {
+            label: '状态', key: 'held',
+            render: (r) => (r.held === true
+              ? '<span class="tag hit">持有中</span>'
+              : '<span class="tag info">新进</span>')
+          },
+          { label: '已持有', key: 'days_held', num: true, render: (r) => (isNil(r.days_held) ? '—' : esc(num(r.days_held, 0)) + ' 日') }
+        ],
+        rows: rows,
+        empty: picks
+          ? emptyBox('暂无推荐', 'picks.rows 为空。')
+          : notReadyBox(picksRes, '推荐持仓缺失')
+      }) + (picks && picks.note
+        ? '<p class="muted" style="margin-top:8px">' + esc(picks.note) + '</p>' : '') + '</div>'
+    });
+
+    /* --- 因子重要性 top 20 --- */
+    const impRows = (imp && Array.isArray(imp.rows)) ? imp.rows.filter((r) => r && !isNil(r.factor)) : [];
+    const top20 = impRows.slice().sort((a, b) => (toNum(b.importance) || 0) - (toNum(a.importance) || 0)).slice(0, 20);
+    const impCard = card({
+      title: '因子重要性 Top 20', sub: imp ? 'GBDT feature_importance · 共 ' + esc(num(imp.n, 0)) + ' 个因子' : '未就绪',
+      body: top20.length
+        ? hbars(top20.map((r) => ({
+          label: r.factor,
+          value: r.importance,
+          title: r.factor + ' · ' + num(r.importance, 4)
+        })), { fmt: (v) => num(v, 4) })
+        : notReadyBox(impRes, '因子重要性缺失')
+    });
+
+    return '<div style="margin-bottom:14px">' + heroCard + '</div>' +
+      '<div style="margin-bottom:14px">' + btCard + '</div>' +
+      '<div style="margin-bottom:14px">' + picksCard + '</div>' +
+      impCard;
+  }
+
+  /* --------------------- 总览页：模型状态条 --------------------------- */
+
+  async function modelBarHtml(modelRes) {
+    const m = (modelRes && modelRes.ok && modelRes.data) ? modelRes.data : null;
+    if (!m) {
+      return '<button type="button" class="model-bar is-empty" data-page="model">' +
+        '<span class="mb-name">模型</span><span class="mb-sep">·</span>' +
+        '<span class="mb-ic">尚未就绪</span><span class="mb-sep">·</span>' +
+        '<span class="mb-oos">等待训练 / 打分</span>' +
+        '<span class="mb-go">查看 →</span></button>';
+    }
+    const ic = toNum(m.ic);
+    const icT = toNum(m.ic_t);
+    const icCls = ic === null ? 'is-na' : ic > 0 ? 'is-pos' : ic < 0 ? 'is-neg' : 'is-na';
+    const icTxt = ic === null ? 'IC —' : 'IC ' + (ic > 0 ? '+' : '') + num(ic, 4) +
+      (icT === null ? '' : ' (t=' + (icT > 0 ? '+' : '') + num(icT, 2) + ')');
+    return '<button type="button" class="model-bar" data-page="model">' +
+      '<span class="mb-name">' + esc(m.model || '模型') + '</span><span class="mb-sep">·</span>' +
+      '<span class="mb-ic ' + icCls + '">' + esc(icTxt) + '</span><span class="mb-sep">·</span>' +
+      '<span class="mb-oos">样本外 ' + esc(m.test_period || '—') + '</span>' +
+      '<span class="mb-go">查看推荐 →</span></button>';
+  }
+
   /* =============================== 总览 ================================ */
 
   async function pageOverview() {
-    const [perfRes, regimeRes, paperRes, statusRes] = await Promise.all([
+    const [perfRes, regimeRes, paperRes, statusRes, modelRes] = await Promise.all([
       apiCached('/api/performance'), apiCached('/api/regime'),
-      apiCached('/api/paper'), apiCached('/api/status')
+      apiCached('/api/paper'), apiCached('/api/status'), apiCached('/api/model')
     ]);
     const perf = perfRes.ok ? adaptPerformance(perfRes.data) : null;
     const status = statusRes.ok ? statusRes.data : null;
@@ -1099,7 +1288,8 @@
         : emptyBox('暂无明细', 'performance.json 里没有 hit_rate / rank_ic。')
     });
 
-    return '<div class="grid four" style="margin-bottom:14px">' + kpis + '</div>' +
+    return '<div style="margin-bottom:14px">' + (await modelBarHtml(modelRes)) + '</div>' +
+      '<div class="grid four" style="margin-bottom:14px">' + kpis + '</div>' +
       '<div style="margin-bottom:14px">' + bannerHtml + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + navCard + bandCard + '</div>' +
       '<div class="grid two">' + (subperiodCard || detailCard) + detailCard + '</div>';
@@ -1369,7 +1559,16 @@
       }) + (sorted.length > 500 ? '<p class="muted" style="margin-top:8px">仅渲染前 500 行（共 ' + sorted.length + ' 行）</p>' : '') + '</div>'
     });
 
-    return '<div style="margin-bottom:14px">' + barsCard + '</div>' +
+    const legacyBanner = banner({
+      tone: 'warn', icon: 'alert',
+      title: '这一页是旧版手写信号（实测 IC −0.0185，无预测能力），保留仅供参考',
+      text: '有效模型请见 <button type="button" class="link-btn" data-page="model">模型</button> 页' +
+        '（Alpha158+GBDT，IC +0.0260，样本外验证通过）。',
+      meta: '73 个信号 · 相关性调整后有效独立信号约 12 个'
+    });
+
+    return '<div style="margin-bottom:14px">' + legacyBanner + '</div>' +
+      '<div style="margin-bottom:14px">' + barsCard + '</div>' +
       (detail ? '<div style="margin-bottom:14px">' + detail + '</div>' : '') + tableCard;
   }
 
@@ -2019,6 +2218,7 @@
     overview: pageOverview,
     market: pageMarket,
     signals: pageSignals,
+    model: pageModel,
     ledger: pageLedger,
     paper: pagePaper,
     behavior: pageBehavior,

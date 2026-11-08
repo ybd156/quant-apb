@@ -63,6 +63,7 @@ python -m webui.server --host 0.0.0.0
 | **总览** | 4 个 KPI（市场状态 / 可信度 Brier / Rank IC / 成本拖累）+ 净值曲线 + regime 色带 + 结论横幅 + 分年度 IC | `performance` `regime` `paper` `status` |
 | **市场** | 9 个指数卡（点位/涨跌幅/涨跌点数）+ 情绪温度条（0–100，分档配色）+ 市场宽度堆叠条 + 涨停/成交额 KPI + 60 秒自动刷新 | `market.json` |
 | **信号** | 权重 Top20 / Bottom20 条形图 + 全表（权重/命中率/更新次数/平均收益/发声 可排序）+ 族筛选 + 搜索 | `weights.json` |
+| **模型** | Alpha158+GBDT 元信息（IC/t/RankIC 大字）、回测 6 KPI、当前推荐持仓表（持有中标记）、因子重要性 Top20 | `model.json` `picks.json` `factor_importance.json` |
 | **预测台账** | 最近预测表（命中绿 / 未中红 / pending 灰）+ 代码搜索 + 日期区间 + 结果筛选 | `ledger.json` |
 | **模拟实盘** | 模拟 vs 实盘双线净值 + 差异指标 + 成交录入表单 + 最近成交 | `paper.json` `live_trades.jsonl` |
 | **行为因子** | 10 个行为因子 IC / 多空价差双向条形 + 明细表（含「中性化后失效」标注） | `performance.behavior`（缺失时显示因子定义） |
@@ -94,6 +95,9 @@ python -m webui.server --host 0.0.0.0
 | `data/state/events.json`（可选） | 政策日历 | `{events:[{date,type,subtype,title,direction,sectors[],evidence_level,note,lag}], impact:[...]}`；缺失时回退 `data/events/policy_calendar.jsonl` |
 | `data/state/invariants.json`（可选） | 不变量机读结果 | `[{id:"INV-1", name, status:"pass"/"fail", detail}]` |
 | `data/state/market.json` | 市场页 | `as_of, indices[{code,name,price,chg_pct,change}], breadth{up,down,flat,up_ratio,by_market}, limit_up, amount_yi, sentiment{ok,temperature,level,reason,parts}, missing[], elapsed_ms` |
+| `data/state/model.json`（可选） | 模型页 | `{model, version, n_factors, n_trees, train_period, test_period, ic, ic_t, rank_ic, universe, n_stocks, updated_at, backtest{annual,sharpe,mdd,turnover,hold_days,top_k}}` |
+| `data/state/picks.json`（可选） | 当前推荐 | `{as_of, rows[{rank,code,name,score,chg_pct,weight,held,days_held}], n, top_k, hold_days, note}` |
+| `data/state/factor_importance.json`（可选） | 因子重要性 | `{rows:[{factor, importance}]}`（也接受 `{factor: value}` 字典，服务端只做结构整形） |
 | `data/state/update.json`（可选） | 版本检查 | `{latest_version, checked_at}`（`/api/update` 用它和 `VERSION` 比对） |
 
 **UI 绝不做计算**：所有数值来自上面这些文件；`server.py` 只做「读 JSON → 取 Top N / 最近 N 天 → 原样转发」，
@@ -172,6 +176,9 @@ token 只存在本机 `localStorage['apb.token']`（跨标签页只填一次）�
 | GET | `/api/paper/trades?limit=50` | 实盘成交明细（最新在前） |
 | GET | `/api/health` | `{ok, as_of, data_age_days, missing_files[], files{}, optional_files{}, source_health{}, invariants, run_enabled, ...}` |
 | GET | `/api/market` | 实时行情与情绪（原样转发 `market.json`） |
+| GET | `/api/model` | 模型元信息（`model.json` 原样转发；合并形态取 `.model` 段） |
+| GET | `/api/picks?limit=500` | 当前推荐持仓（`picks.json`，其次 `model.json.picks`） |
+| GET | `/api/factors/importance?top=500` | 因子重要性（`factor_importance.json`，其次 `model.json.factors`） |
 | GET | `/api/update` | `{current, latest, has_update, checked_at, command}` |
 | POST | `/api/update/apply` | 应用内一键更新（需 `X-Token`）；错误码见 §4.1 |
 | GET | `/api/export?what=all\|ledger\|signals\|performance` | 导出 JSON 附件（原样拼接，不加工） |
@@ -206,6 +213,7 @@ token 只存在本机 `localStorage['apb.token']`（跨标签页只填一次）�
 | `live_trades.jsonl` | 「还没有录入成交」（不算错误） |
 | `market.json` | 市场页显示「行情采集尚未启动」占位 + 期望字段说明，不空白、不崩 |
 | `update.json` | 更新徽章隐藏；设置页「远端最新 = 未知 / 状态 = 尚未检查」 |
+| `model.json` / `picks.json` / `factor_importance.json` | 模型页显示「模型尚未训练，请先运行回测脚本」占位；总览顶部模型条变灰「尚未就绪」；其余 9 页不受影响 |
 
 其它容错：读到半截 JSON → `bad_json` 提示重试；服务挂了 → 「无法连接服务」+ 红灯；
 数据里出现 `NaN`/`Infinity` → 服务端统一转 `null`（`NaN` 不是合法 JSON，浏览器 `JSON.parse` 会崩），前端显示 `—`。
@@ -223,6 +231,11 @@ python -m webui.server --port 8768 --state-dir tmp/state_update      # C 带 upd
 node tmp/ui_dom_test.mjs http://127.0.0.1:8777 full      # A 全量
 node tmp/ui_dom_test.mjs http://127.0.0.1:8766 empty     # B 降级
 node tmp/ui_dom_test.mjs http://127.0.0.1:8768 update    # C 更新徽章 + 弹窗 + 错误分类
+
+# 模型页专项（三种 IC 情况）：先用 tmp/mk_model_fixtures.py 造夹具到 tmp/state_model
+python tmp/mk_model_fixtures.py pos && node tmp/ui_model_test.mjs http://127.0.0.1:8792 pos
+python tmp/mk_model_fixtures.py neg && node tmp/ui_model_test.mjs http://127.0.0.1:8792 neg
+python tmp/mk_model_fixtures.py missing && node tmp/ui_model_test.mjs http://127.0.0.1:8792 missing
 ```
 
 `tmp/ui_dom_test.mjs` 是一个最小 DOM shim（约 200 行），在 Node 里真正执行 `app.js`，

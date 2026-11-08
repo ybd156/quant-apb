@@ -917,3 +917,60 @@ select { cursor: pointer; }
 }
 .acct-note .ico { width: 15px; height: 15px; flex: 0 0 15px; color: var(--warn); margin-top: 2px; }
 .acct-note b { color: var(--text); }
+
+/* ==========================================================================
+   模型页 + 总览模型状态条（Alpha158+GBDT）
+   ========================================================================== */
+
+/* 总览顶部状态条（整条可点，跳模型页） */
+.model-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  width: 100%; padding: 10px 14px; text-align: left;
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--brand);
+  border-radius: var(--r);
+  box-shadow: var(--shadow-1);
+  color: var(--text-2); font: 500 12.5px/1.5 var(--sans);
+  cursor: pointer;
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+.model-bar:hover { background: var(--card-2); border-color: var(--line); }
+.model-bar.is-empty { border-left-color: var(--text-3); }
+.model-bar .mb-name { color: var(--text); font-weight: 600; }
+.model-bar .mb-sep { color: var(--text-3); }
+.model-bar .mb-ic { font-family: var(--mono); font-variant-numeric: tabular-nums; font-weight: 600; }
+.model-bar .mb-ic.is-pos { color: var(--good); }
+.model-bar .mb-ic.is-neg { color: var(--bad); }
+.model-bar .mb-ic.is-na { color: var(--text-3); }
+.model-bar .mb-oos { color: var(--text-3); }
+.model-bar .mb-go {
+  margin-left: auto; color: var(--brand-2); font-weight: 600; white-space: nowrap;
+}
+.model-bar:hover .mb-go { text-decoration: underline; }
+
+/* 模型页三个大指标 */
+.hero-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.hero-metrics .hm {
+  padding: 10px 12px; border-radius: var(--r-sm); text-align: center;
+  background: var(--card-2); border: 1px solid var(--line-soft);
+}
+.hero-metrics .hm-k { display: block; font-size: 11px; color: var(--text-3); }
+.hero-metrics .hm-v {
+  display: block; margin-top: 3px;
+  font: 700 22px/1.2 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.01em;
+}
+
+/* 内联链接按钮（提示条里跳页用） */
+.link-btn {
+  background: none; border: 0; padding: 0 2px;
+  color: var(--brand-2); font: inherit; font-weight: 600;
+  cursor: pointer; text-decoration: underline;
+}
+.link-btn:hover { color: var(--brand); }
+
+@media (max-width: 768px) {
+  .model-bar { font-size: 12px; padding: 9px 12px; }
+  .model-bar .mb-oos { display: none; }
+  .hero-metrics .hm-v { font-size: 18px; }
+}
