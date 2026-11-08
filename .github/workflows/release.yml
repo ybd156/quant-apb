@@ -171,27 +171,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -x
           TAG="${{ needs.meta.outputs.tag }}"
-          VER="${{ needs.meta.outputs.version }}"
+          echo "tag=$TAG"
+          ls -la dist
           if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release exists, uploading assets"
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* \
-              --title "APB $TAG" \
-              --generate-notes \
-              --notes "## 安装
-
-          ### fnOS（飞牛）原生安装包
-          下载 \`apb_${VER}_x86.fpk\`（ARM 设备用 \`_arm\`），在「应用中心 → 手动安装」导入。
-
-          ### Docker
-          \`\`\`bash
-          docker run -d --name apb --restart unless-stopped \\
-            -p 8765:8765 -v ./data:/app/data -e TZ=Asia/Shanghai \\
-            ghcr.io/${{ github.repository }}:${VER}
-          \`\`\`
-
-          支持 **amd64 / arm64**。
-
-          > 研究工具，输出为统计检验结果，不构成投资建议。"
+            echo "creating release"
+            gh release create "$TAG" dist/*               --title "APB $TAG"               --notes-file dist/INSTALL.md
           fi
+          gh release view "$TAG" --json assets --jq '.assets[].name'
