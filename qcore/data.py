@@ -205,7 +205,8 @@ def load_index(code: str = "000300") -> pd.DataFrame:
 # ---------------------------------------------------------------- panel
 def build_panel(codes: Iterable[str], start: str = "2010-01-01",
                 min_bars: int = 500, adjust: int = ADJUST,
-                clip: bool = False, verbose: bool = True) -> Dict[str, pd.DataFrame]:
+                clip: bool = False, verbose: bool = True,
+                loader=None, pad: bool = True) -> Dict[str, pd.DataFrame]:
     """
     clip=False（默认）：保留**上市以来全部历史**，让指标拿到完整预热期。
         这一点很关键 —— 若先按 start 截断再算 MA250/RSI，增量运行与批量运行
@@ -213,10 +214,11 @@ def build_panel(codes: Iterable[str], start: str = "2010-01-01",
     clip=True：老行为，按 start 截断（仅用于调试/特殊场景）。
     """
     out: Dict[str, pd.DataFrame] = {}
-    codes = [str(c).zfill(6) for c in codes]
+    # pad=True 时按 A 股规则补零到 6 位；美股/港股代码不能补零（AAPL/00700.HK）
+    codes = [str(c).zfill(6) if pad else str(c) for c in codes]
     for i, c in enumerate(codes, 1):
         try:
-            df = load_kline(c, adjust=adjust)
+            df = loader(c) if loader is not None else load_kline(c, adjust=adjust)
         except Exception as e:  # noqa: BLE001
             if verbose:
                 print(f"  [skip] {c}: {e}")

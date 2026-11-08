@@ -50,8 +50,18 @@ def spearman(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def daily_ic_series(scores: np.ndarray, RET: np.ndarray, min_names: int = 5) -> np.ndarray:
-    """scores / RET 均为 (N,T)。返回 (T,) 的每日横截面 Spearman。"""
+    """
+    scores / RET 均为 **(N,T)**。返回 (T,) 的每日横截面 Spearman。
+
+    ⚠️ 本项目最高频的 bug 就是朝向混用。若调用方传了 (T,N)，这里会因为
+    N/T 都 > 1 而静默算错（返回长度等于股票数）。所以做一次启发式断言：
+    交易日数通常远大于股票数，若第一维比第二维大很多，基本可以确定传反了。
+    """
     N, T = scores.shape
+    if T > 0 and N > T * 3 and T > 50:
+        raise ValueError(
+            f"daily_ic_series 期望 (N,T)，收到 shape={scores.shape}；"
+            "看起来是 (T,N) —— 请先转置")
     out = np.full(T, np.nan)
     for t in range(T):
         sc, r = scores[:, t], RET[:, t]

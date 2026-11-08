@@ -83,14 +83,14 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
                   extra_horizons: Optional[List[int]] = None,
                   exec_lag: int = 1, str_dtype: str = "uint8", n_univ: int = 100,
                   chunk: int = 25, cutoff: Optional[str] = None,
-                  verbose: bool = True) -> Panel3D:
+                  verbose: bool = True, loader=None, pad: bool = True) -> Panel3D:
     from .signals import compute_signals, signal_zoo
 
     zoo = signal_zoo()
     sids = [s.sid for s in zoo]
     S = len(sids)
 
-    panel = build_panel(codes, start=start, verbose=verbose)
+    panel = build_panel(codes, start=start, verbose=verbose, loader=loader, pad=pad)
     if not panel:
         raise RuntimeError("empty panel")
     if cutoff is not None:
