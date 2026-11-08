@@ -90,8 +90,8 @@ def append_stats(path: str, edge: Dict, eq_cmp: Dict, meta: Dict, meta_cmp: Dict
     A(f"| 到期 IC 均值 / HAC t | {_f(meta['final_mu'])} / {_f(meta['final_t'], 2)} |")
     A(f"| 反向运行时间占比 | {_pct(meta['frac_inverted'], 1, False)} |")
     A(f"| 不表态（空仓）时间占比 | {_pct(meta['frac_silent'], 1, False)} |")
-    A(f"| 命中率：原始 → 纠错后 | {_pct(meta_cmp['raw']['hit_rate'], 2, False)} → "
-      f"{_pct(meta_cmp['meta']['hit_rate'], 2, False)} |")
+    A(f"| 命中率：原始 → 纠错后 | {_pct((meta_cmp.get('raw') or {}).get('hit_rate'), 2, False)} → "
+      f"{_pct((meta_cmp.get('meta') or {}).get('hit_rate'), 2, False)} |")
     A(f"| 纠错后 IC / t | {_f(meta_ic['mean'])} / {_f(meta_ic['t'], 2)} |")
     A("")
     A("> Meta 层只在「横截面 IC 显著异于 0」（|t| ≥ 2）时才改变方向，否则**不表态**。")

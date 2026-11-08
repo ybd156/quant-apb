@@ -15,7 +15,8 @@ mkdir -p "${PKGVAR}/data" "${PKGVAR}/logs" || {
     log "创建数据目录失败: ${PKGVAR}"
     exit 1
 }
-log "数据目录: ${PKGVAR}/data"
+chown -R 10001:10001 "${PKGVAR}/data" "${PKGVAR}/logs" 2>/dev/null || true
+log "数据目录: ${PKGVAR}/data (owner 10001)"
 
 # 2) 后台拉镜像（带超时，不阻塞安装流程）
 if command -v docker >/dev/null 2>&1; then

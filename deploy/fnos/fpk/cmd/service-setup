@@ -1,15 +1,42 @@
 #!/bin/bash
 # APB 服务控制：Docker 后端
 # 由 cmd/main 通过 source 引入，需提供 start_daemon / stop_daemon / daemon_status
+#
+# 真机踩过的两个坑（v0.0.4 修复）：
+#   1) 国内网络解析不了 ghcr.io（v2rayA DNS 劫持），必须回退到镜像源
+#   2) 容器以 uid 10001 运行，挂载目录若是 root 所有会 Permission denied
 
 CONTAINER="${APPNAME:-apb}"
 IMAGE="${APB_IMAGE:-ghcr.io/ybd156/quant-apb:latest}"
+IMAGE_MIRROR="${APB_IMAGE_MIRROR:-}"
 DATA_DIR="${PKGVAR:-/tmp}/data"
 LOG_HOST_DIR="${PKGVAR:-/tmp}/logs"
 PORT="${APB_PORT:-8765}"
+APP_UID="${APB_UID:-10001}"
+APP_GID="${APB_GID:-10001}"
+
+# 自动推导镜像源：ghcr.io -> ghcr.nju.edu.cn（国内可达）
+if [ -z "$IMAGE_MIRROR" ]; then
+    case "$IMAGE" in
+        ghcr.io/*) IMAGE_MIRROR="ghcr.nju.edu.cn/${IMAGE#ghcr.io/}" ;;
+        *)         IMAGE_MIRROR="$IMAGE" ;;
+    esac
+fi
 
 docker_available() {
     command -v docker >/dev/null 2>&1
+}
+
+# 选一个能连通的镜像地址（先官方，后镜像源）
+resolve_image() {
+    for cand in "$IMAGE" "$IMAGE_MIRROR"; do
+        [ -z "$cand" ] && continue
+        if timeout 25 docker manifest inspect "$cand" >/dev/null 2>&1; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    echo "$IMAGE"
 }
 
 daemon_status() {
@@ -23,19 +50,38 @@ start_daemon() {
         return 1
     fi
     mkdir -p "$DATA_DIR" "$LOG_HOST_DIR"
+    # 关键：容器以 uid 10001 运行，宿主机目录必须同属主
+    chown -R "${APP_UID}:${APP_GID}" "$DATA_DIR" "$LOG_HOST_DIR" 2>/dev/null || true
+
+    local img
+    img="$(resolve_image)"
+    log "使用镜像: ${img}"
+
     if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
-        docker start "$CONTAINER" >>"$LOG_FILE" 2>&1
+        docker start "$CONTAINER" >>"$LOG_FILE" 2>&1 || return 1
     else
-        docker run -d --name "$CONTAINER" --pull=missing \
+        docker run -d --name "$CONTAINER" \
             --restart unless-stopped \
             -p "${PORT}:8765" \
             -e TZ=Asia/Shanghai \
             -e APB_HOST=0.0.0.0 \
             -v "${DATA_DIR}:/app/data" \
             -v "${LOG_HOST_DIR}:/app/logs" \
-            "$IMAGE" >>"$LOG_FILE" 2>&1
+            "$img" >>"$LOG_FILE" 2>&1 || return 1
     fi
-    log "APB 已启动，端口 ${PORT}"
+
+    # 等最多 30 秒确认真的起来了（fnOS 会轮询 status，不能谎报成功）
+    local i=0
+    while [ $i -lt 15 ]; do
+        if daemon_status; then
+            log "APB 已启动，端口 ${PORT}（镜像 ${img}）"
+            return 0
+        fi
+        sleep 2
+        i=$((i + 1))
+    done
+    log "APB 启动超时：容器未进入 running 状态，请查看 docker logs ${CONTAINER}"
+    return 1
 }
 
 stop_daemon() {

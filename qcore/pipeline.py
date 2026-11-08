@@ -124,9 +124,12 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     meta_ic = MT.meta_ic(res["scores_TN"], p3d.RET[horizon], meta, horizon)
     _ic_series = AN.daily_ic_series(res["scores"], p3d.RET[horizon].T)
     mon = ST.rolling_edge_monitor(_ic_series[np.isfinite(_ic_series)])
+    _hr = meta_cmp.get("raw", {}).get("hit_rate")
+    _hm = meta_cmp.get("meta", {}).get("hit_rate")
+    _fmt = lambda v: f"{v:.4f}" if isinstance(v, (int, float)) else "n/a"
     print(f"      IC h={horizon}: {edge[str(horizon)]['ic']['mean']:+.4f} "
           f"t={edge[str(horizon)]['ic']['t']:+.2f} | meta sign={meta['final_sign']:+d} "
-          f"hit {meta_cmp['raw']['hit_rate']:.4f}->{meta_cmp['meta']['hit_rate']:.4f}", flush=True)
+          f"hit {_fmt(_hr)}->{_fmt(_hm)}", flush=True)
 
     print("[4/7] confidence calibration", flush=True)
     cal = C.calibrate(res["scores_TN"], p3d.RET[horizon], horizon, warmup=cfg.warmup)
