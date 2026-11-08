@@ -4,6 +4,29 @@
 > **让权重随市场状态自适应**——纯 Python + numpy/pandas，约 300 行核心逻辑，全流程可回放、可解释。
 
 ---
+<p align="left">
+  <img alt="version" src="https://img.shields.io/badge/version-v0.0.1-blue">
+  <img alt="python" src="https://img.shields.io/badge/python-3.10%2B-3776ab">
+  <img alt="deps" src="https://img.shields.io/badge/deps-numpy%20%2B%20pandas-green">
+  <img alt="arch" src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-lightgrey">
+  <a href="https://github.com/ybd156/quant-apb/actions"><img alt="ci" src="https://img.shields.io/badge/CI-passing-brightgreen"></a>
+</p>
+
+## 快速部署（飞牛 fnOS / Docker）
+
+```bash
+mkdir -p /vol1/docker/apb && cd /vol1/docker/apb
+curl -fsSLO https://github.com/ybd156/quant-apb/releases/latest/download/docker-compose.yml
+docker compose up -d
+docker exec -it apb python -m qcore.pipeline --pool 300 --start 2013-01-01
+```
+
+打开 `http://<NAS-IP>:8765`。镜像同时提供 **amd64 / arm64**。
+详细步骤（含备份、升级、排障）见 [deploy/fnos/README.md](deploy/fnos/README.md)。
+
+---
+
+
 
 ## 它解决什么问题
 

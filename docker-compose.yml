@@ -1,0 +1,42 @@
+# APB 自学习参数体 —— 部署编排
+# 用法：
+#   docker compose up -d
+#   浏览器打开 http://<NAS-IP>:8765
+#
+# 飞牛 fnOS：把本文件放到 /vol1/docker/apb/docker-compose.yml，用「Docker 应用」导入即可。
+
+services:
+  apb:
+    image: ghcr.io/ybd156/quant-apb:${APB_TAG:-latest}
+    container_name: apb
+    restart: unless-stopped
+    ports:
+      - "${APB_PORT:-8765}:8765"
+    environment:
+      # 时区必须对，否则"今天"会算错（A股 15:00 收盘）
+      TZ: Asia/Shanghai
+      # 触发更新的 API token；不设则 /api/run 一律拒绝（安全默认）
+      APB_TOKEN: "${APB_TOKEN:-}"
+      APB_HOST: "0.0.0.0"
+      APB_PORT: "8765"
+    volumes:
+      # 数据是唯一不可再生的东西：行情缓存、权重状态、预测台账、判断台账
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # 资源上限：N100 这类小主机上留足余量给系统
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

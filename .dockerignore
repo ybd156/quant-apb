@@ -1,0 +1,28 @@
+# 构建上下文排除（镜像里不需要这些）
+.git
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+
+# 数据与产物（体积大、可再生；运行时用 volume 挂载）
+data/
+reports/
+logs/
+tmp/
+
+# 开发用
+tests/
+audit/
+docs/
+*.md
+!README.md
+
+# 编辑器
+.vscode
+.idea
+.DS_Store
+Thumbs.db
