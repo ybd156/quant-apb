@@ -1,18 +1,22 @@
-# APB Web UI — 零依赖控制台
+# APB 控制台 — 零依赖 Web UI **v0.0.1**
 
 自学习参数体（Adaptive Parameter Body）的只读看板 + 实盘成交录入。
-**纯 Python 标准库**（`http.server`）+ **原生 JS/CSS**，无框架、无 CDN、无 npm、完全离线可用。
-目标机：Intel N100 小主机 / 飞牛 fnOS（Linux）/ Windows。
+
+**纯 Python 标准库**（`http.server`）+ **原生 JS/CSS**：无框架、无 CDN、无 npm、无构建步骤、无图表库，
+所有图表都是手绘 SVG。目标机：Intel N100 小主机 / 飞牛 fnOS（Linux）/ Windows。
 
 ```
 webui/
+├─ VERSION              # 版本号唯一真源（当前 0.0.1），前端只显示 /api/version 读到的值
 ├─ server.py            # ThreadingHTTPServer + 路由（只读 IO，不做任何指标计算）
 ├─ README.md
 └─ static/
-   ├─ index.html        # 4 个页签骨架
-   ├─ app.js            # 渲染 + 手绘 SVG 图表（无图表库）
-   └─ style.css         # 深色主题 / 中文优先字体 / 响应式
+   ├─ index.html        # 应用外壳：侧边栏 + 顶栏 + 图标精灵（内联 SVG symbol）
+   ├─ app.js            # 路由 + 8 个页面 + 组件 + 手绘 SVG 图表
+   └─ style.css         # 设计令牌 / 深色+亮色双主题 / 响应式
 ```
+
+单页总下载 **117.7 KB（gzip 33.2 KB）**，**3 个请求、0 个外部请求**。
 
 ---
 
@@ -21,194 +25,187 @@ webui/
 在**项目根目录**（`webui/` 的上一级）执行：
 
 ```bash
-# 默认：127.0.0.1:8765，只允许本机访问
-python -m webui.server
-
-# 换端口
-python -m webui.server --port 8766
-
-# 内网访问（飞牛/N100 上让手机也能看）—— 务必同时设置 token，见 §3
-APB_TOKEN='一串足够长的随机字符' python -m webui.server --host 0.0.0.0 --port 8765
+python -m webui.server                       # 默认 127.0.0.1:8765（只允许本机）
+python -m webui.server --port 8766           # 换端口
+APB_TOKEN='随机长字符串' python -m webui.server --host 0.0.0.0   # 内网访问（务必配 token）
 ```
 
 Windows PowerShell：
 
 ```powershell
-$env:APB_TOKEN = "一串足够长的随机字符"
+$env:APB_TOKEN = "随机长字符串"
 python -m webui.server --host 0.0.0.0
 ```
 
-启动后终端会打印监听地址、状态目录、token 状态；浏览器打开 `http://127.0.0.1:8765/`。
+浏览器打开 `http://127.0.0.1:8765/`。URL 带 `#/页面` 可直接进入某页（如 `#/risk`），
+刷新后会记住上次页面。
 
 ### 参数
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--host` | `127.0.0.1` | 绑定地址。`0.0.0.0` = 内网可访问（有安全风险，见 §3） |
+| `--host` | `127.0.0.1` | 绑定地址；`0.0.0.0` = 内网可访问（见 §4 安全） |
 | `--port` | `8765` | 端口 |
-| `--state-dir` | `<项目根>/data/state` | 状态目录，便于测试/多实例 |
+| `--state-dir` | `<项目根>/data/state` | 状态目录（测试/多实例） |
 | `--run-timeout` | `900` | `POST /api/run` 子进程超时（秒） |
 | `--no-run` | 关 | 彻底禁用 `POST /api/run` |
 
-依赖：Python 3.8+（实测 3.12）。**不 import numpy/pandas**，所以 30 MB 的运行时也不会拖慢启动。
+依赖：Python 3.8+（实测 3.12）。**不 import numpy/pandas**，启动即秒开。
 
 ---
 
-## 2. 数据契约（UI 只读，全部由 qcore 落盘）
+## 2. 8 个页面
+
+| 页面 | 内容 | 数据来源 |
+|---|---|---|
+| **总览** | 4 个 KPI（市场状态 / 可信度 Brier / Rank IC / 成本拖累）+ 净值曲线 + regime 色带 + 结论横幅 + 分年度 IC | `performance` `regime` `paper` `status` |
+| **信号** | 权重 Top20 / Bottom20 条形图 + 全表（权重/命中率/更新次数/平均收益/发声 可排序）+ 族筛选 + 搜索 | `weights.json` |
+| **预测台账** | 最近预测表（命中绿 / 未中红 / pending 灰）+ 代码搜索 + 日期区间 + 结果筛选 | `ledger.json` |
+| **模拟实盘** | 模拟 vs 实盘双线净值 + 差异指标 + 成交录入表单 + 最近成交 | `paper.json` `live_trades.jsonl` |
+| **行为因子** | 10 个行为因子 IC / 多空价差双向条形 + 明细表（含「中性化后失效」标注） | `performance.behavior`（缺失时显示因子定义） |
+| **政策事件** | 政策日历时间线（类型/方向筛选）+ 影响因子表 | `events.json` → 回退 `data/events/policy_calendar.jsonl` |
+| **风险体检** | 8 条不变量检查 + 数据源健康度 + 成本明细 + 集中度 + 可信度校准 + 漂移监控 | `performance.risk/costs/confidence` `source_health.json` `invariants.json` |
+| **设置** | 版本/构建时间/Python/平台、数据文件清单、触发更新（需 token）、导出数据、主题 | `/api/version` `/api/health` |
+
+### 布局与交互
+
+- **左侧固定侧边栏**（232px，可折叠为 64px 图标条，状态存 localStorage）+ 右侧内容区。
+- **顶栏**：页面标题 + 副标题、数据时间戳、版本号、**连接状态灯**（绿=正常 / 黄=数据陈旧 >1 天 / 红=缺文件或服务异常）、刷新。
+- 断点：**>1200px 三列**，**768–1200px 两列**，**<768px 单列 + 底部导航**（侧栏变抽屉 + 遮罩）。
+- 主题：深色默认 / 亮色，`data-theme` + localStorage，**首屏前用内联脚本应用，无闪白**。
+
+---
+
+## 3. 数据契约（UI 只读）
 
 | 文件 | 用途 | 关键字段 |
 |---|---|---|
-| `data/state/status.json` | 引擎状态卡 | `as_of, data_from, data_to, n_stocks, n_signals, n_days, mode, horizon, updated_at` |
-| `data/state/weights.json` | 信号权重 Top/Bottom | `sid, family, weight, hit_rate, n_updates, mean_payoff, alarms`（按 `weight` 降序） |
-| `data/state/regime.json` | 市场状态色带 | `date, regime`（最近 500 天，0=下跌低波 1=下跌高波 2=上涨低波 3=上涨高波） |
+| `data/state/status.json` | 状态卡 | `as_of, data_from, data_to, n_stocks, n_signals, n_days, mode, horizon, updated_at` |
+| `data/state/weights.json` | 信号权重 | `sid, family, weight, hit_rate, n_updates, mean_payoff, alarms`（按 weight 降序） |
+| `data/state/regime.json` | regime 色带 | `date, regime`（0 跌低波 / 1 跌高波 / 2 涨低波 / 3 涨高波） |
 | `data/state/ledger.json` | 预测台账 | `as_of, code, score, regime, entry_price, exit_price, ret, hit, status` |
-| `data/state/performance.json` | 命中率 / IC / 多空 / 基线 | `metrics.hit_rate{h:{hit_rate}}`、`metrics.rank_ic{h:{mean,icir,positive_ratio}}`、`backtest.long_short{ann_return,sharpe,max_drawdown,...}`、`backtest.baselines[]` |
-| `data/state/paper.json` | 模拟盘 vs 实盘 | `dates[], sim_nav[], live_nav[], compare{sim_final,live_final,sim_annual,tracking_error_ann,pnl_gap,exec_slippage_bps,...}` |
-| `data/state/live_trades.jsonl` | 实盘成交（**UI 唯一写入的文件**） | 每行 `{date, code, side, price, qty, note}` |
+| `data/state/performance.json` | 总览/行为/体检 | `metrics.hit_rate{h:{hit_rate}}`、`metrics.rank_ic{h:{mean,icir,positive_ratio}}`、`backtest.long_short`、`edge{h:{ic:{mean,t,ci95},subperiods,long_short,deflated_sharpe}}`、`confidence`、`risk`、`costs`、`learned_vs_equal`、`meta`、`behavior`（待导出） |
+| `data/state/paper.json` | 模拟 vs 实盘 | `dates[], sim_nav[], live_nav[], compare{...}` |
+| `data/state/source_health.json` | 数据源健康度 | `{源: {ok, fail, latency_ms, last_error}}` |
+| `data/state/live_trades.jsonl` | 实盘成交（**UI 唯一写入**） | 每行 `{date, code, side, price, qty, note}` |
+| `data/state/events.json`（可选） | 政策日历 | `{events:[{date,type,subtype,title,direction,sectors[],evidence_level,note,lag}], impact:[...]}`；缺失时回退 `data/events/policy_calendar.jsonl` |
+| `data/state/invariants.json`（可选） | 不变量机读结果 | `[{id:"INV-1", name, status:"pass"/"fail", detail}]` |
 
-> 前端同时兼容 SPEC 的简写形态（`performance.hit_rate.h1` / `ic.mean` / `long_short.curve`、
-> `paper.sim.nav` / `paper.diff`），两套字段名都在 `app.js` 的 `adaptPerformance()` /
-> `adaptPaper()` 里归一，**不改动任何数值**。
+**UI 绝不做计算**：所有数值来自上面这些文件；`server.py` 只做「读 JSON → 取 Top N / 最近 N 天 → 原样转发」，
+前端只做取字段、排序、筛选、排版。图表坐标是像素映射，不改变数值含义。
 
-**UI 绝不做计算**：命中率、IC、多空净值、权重全部来自上面这些文件；
-`server.py` 只做「读 JSON → 取 Top N / 最近 N 天 → 原样转发」，不派生任何指标。
+### 给引擎的两个可选导出（有则页面自动点亮，无需改前端）
 
----
+```python
+# 1) 行为因子（10 个）写进 performance.json
+perf["behavior"] = [{"factor": sid, "ic": ..., "t": ..., "spread": ...,
+                     "ic_neutral": ..., "note": "中性化后失效"}, ...]
 
-## 3. 安全说明（重要）
-
-1. **默认只绑回环** `127.0.0.1`：本机以外访问不到，这是默认的安全姿态。
-2. `--host 0.0.0.0` 之后任何人都能打开页面并**读取你的持仓台账**。此时请务必：
-   - 设置 `APB_TOKEN`（否则 `/api/run` 直接拒绝），
-   - 只在内网/家庭网使用，不要把端口映射到公网，
-   - 需要远程访问时优先用 SSH 隧道：`ssh -L 8765:127.0.0.1:8765 你的小主机`，然后本地开 `http://127.0.0.1:8765`。
-3. `POST /api/run` 三重保护：`APB_TOKEN` 未设置 → 一律拒绝；`X-Token` 头与 `APB_TOKEN` 不匹配 → 403
-   （用 `hmac.compare_digest` 定长比较）；同一时刻只允许一次运行（第二次返回 409 busy）。
-4. `POST /api/paper/trade` **没有鉴权**（只写本地 JSONL、不触发交易），因为它就是给内网手工记账用的。
-   若你把 UI 暴露到不可信网络，请在前面加一层反向代理 + Basic Auth，或用 `--no-run` 并只绑回环。
-5. 静态文件服务做了路径穿越防护（`resolve()` + `relative_to()` 校验），`/static/../server.py` 返回 403。
-6. 请求体上限 64 KB；成交记录做了完整校验（日期格式、方向枚举、正数价格、正整数数量）。
-7. 服务端**绝不返回 500/堆栈**：所有异常都被捕获成 `{"ok": false, "error": "..."}`。
-
----
-
-## 4. HTTP 接口
-
-统一响应封套：
-
-```jsonc
-// 成功
-{ "ok": true, "data": { ... } }
-// 失败（HTTP 200 也可能是失败，前端按 ok 判断）
-{ "ok": false, "error": "not_ready", "missing": "performance.json", "hint": "..." }
+# 2) 多空净值曲线写进 performance.json（前端优先用它画总览净值曲线）
+perf["backtest"]["long_short"]["equity"] = [float(x) for x in equity[::5]]   # 下采样即可
 ```
+
+---
+
+## 4. 安全说明（重要）
+
+1. **默认只绑回环** `127.0.0.1`，本机以外访问不到。
+2. `--host 0.0.0.0` 后任何人都能读到你的持仓台账。此时务必设置 `APB_TOKEN`，只在内网使用，
+   远程访问优先走 SSH 隧道：`ssh -L 8765:127.0.0.1:8765 你的小主机`。
+3. `POST /api/run`：`APB_TOKEN` 未设置 → 一律拒绝；`X-Token` 不匹配 → 403（`hmac.compare_digest`）；
+   同一时刻只允许一次运行（第二次 409 busy）。前端把 token 只存在**当前标签页的 sessionStorage**。
+4. `POST /api/paper/trade` **无鉴权**（只写本地 JSONL、不触发交易）。暴露到不可信网络时请前置反向代理 + Basic Auth。
+5. 静态文件做了路径穿越防护（`resolve()` + `relative_to()`），`/static/../server.py` → 403。
+6. 请求体上限 64 KB；成交记录完整校验（日期格式、方向枚举、正数价格、正整数数量）。
+7. **绝不返回 500/堆栈**：所有异常都转成 `{"ok": false, "error": "..."}`。
+
+---
+
+## 5. HTTP 接口
+
+统一封套：成功 `{"ok":true,"data":{...}}`；失败 `{"ok":false,"error":"...","hint":"..."}`
+（**数据文件缺失时 HTTP 200 + `error:"not_ready"`**，不是 5xx）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/` `/index.html` `/static/*` | 静态文件 |
+| GET | `/api/version` | `{version, build_time, python, platform, webui_dir}`（版本读 `webui/VERSION`） |
 | GET | `/api/status` | 引擎状态 |
 | GET | `/api/signals?top=20` | `{top:[], bottom:[], total, top_n}`（`top` 上限 200） |
 | GET | `/api/regime` | `{rows:[], n}` |
-| GET | `/api/ledger?days=30` | `{rows:[], n, days}`（取最近 N 个不同 `as_of`，上限 500 天） |
+| GET | `/api/ledger?days=30` | `{rows:[], n, days}`（最近 N 个不同 `as_of`，上限 500 天） |
 | GET | `/api/performance` | 原样转发 |
+| GET | `/api/behavior` | `{generated_at, dataset, edge, behavior}`（原样转发 performance.json 的段） |
+| GET | `/api/events?limit=500` | `{rows:[], n, source, impact?}`；`events.json` → 回退 `policy_calendar.jsonl` |
 | GET | `/api/paper` | 原样转发 |
 | GET | `/api/paper/trades?limit=50` | 实盘成交明细（最新在前） |
+| GET | `/api/health` | `{ok, as_of, data_age_days, missing_files[], files{}, optional_files{}, source_health{}, invariants, run_enabled, ...}` |
+| GET | `/api/export?what=all\|ledger\|signals\|performance` | 导出 JSON 附件（原样拼接，不加工） |
 | GET | `/api/run/status` | 最近一次 `/api/run` 的状态 |
-| GET | `/api/health` | 状态目录/静态目录/是否允许 run（排查用） |
-| POST | `/api/paper/trade` | 追加一行到 `live_trades.jsonl`；需 `Content-Type: application/json` |
-| POST | `/api/run` | 触发 `python -m qcore.live --once`；需 `X-Token` |
+| POST | `/api/paper/trade` | 追加一行到 `live_trades.jsonl`（需 `Content-Type: application/json`） |
+| POST | `/api/run` | 触发 `python -m qcore.live --once`（需 `X-Token`） |
 
-错误码：`not_ready`（数据文件缺失，**HTTP 200**）、`bad_json`、`read_error`、`bad_schema`、
-`bad_date` / `bad_code` / `bad_side` / `bad_price` / `bad_qty`（400）、`body_too_large`（413）、
-`forbidden`（403）、`not_found` / `unknown_endpoint`（404）、`unauthorized` / `token_not_configured`（403）、
-`busy`（409）、`serialize_error` / `internal_error`（200，兜底不崩）。
+错误码：`not_ready`、`bad_json`、`read_error`、`bad_schema`、`bad_date`/`bad_code`/`bad_side`/`bad_price`/`bad_qty`（400）、
+`body_too_large`（413）、`forbidden`（403）、`not_found`/`unknown_endpoint`（404）、
+`unauthorized`/`token_not_configured`（403）、`busy`（409）、`bad_param`（400）、
+`serialize_error`/`internal_error`（200，兜底不崩）。
 
-`POST /api/paper/trade` 示例：
-
-```bash
-curl -X POST http://127.0.0.1:8765/api/paper/trade \
-  -H 'Content-Type: application/json' \
-  -d '{"date":"2026-11-06","code":"600519","side":"buy","price":1520.5,"qty":100,"note":"手工补录"}'
-```
-
-写入的 JSONL 与 `qcore/paper.py::load_live_trades()` 的字段完全一致，
-所以**下一次引擎运行会自动把它算进实盘净值**。
+> `data_age_days` 是「今天 − `status.as_of`」的**文件新鲜度**，只驱动顶栏状态灯，不是任何分析指标。
 
 ---
 
-## 5. 数据未就绪时怎么表现（优雅降级）
+## 6. 数据未就绪时怎么表现（优雅降级）
 
-页面不会白屏、不会崩、不会报 500。缺哪个文件，只有对应的卡片变成占位块：
+页面不白屏、不崩、不报 5xx。缺哪个文件，只有对应卡片变占位块：
 
-| 缺失文件 | 表现 |
+| 缺失 | 表现 |
 |---|---|
-| `status.json` | 顶栏「数据日 —」，总览状态卡显示 *未就绪：等待引擎首次运行* |
-| `weights.json` | 信号页两侧条形区显示同一占位提示 |
-| `regime.json` | 色带位置显示占位块（容器自动退回普通块，不会被压成 26px 高） |
-| `ledger.json` | 台账表体显示占位行 |
-| `performance.json` | 命中率 / IC / 多空三块各自显示占位；基线卡自动隐藏 |
-| `paper.json` | 模拟盘/实盘卡、净值双线、差异三块各自显示占位 |
-| `live_trades.jsonl` | 「最近成交」显示 *还没有录入成交*（不算错误） |
+| `status.json` | 顶栏「数据 —」+ 状态灯红；总览状态卡占位 |
+| `weights.json` | 信号页两侧条形区占位，表格空态 |
+| `regime.json` | 色带位置占位（容器退回普通块，不会被压成 24px） |
+| `ledger.json` | 台账表体占位行 |
+| `performance.json` | 总览 KPI/曲线/明细、行为因子、风险体检各自占位；**行为因子页仍展示 10 个因子定义** |
+| `paper.json` | 模拟实盘净值/差异占位；**成交录入表单照常可用** |
+| `events.json` + JSONL 都缺 | 政策事件页显示占位 + 生成命令提示 |
+| `invariants.json` | 不变量表 8 行全部「未提供」并给出写入格式 |
+| `source_health.json` | 数据源健康度占位 |
+| `live_trades.jsonl` | 「还没有录入成交」（不算错误） |
 
-占位文案会**明确指出缺哪个文件**以及下一步命令：`python -m qcore.live --once`。
-刷新按钮（或 90 秒自动刷新）即可让页面自己恢复，不用重启服务。
-
-其它容错：文件正在被写入（读到半截 JSON）→ `bad_json` + 提示稍后重试；
-服务进程挂了 → 前端显示 *无法连接服务*；数据里出现 `NaN`/`Infinity` → 服务端统一转成 `null`
-（`NaN` 不是合法 JSON，浏览器 `JSON.parse` 会直接抛错），前端显示 `—`。
-
----
-
-## 6. 前端说明
-
-- **4 个页签**：总览 / 信号 / 台账 / 模拟实盘。切页签才拉数据，避免首屏打满。
-- **图表全部手绘 SVG**：多空净值曲线、模拟盘 vs 实盘双线（`chartSVG()` 约 90 行，无任何图表库）。
-  窄屏（<700px）自动切换 viewBox 宽度，避免手机上被压扁。
-- **信号条形图**：纯 CSS 宽度百分比，点任意条看该信号的命中率/更新次数/平均收益/发声次数。
-- **配色约定**（两个口径分开，别当成 bug）：
-  - 台账「命中」= 绿、「未中」= 红、「pending」= 灰（对/错语义）；
-  - 数值列（收益、净值、IC）用 A 股口径 **红涨绿跌**。
-- **字体**：只用系统已装字体（PingFang SC / 微软雅黑 / Noto Sans CJK SC / 思源黑体 / 文泉驿），
-  不下载任何网络字体，飞牛上没装中文字体时会回落到 `sans-serif`。
-- **性能护栏**：台账一次最多渲染 500 行（真实数据 30 天约 3000 行），超出时提示缩小天数；
-  这不是统计，只是渲染上限。
-- 响应式：`@media` 三档（900 / 620px），手机上单列、表格横向滚动、按钮不换行溢出。
-  尊重 `prefers-reduced-motion`。
+其它容错：读到半截 JSON → `bad_json` 提示重试；服务挂了 → 「无法连接服务」+ 红灯；
+数据里出现 `NaN`/`Infinity` → 服务端统一转 `null`（`NaN` 不是合法 JSON，浏览器 `JSON.parse` 会崩），前端显示 `—`。
+右上角「刷新」清缓存重取，无需重启服务。
 
 ---
 
 ## 7. 自测记录
 
 ```bash
-# 1) 空状态目录（全部文件缺失）—— 验证不崩
-python -m webui.server --port 8766 --state-dir tmp/empty
-
-# 2) 真实 data/state —— 验证正常路径
-python -m webui.server --port 8767
+python -m webui.server --port 8767                  # 真实 data/state
+python -m webui.server --port 8766 --state-dir tmp/uitest_empty   # 空目录
+node tmp/ui_dom_test.mjs http://127.0.0.1:8767 full
+node tmp/ui_dom_test.mjs http://127.0.0.1:8766 empty
 ```
 
-用 `urllib` 逐个打端点，并另写了一个最小 DOM shim 在 Node 里跑 `app.js`，
-把真实 `/api` 响应喂给渲染函数，断言不出现 `undefined`/`NaN`/`[object Object]`：
+`tmp/ui_dom_test.mjs` 是一个最小 DOM shim（约 200 行），在 Node 里真正执行 `app.js`，
+把真实 `/api` 响应喂给渲染管线，断言：
 
-- 8 个 `/api` 端点在两种状态下均返回 **HTTP 200**，且响应体通过浏览器口径的 `JSON.parse`；
-- 4 个页签的 20+ 个渲染点在真实数据下全部 PASS；
-- 空目录下全部渲染点显示占位块，PASS；
-- 路径穿越 `/static/../server.py` → 403；未知端点 → 404 JSON；
-- `POST /api/paper/trade` 合法 → 200 写入；`bad_side`/`bad_date`/`bad_json` → 400 且不写盘；
-- `POST /api/run` 无 token → 403，错 token → 403，对 token → 启动子进程并可用 `/api/run/status` 轮询。
+- 12 个端点全部 **HTTP 200** 且通过浏览器口径 `JSON.parse`（含 `NaN` 检测）；
+- 8 个页面在「有数据」「空目录」两种模式下都渲染成功，无 `undefined` / `NaN` / `[object Object]`；
+- 顶栏版本号来自 `/api/version`（正则 `^v\d+\.\d+\.\d+$`），且 **HTML 里不含硬编码版本号**；
+- 状态灯在空目录下为 `down`、有数据时为 `ok`/`stale`；
+- 成交表单已绑定 submit。
 
 ---
 
 ## 8. 已知限制
 
-1. **多空净值曲线**：`performance.json` 的 `backtest.long_short` 目前不含 `equity` 序列
-   （引擎导出时把 `np.ndarray` 过滤掉了），所以总览的曲线位置显示占位，
-   但年化 / Sharpe / 最大回撤照常显示。若引擎补一个 `equity: [...]`（可下采样到 ~250 点），
-   前端会立刻画出来，无需改代码。
-2. `POST /api/run` 依赖能创建子进程。在受限沙箱里 `subprocess` 会被系统拒绝
-   （Windows 上是 `WinError 5`），此时接口返回
-   `{"ok":false,"error":"spawn_denied",...}` 而不会崩；在正常主机上无此问题。
-3. 响应体未压缩：真实 `performance.json` 约 640 KB、`ledger?days=30` 约 470 KB。
-   局域网/本机够用；若要更省，可在前面加一层 nginx 开 gzip，或调小 `days`。
-4. 没有登录/多用户，定位是「单机自用看板」，不要直接暴露到公网。
-5. 台账 `hit` 由引擎判定（多空方向），前端只做展示；`status=pending` 表示 h 日未到、尚未对账。
+1. **无法在本环境截图验证视觉**：沙箱禁止创建子进程（`WinError 5`），Chrome headless 无法 fork，
+   所以视觉效果靠「DOM 结构 + 渲染断言」验证，像素级排版请在真机浏览器确认。
+2. `performance.json` 的 `backtest.long_short` 目前**不含 `equity` 序列**，总览的净值曲线回退到
+   `paper.sim_nav/live_nav`（页面上有标注）。引擎补 `equity` 后自动切换，无需改前端。
+3. `behavior` 段尚未导出 → 行为因子页显示「定义 + 未就绪」而不是编造数字。
+4. `POST /api/run` 依赖能创建子进程；受限沙箱里会返回 `{"ok":false,"error":"spawn_denied"}` 而不崩。
+5. 响应体未压缩：`performance.json` 约 640 KB、`ledger?days=30` 约 460 KB。
+   局域网够用；要更省可在前面加 nginx 开 gzip，或调小 `days`。台账一次最多渲染 500 行（性能护栏）。
+6. 没有登录/多用户，定位是「单机自用看板」，不要直接暴露公网。
+7. 配色口径：**命中/未中 = 绿/红**（对错语义）；**数值列 = 红涨绿跌**（A 股习惯）。两者分开是刻意的。

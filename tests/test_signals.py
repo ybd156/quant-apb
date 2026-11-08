@@ -24,6 +24,8 @@ from qcore.signals import SignalSpec, compute_signals, signal_zoo
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 KLINE_DIR = os.path.join(ROOT, "data", "raw", "kline")
+# 离线夹具：CI 上没有行情缓存时用它（真实数据的截断副本，随仓库提交）
+FIXTURE_DIR = os.path.join(ROOT, "tests", "fixtures")
 ATOL = 1e-12
 
 _PASS = 0
@@ -59,14 +61,16 @@ def check(name: str, fn) -> None:
 # 数据加载（只读本地缓存，绝不联网）
 # ----------------------------------------------------------------------
 def find_kline(code: str = "600519") -> str:
-    for pat in (f"{code}_h2.csv", f"{code}.csv"):
-        p = os.path.join(KLINE_DIR, pat)
-        if os.path.exists(p):
-            return p
-    hits = sorted(glob.glob(os.path.join(KLINE_DIR, f"{code}*.csv")))
-    if hits:
-        return hits[0]
-    raise FileNotFoundError(f"no cached kline for {code} in {KLINE_DIR}")
+    """优先本地缓存，其次仓库内置夹具（保证 CI 可离线跑）。"""
+    for base in (KLINE_DIR, FIXTURE_DIR):
+        for pat in (f"{code}_h2.csv", f"{code}.csv"):
+            p = os.path.join(base, pat)
+            if os.path.exists(p):
+                return p
+        hits = sorted(glob.glob(os.path.join(base, f"{code}*.csv")))
+        if hits:
+            return hits[0]
+    raise FileNotFoundError(f"no kline for {code} in {KLINE_DIR} or {FIXTURE_DIR}")
 
 
 def load_df(path: str) -> pd.DataFrame:
@@ -90,6 +94,7 @@ def main() -> int:
     zoo = signal_zoo()
     sids = [s.sid for s in zoo]
     path = find_kline("600519")
+    USING_FIXTURE = ("fixtures" in path.replace("\\", "/"))
     df = load_df(path)
     print(f"data  : {os.path.basename(path)}  bars={len(df)}  "
           f"{df['date'].iloc[0].date()} .. {df['date'].iloc[-1].date()}")
@@ -277,6 +282,10 @@ def main() -> int:
     check("peak memory (tracemalloc, informational)", t_mem)
 
     def t_batch():
+        avail = (sorted(glob.glob(os.path.join(KLINE_DIR, "*_h2.csv")))
+                 or sorted(glob.glob(os.path.join(FIXTURE_DIR, "*_h2.csv"))))
+        if len(avail) < 5:
+            return f"SKIP: only {len(avail)} kline files available (need >=5)"
         paths = list_codes(20)
         frames = [load_df(p) for p in paths]
         compute_signals(frames[0])                 # 预热

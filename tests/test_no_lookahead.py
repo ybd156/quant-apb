@@ -489,6 +489,8 @@ def run_l4_data_sanity(verbose=False):
     所以本检查按"是否能用停牌缺口解释"来分流，而不是一刀切。
     """
     files = sorted(glob.glob(os.path.join(ROOT, "data", "raw", "kline", "*_h2.csv")))
+    if not files:      # CI 上没有缓存 -> 用仓库内置夹具
+        files = sorted(glob.glob(os.path.join(ROOT, "tests", "fixtures", "*_h2.csv")))
     if not files:
         return None, "SKIP: no *_h2.csv (hfq) cache yet"
     import pandas as pd

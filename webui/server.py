@@ -44,6 +44,7 @@ from urllib.parse import parse_qs, urlparse
 WEBUI_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = WEBUI_DIR.parent
 STATIC_DIR = WEBUI_DIR / "static"
+VERSION_FILE = WEBUI_DIR / "VERSION"
 
 # 这些由 main() 在启动时赋值（单进程，无需下发到 handler 实例）
 STATE_DIR: Path = PROJECT_ROOT / "data" / "state"
@@ -58,8 +59,19 @@ STATE_FILES = {
     "ledger": "ledger.json",
     "performance": "performance.json",
     "paper": "paper.json",
+    "source_health": "source_health.json",
 }
 LIVE_TRADES_FILE = "live_trades.jsonl"
+
+# 可选文件（缺失不算错误，只是对应页面显示“未就绪”）
+OPTIONAL_FILES = {
+    "events": "events.json",            # 政策日历（qcore.policy_calendar 的导出）
+    "invariants": "invariants.json",    # 不变量检查结果（审计脚本导出）
+}
+# 政策日历的备用来源：qcore.policy_calendar.to_jsonl() 的真实落盘位置
+EVENTS_JSONL_FALLBACK = PROJECT_ROOT / "data" / "events" / "policy_calendar.jsonl"
+
+DEFAULT_VERSION = "0.0.0"
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_TOP = 200
@@ -128,6 +140,75 @@ def _rows_of(data):
             if isinstance(value, list):
                 return value
     return []
+
+
+def _read_version() -> str:
+    """版本号唯一真源：webui/VERSION。前端不硬编码，只显示这里读到的值。"""
+    try:
+        text = VERSION_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return DEFAULT_VERSION
+    return text or DEFAULT_VERSION
+
+
+def _build_time() -> str | None:
+    """构建时间 = 前端静态资源 + VERSION 里最新的 mtime（文件元数据，非计算结果）。"""
+    newest = 0.0
+    for path in (VERSION_FILE, STATIC_DIR / "index.html",
+                 STATIC_DIR / "app.js", STATIC_DIR / "style.css"):
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:
+            continue
+    if not newest:
+        return None
+    return _dt.datetime.fromtimestamp(newest).astimezone().isoformat(timespec="seconds")
+
+
+def _age_days(as_of) -> float | None:
+    """数据新鲜度（天）= 今天 - as_of。
+
+    这是**文件元数据**层面的新鲜度，用于顶栏连接指示灯，不是任何指标，
+    也不参与展示给用户的分析口径（UI 不做计算的铁律针对的是指标）。
+    """
+    if not as_of:
+        return None
+    try:
+        stamp = _dt.date.fromisoformat(str(as_of)[:10])
+    except ValueError:
+        return None
+    return round((_dt.date.today() - stamp).days, 1)
+
+
+def _read_jsonl(path: Path):
+    """读 JSONL（每行一个 JSON 对象），坏行跳过。"""
+    rows = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(obj, dict):
+                rows.append(obj)
+    except OSError:
+        return None
+    return rows
+
+
+def _file_meta(path: Path) -> dict:
+    try:
+        st = path.stat()
+    except OSError:
+        return {"exists": False}
+    return {
+        "exists": True,
+        "size": int(st.st_size),
+        "mtime": _dt.datetime.fromtimestamp(st.st_mtime).astimezone().isoformat(timespec="seconds"),
+    }
 
 
 def _clamp_int(raw, default: int, lo: int, hi: int) -> int:
@@ -323,9 +404,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_paper_trades(query)
         if path == "/api/run/status":
             return self._api_run_status()
+        if path == "/api/version":
+            return self._api_version()
+        if path == "/api/behavior":
+            return self._api_behavior()
+        if path == "/api/events":
+            return self._api_events(query)
+        if path == "/api/export":
+            return self._api_export(query)
         if path == "/api/health":
-            return self._ok({"state_dir": str(STATE_DIR), "static_dir": str(STATIC_DIR),
-                             "run_enabled": ALLOW_RUN})
+            return self._api_health()
         if path.startswith("/api/"):
             return self._fail("unknown_endpoint", 404, path=path)
         return self._fail("not_found", 404, path=path)
@@ -392,6 +480,153 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _api_run_status(self):
         with _RUN_LOCK:
             return self._ok(dict(_RUN))
+
+    # ---------------- 新增：版本 / 行为因子 / 政策事件 / 健康 / 导出 ----------------
+
+    def _api_version(self):
+        import platform as _platform
+        return self._ok({
+            "version": _read_version(),
+            "build_time": _build_time(),
+            "python": _platform.python_version(),
+            "platform": _platform.platform(),
+            "webui_dir": str(WEBUI_DIR),
+        })
+
+    def _api_behavior(self):
+        """行为因子：原样转发 performance.json 的 edge / behavior 段（不做任何计算）。"""
+        data, sent = self._load_or_not_ready("performance")
+        if sent is not None:
+            return sent
+        if not isinstance(data, dict):
+            return self._fail("bad_schema", 200, file=STATE_FILES["performance"],
+                              hint="期望 JSON 对象")
+        behavior = data.get("behavior")
+        return self._ok({
+            "generated_at": data.get("generated_at"),
+            "dataset": data.get("dataset"),
+            "edge": data.get("edge"),
+            "behavior": behavior if behavior is not None else None,
+        })
+
+    def _api_events(self, query):
+        """政策事件：优先 data/state/events.json，缺失时回退 qcore 真实落盘的 JSONL。"""
+        limit = _clamp_int(query.get("limit"), 500, 1, 2000)
+        primary = STATE_DIR / OPTIONAL_FILES["events"]
+        rows, source, impact = [], None, None
+
+        if primary.is_file():
+            data, err = _read_json(OPTIONAL_FILES["events"])
+            if err == "bad_json":
+                return self._fail("bad_json", 200, file=OPTIONAL_FILES["events"],
+                                  hint="文件存在但无法解析，稍后重试")
+            if err == "read_error":
+                return self._fail("read_error", 200, file=OPTIONAL_FILES["events"])
+            rows = _rows_of(data)
+            if isinstance(data, dict):
+                raw_impact = data.get("impact")
+                if isinstance(raw_impact, list):
+                    impact = raw_impact
+                elif isinstance(raw_impact, dict):
+                    impact = _rows_of(raw_impact)
+            source = str(primary)
+        elif EVENTS_JSONL_FALLBACK.is_file():
+            parsed = _read_jsonl(EVENTS_JSONL_FALLBACK)
+            if parsed is None:
+                return self._fail("read_error", 200, file=str(EVENTS_JSONL_FALLBACK))
+            rows = parsed
+            source = str(EVENTS_JSONL_FALLBACK)
+
+        if not rows:
+            return self._not_ready(
+                OPTIONAL_FILES["events"],
+                "政策日历尚未导出。运行 python -m qcore.policy_calendar --to-json "
+                "或让引擎写出 data/state/events.json 后刷新")
+
+        rows = [r for r in rows if isinstance(r, dict)]
+        # 按日期升序（文件里本来就是时间序，这里只做稳定排序，不改数值）
+        rows.sort(key=lambda r: str(r.get("date") or r.get("as_of") or ""))
+        payload = {"rows": rows[:limit], "n": len(rows), "source": source}
+        if impact:
+            payload["impact"] = [r for r in impact if isinstance(r, dict)]
+        return self._ok(payload)
+
+    def _api_health(self):
+        """连接指示灯 + 风险体检用：文件齐备度、数据新鲜度、数据源健康度。
+
+        data_age_days 是「今天 - status.as_of」的文件元数据新鲜度，不是指标。
+        """
+        status, _err = _read_json(STATE_FILES["status"])
+        as_of = status.get("as_of") if isinstance(status, dict) else None
+
+        missing = []
+        files = {}
+        for key, name in STATE_FILES.items():
+            meta = _file_meta(STATE_DIR / name)
+            files[name] = meta
+            if not meta["exists"]:
+                missing.append(name)
+        optional = {}
+        for key, name in OPTIONAL_FILES.items():
+            meta = _file_meta(STATE_DIR / name)
+            optional[name] = meta
+        optional_events_fallback = _file_meta(EVENTS_JSONL_FALLBACK)
+
+        source_health, _ = _read_json(STATE_FILES["source_health"])
+        invariants, _ = _read_json(OPTIONAL_FILES["invariants"])
+
+        age = _age_days(as_of)
+        return self._ok({
+            "ok": not missing,
+            "as_of": as_of,
+            "data_age_days": age,
+            "missing_files": missing,
+            "files": files,
+            "optional_files": optional,
+            "events_fallback": optional_events_fallback,
+            "source_health": source_health if isinstance(source_health, dict) else None,
+            "invariants": invariants,
+            "state_dir": str(STATE_DIR),
+            "static_dir": str(STATIC_DIR),
+            "run_enabled": ALLOW_RUN,
+            "server_time": _now_iso(),
+        })
+
+    def _api_export(self, query):
+        """导出数据：把已存在的 state 文件打包成一个 JSON 附件（纯拼接，不改数值）。"""
+        what = (query.get("what") or ["all"])[0]
+        bundle = {"ok": True, "_meta": {
+            "exported_at": _now_iso(),
+            "version": _read_version(),
+            "state_dir": str(STATE_DIR),
+        }}
+        keys = list(STATE_FILES) if what == "all" else [k for k in STATE_FILES if k == what]
+        if not keys:
+            return self._fail("bad_param", 400, hint="what 取 all|status|signals|regime|ledger|performance|paper")
+        got = 0
+        for key in keys:
+            data, err = _read_json(STATE_FILES[key])
+            if err is None:
+                bundle[key] = data
+                got += 1
+        if not got:
+            return self._not_ready("status.json", "没有任何可导出的状态文件")
+        body = json.dumps(_json_safe(bundle), ensure_ascii=False,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8")
+        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Disposition",
+                             f'attachment; filename="apb-state-{stamp}.json"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return 200, len(body)
 
     # ---------------- 路由：POST ----------------
 
