@@ -511,9 +511,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         info, _err = _read_json("update.json")
         info = info if isinstance(info, dict) else {}
         latest = info.get("latest_version") if isinstance(info, dict) else None
+        has_update = False
+        try:
+            from qcore.update_check import compare_versions
+            has_update = bool(latest and cur and compare_versions(latest, cur) > 0)
+        except Exception:
+            has_update = bool(latest and cur and latest != cur)
         return self._ok({
             "current": cur, "latest": latest,
-            "has_update": bool(latest and cur and latest != cur),
+            "has_update": has_update,
             "checked_at": (info or {}).get("checked_at"),
             "command": "docker compose pull && docker compose up -d",
         })

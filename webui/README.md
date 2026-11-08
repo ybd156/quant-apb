@@ -1,4 +1,6 @@
-# APB 控制台 — 零依赖 Web UI **v0.0.1**
+# APB 控制台 — 零依赖 Web UI
+
+> 版本号唯一真源是 `webui/VERSION`，由发布流程维护；页面顶栏只显示 `/api/version` 读到的值，前端不硬编码。
 
 自学习参数体（Adaptive Parameter Body）的只读看板 + 实盘成交录入。
 
@@ -7,7 +9,7 @@
 
 ```
 webui/
-├─ VERSION              # 版本号唯一真源（当前 0.0.1），前端只显示 /api/version 读到的值
+├─ VERSION              # 版本号唯一真源，前端只显示 /api/version 读到的值
 ├─ server.py            # ThreadingHTTPServer + 路由（只读 IO，不做任何指标计算）
 ├─ README.md
 └─ static/
@@ -59,13 +61,14 @@ python -m webui.server --host 0.0.0.0
 | 页面 | 内容 | 数据来源 |
 |---|---|---|
 | **总览** | 4 个 KPI（市场状态 / 可信度 Brier / Rank IC / 成本拖累）+ 净值曲线 + regime 色带 + 结论横幅 + 分年度 IC | `performance` `regime` `paper` `status` |
+| **市场** | 9 个指数卡（点位/涨跌幅/涨跌点数）+ 情绪温度条（0–100，分档配色）+ 市场宽度堆叠条 + 涨停/成交额 KPI + 60 秒自动刷新 | `market.json` |
 | **信号** | 权重 Top20 / Bottom20 条形图 + 全表（权重/命中率/更新次数/平均收益/发声 可排序）+ 族筛选 + 搜索 | `weights.json` |
 | **预测台账** | 最近预测表（命中绿 / 未中红 / pending 灰）+ 代码搜索 + 日期区间 + 结果筛选 | `ledger.json` |
 | **模拟实盘** | 模拟 vs 实盘双线净值 + 差异指标 + 成交录入表单 + 最近成交 | `paper.json` `live_trades.jsonl` |
 | **行为因子** | 10 个行为因子 IC / 多空价差双向条形 + 明细表（含「中性化后失效」标注） | `performance.behavior`（缺失时显示因子定义） |
 | **政策事件** | 政策日历时间线（类型/方向筛选）+ 影响因子表 | `events.json` → 回退 `data/events/policy_calendar.jsonl` |
 | **风险体检** | 8 条不变量检查 + 数据源健康度 + 成本明细 + 集中度 + 可信度校准 + 漂移监控 | `performance.risk/costs/confidence` `source_health.json` `invariants.json` |
-| **设置** | 版本/构建时间/Python/平台、数据文件清单、触发更新（需 token）、导出数据、主题 | `/api/version` `/api/health` |
+| **设置** | 版本/构建时间/Python/平台、**版本与更新（检查更新 / 立即更新）**、数据文件清单、触发引擎更新（需 token）、导出数据、主题 | `/api/version` `/api/health` `/api/update` |
 
 ### 布局与交互
 
@@ -90,6 +93,8 @@ python -m webui.server --host 0.0.0.0
 | `data/state/live_trades.jsonl` | 实盘成交（**UI 唯一写入**） | 每行 `{date, code, side, price, qty, note}` |
 | `data/state/events.json`（可选） | 政策日历 | `{events:[{date,type,subtype,title,direction,sectors[],evidence_level,note,lag}], impact:[...]}`；缺失时回退 `data/events/policy_calendar.jsonl` |
 | `data/state/invariants.json`（可选） | 不变量机读结果 | `[{id:"INV-1", name, status:"pass"/"fail", detail}]` |
+| `data/state/market.json` | 市场页 | `as_of, indices[{code,name,price,chg_pct,change}], breadth{up,down,flat,up_ratio,by_market}, limit_up, amount_yi, sentiment{ok,temperature,level,reason,parts}, missing[], elapsed_ms` |
+| `data/state/update.json`（可选） | 版本检查 | `{latest_version, checked_at}`（`/api/update` 用它和 `VERSION` 比对） |
 
 **UI 绝不做计算**：所有数值来自上面这些文件；`server.py` 只做「读 JSON → 取 Top N / 最近 N 天 → 原样转发」，
 前端只做取字段、排序、筛选、排版。图表坐标是像素映射，不改变数值含义。
@@ -121,6 +126,32 @@ perf["backtest"]["long_short"]["equity"] = [float(x) for x in equity[::5]]   # �
 
 ---
 
+## 4.1 应用内更新（流程与错误码）
+
+**入口**：顶栏 `v{current}` 右侧的蓝色徽章「有新版本 vX.Y.Z」（带呼吸光圈，只在**远端严格更新**时出现）。
+
+1. 点徽章 → 弹窗显示「当前版本 / 目标版本 / 最近检查」+ token 输入框（预填 `localStorage['apb.token']`）。
+2. 点「确认更新」→ `POST /api/update/apply`（`X-Token`）。
+3. 成功后弹窗切换成「更新中」：转圈 + 「每 10 秒自动检查一次」，顶栏徽章变成不可点的「更新中…」。
+4. 前端每 10 秒轮询 `/api/version`，一旦 `version` 与更新前不同 → toast「已更新到 vX」→ 2.5 秒后自动刷新页面；5 分钟未变则提示手动刷新。
+5. 失败按后端错误码分类提示，不把裸错误码丢给用户：
+
+| 后端 error | 前端提示 |
+|---|---|
+| `token_not_configured` | 服务端未设置 APB_TOKEN，无法在应用内更新（并清空本地 token） |
+| `unauthorized` | X-Token 与 APB_TOKEN 不匹配，请重新输入（并清空本地 token） |
+| `docker_socket_unavailable` | 容器未挂载 docker.sock，无法应用内更新 + 给出 `docker compose pull && docker compose up -d` |
+| `already_latest` | 已是最新版本 |
+| `import_error` / `helper_create_failed` / `helper_start_failed` | 对应失败原因 + 改用命令行 |
+| `network_error` | 无法连接服务（可能正在重启），稍等 1–3 分钟刷新 |
+
+> **前端有一层语义化版本兜底**：后端 `has_update` 用的是 `latest != current`，若远端版本比本地**旧**（例如本地 0.0.6、远端 0.0.5）也会为 true。
+> 前端用 `cmpVersion()` 再判一次，只有 `latest > current` 才显示徽章；否则设置页显示「远端更旧，已忽略」，**不会把降级当成升级**。
+
+token 只存在本机 `localStorage['apb.token']`（跨标签页只填一次），换设备需重填。
+
+---
+
 ## 5. HTTP 接口
 
 统一封套：成功 `{"ok":true,"data":{...}}`；失败 `{"ok":false,"error":"...","hint":"..."}`
@@ -140,6 +171,9 @@ perf["backtest"]["long_short"]["equity"] = [float(x) for x in equity[::5]]   # �
 | GET | `/api/paper` | 原样转发 |
 | GET | `/api/paper/trades?limit=50` | 实盘成交明细（最新在前） |
 | GET | `/api/health` | `{ok, as_of, data_age_days, missing_files[], files{}, optional_files{}, source_health{}, invariants, run_enabled, ...}` |
+| GET | `/api/market` | 实时行情与情绪（原样转发 `market.json`） |
+| GET | `/api/update` | `{current, latest, has_update, checked_at, command}` |
+| POST | `/api/update/apply` | 应用内一键更新（需 `X-Token`）；错误码见 §4.1 |
 | GET | `/api/export?what=all\|ledger\|signals\|performance` | 导出 JSON 附件（原样拼接，不加工） |
 | GET | `/api/run/status` | 最近一次 `/api/run` 的状态 |
 | POST | `/api/paper/trade` | 追加一行到 `live_trades.jsonl`（需 `Content-Type: application/json`） |
@@ -170,6 +204,8 @@ perf["backtest"]["long_short"]["equity"] = [float(x) for x in equity[::5]]   # �
 | `invariants.json` | 不变量表 8 行全部「未提供」并给出写入格式 |
 | `source_health.json` | 数据源健康度占位 |
 | `live_trades.jsonl` | 「还没有录入成交」（不算错误） |
+| `market.json` | 市场页显示「行情采集尚未启动」占位 + 期望字段说明，不空白、不崩 |
+| `update.json` | 更新徽章隐藏；设置页「远端最新 = 未知 / 状态 = 尚未检查」 |
 
 其它容错：读到半截 JSON → `bad_json` 提示重试；服务挂了 → 「无法连接服务」+ 红灯；
 数据里出现 `NaN`/`Infinity` → 服务端统一转 `null`（`NaN` 不是合法 JSON，浏览器 `JSON.parse` 会崩），前端显示 `—`。
@@ -180,10 +216,13 @@ perf["backtest"]["long_short"]["equity"] = [float(x) for x in equity[::5]]   # �
 ## 7. 自测记录
 
 ```bash
-python -m webui.server --port 8767                  # 真实 data/state
-python -m webui.server --port 8766 --state-dir tmp/uitest_empty   # 空目录
-node tmp/ui_dom_test.mjs http://127.0.0.1:8767 full
-node tmp/ui_dom_test.mjs http://127.0.0.1:8766 empty
+python -m webui.server --port 8777                                   # A 真实 data/state
+python -m webui.server --port 8766 --state-dir tmp/uitest_empty      # B 空目录
+python -m webui.server --port 8768 --state-dir tmp/state_update      # C 带 update.json（latest 0.0.7）
+
+node tmp/ui_dom_test.mjs http://127.0.0.1:8777 full      # A 全量
+node tmp/ui_dom_test.mjs http://127.0.0.1:8766 empty     # B 降级
+node tmp/ui_dom_test.mjs http://127.0.0.1:8768 update    # C 更新徽章 + 弹窗 + 错误分类
 ```
 
 `tmp/ui_dom_test.mjs` 是一个最小 DOM shim（约 200 行），在 Node 里真正执行 `app.js`，
@@ -193,7 +232,10 @@ node tmp/ui_dom_test.mjs http://127.0.0.1:8766 empty
 - 8 个页面在「有数据」「空目录」两种模式下都渲染成功，无 `undefined` / `NaN` / `[object Object]`；
 - 顶栏版本号来自 `/api/version`（正则 `^v\d+\.\d+\.\d+$`），且 **HTML 里不含硬编码版本号**；
 - 状态灯在空目录下为 `down`、有数据时为 `ok`/`stale`；
-- 成交表单已绑定 submit。
+- 成交表单已绑定 submit；
+- 市场页：9 个指数卡、宽度堆叠条、温度 `ok=false` 时显示 `—`（不是 0）且带「暂不计算」标注；
+- 更新徽章满足不变量「可见 ⟺ 远端严格更新」，点徽章开弹窗、错 token 走分类提示、点关闭能收起；
+- 设置页含「版本与更新」卡、检查更新按钮、命令行等价操作。
 
 ---
 
@@ -201,6 +243,8 @@ node tmp/ui_dom_test.mjs http://127.0.0.1:8766 empty
 
 1. **无法在本环境截图验证视觉**：沙箱禁止创建子进程（`WinError 5`），Chrome headless 无法 fork，
    所以视觉效果靠「DOM 结构 + 渲染断言」验证，像素级排版请在真机浏览器确认。
+   `POST /api/update/apply` 的**成功分支**同样无法在本机跑通（没有 docker.sock，实测返回 503
+   `docker_socket_unavailable`），已覆盖其错误分支；成功分支的「更新中 → 轮询 → 自动刷新」逻辑按契约实现。
 2. `performance.json` 的 `backtest.long_short` 目前**不含 `equity` 序列**，总览的净值曲线回退到
    `paper.sim_nav/live_nav`（页面上有标注）。引擎补 `equity` 后自动切换，无需改前端。
 3. `behavior` 段尚未导出 → 行为因子页显示「定义 + 未就绪」而不是编造数字。

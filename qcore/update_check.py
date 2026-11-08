@@ -79,6 +79,14 @@ def _tags_from(registry: str) -> Tuple[bool, List[str], str]:
         return False, [], f"{type(e).__name__}: {e}"[:80]
 
 
+def compare_versions(a: str, b: str) -> int:
+    """语义化比较：a>b 返回 1，相等 0，a<b 返回 -1。无法解析按字符串比。"""
+    ka, kb = _ver_key(a or ""), _ver_key(b or "")
+    if ka and kb:
+        return (ka > kb) - (ka < kb)
+    return (a > b) - (a < b)
+
+
 def _ver_key(tag: str):
     m = _SEMVER.match(tag)
     return tuple(int(x) for x in m.groups()) if m else None
@@ -103,6 +111,8 @@ def check(write: bool = True) -> Dict:
 
     cur_key = _ver_key(cur)
     has_update = bool(best_key and cur_key and best_key > cur_key)
+    # 远端比本地旧时明确标记，避免 UI 把降级当升级推销
+    behind = bool(best_key and cur_key and best_key < cur_key)
 
     out = {
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -110,6 +120,7 @@ def check(write: bool = True) -> Dict:
         "latest_version": best_tag,
         "registry": used,
         "has_update": has_update,
+        "behind_remote": behind,
         "attempts": attempts,
         "command": "docker compose pull && docker compose up -d",
         "note": ("检测到新版本，可在宿主机执行上面的命令升级"

@@ -511,13 +511,16 @@
       family: 'all', q: '', result: 'all', from: '', to: '', days: 30,
       evType: 'all', evDir: 'all'
     },
-    selSid: null
+    selSid: null,
+    update: null,
+    updating: false
   };
 
   /* ============================== 页面定义 ============================= */
 
   const PAGES = [
     { id: 'overview', label: '总览', icon: 'overview', title: '总览', sub: '这台测量仪现在读数是多少' },
+    { id: 'market', label: '市场', icon: 'market', title: '实时行情', sub: '指数 / 情绪温度 / 市场宽度' },
     { id: 'signals', label: '信号', icon: 'signals', title: '信号权重', sub: '每个「信号 × 参数」专家当前权重' },
     { id: 'ledger', label: '预测台账', icon: 'ledger', title: '预测台账', sub: '先封存，后对账' },
     { id: 'paper', label: '模拟实盘', icon: 'paper', title: '模拟实盘', sub: '模拟盘 vs 实盘对账' },
@@ -564,6 +567,254 @@
     const asof = res.data.as_of || '—';
     $('#chip-asof').textContent = '数据 ' + asof;
     $('#chip-asof').title = '最新数据日 ' + asof + (age === null ? '' : '（' + age + ' 天前）');
+  }
+
+  /* ======================= 版本更新（应用内一键更新） ==================== */
+
+  // 后端错误码 → 用户可读提示（分类处理，不把裸错误码丢给用户）
+  const UPDATE_ERRORS = {
+    token_not_configured: {
+      text: '服务端未设置 APB_TOKEN，无法在应用内更新',
+      hint: '请在容器环境变量里设置 APB_TOKEN 后重启服务，或改用命令行更新',
+      clearToken: true
+    },
+    unauthorized: {
+      text: 'X-Token 与 APB_TOKEN 不匹配',
+      hint: '请重新输入服务端环境变量里的 APB_TOKEN',
+      clearToken: true
+    },
+    docker_socket_unavailable: {
+      text: '容器未挂载 docker.sock，无法应用内更新',
+      hint: '请在宿主机执行：docker compose pull && docker compose up -d'
+    },
+    already_latest: { text: '已是最新版本', hint: '' },
+    import_error: { text: '服务端缺少 docker_api 模块', hint: '请改用命令行更新' },
+    helper_create_failed: { text: '辅助更新容器创建失败', hint: '请查看服务端日志或改用命令行更新' },
+    helper_start_failed: { text: '辅助更新容器启动失败', hint: '请查看服务端日志或改用命令行更新' },
+    network_error: { text: '无法连接服务（可能正在重启）', hint: '稍等 1–3 分钟后刷新页面' },
+    not_ready: { text: '服务端还没有更新信息', hint: '等服务器完成一次版本检查后重试' }
+  };
+
+  /** token 只存本机 localStorage（跨标签页只填一次） */
+  function getToken() {
+    let t = '';
+    try { t = localStorage.getItem('apb.token') || ''; } catch (e) { /* ignore */ }
+    if (!t) { try { t = sessionStorage.getItem('apb_token') || ''; } catch (e) { /* ignore */ } }
+    return t;
+  }
+  function setToken(t) {
+    try { localStorage.setItem('apb.token', t || ''); } catch (e) { /* ignore */ }
+    try { sessionStorage.setItem('apb_token', t || ''); } catch (e) { /* ignore */ }
+  }
+
+  /** 语义化版本比较（仅数字段）。返回 -1 / 0 / 1 —— 纯字符串处理，不涉及任何指标 */
+  function cmpVersion(a, b) {
+    const pa = String(a || '').split('.');
+    const pb = String(b || '').split('.');
+    const n = Math.max(pa.length, pb.length);
+    for (let i = 0; i < n; i++) {
+      const va = parseInt(pa[i], 10);
+      const vb = parseInt(pb[i], 10);
+      const x = isFinite(va) ? va : 0;
+      const y = isFinite(vb) ? vb : 0;
+      if (x !== y) return x > y ? 1 : -1;
+    }
+    return 0;
+  }
+
+  /** 只有远端「严格更新」才算有新版本：后端 has_update 是 latest != current，
+      会把「远端比本地旧」也标成可更新，这里必须再判一次，避免把降级当成升级。 */
+  function isNewer(latest, current) {
+    return !!latest && !!current && cmpVersion(latest, current) > 0;
+  }
+
+  async function loadUpdate(force) {
+    const res = await apiCached('/api/update', force ? 0 : 5000);
+    S.update = (res.ok && res.data) ? res.data : null;
+    renderUpdateBadge();
+    return S.update;
+  }
+
+  function renderUpdateBadge() {
+    const u = S.update;
+    const badge = $('#badge-update');
+    const text = $('#badge-update-text');
+    if (!badge) return;
+    if (S.updating) {
+      badge.hidden = false;
+      badge.disabled = true;
+      if (text) text.textContent = '更新中…';
+      return;
+    }
+    const latest = u && u.latest;
+    const cur = (u && u.current) || (S.version && S.version.version) || '';
+    if (u && u.has_update && isNewer(latest, cur)) {
+      badge.hidden = false;
+      badge.disabled = false;
+      if (text) text.textContent = '有新版本 v' + latest;
+      badge.title = '当前 v' + cur + ' → v' + latest + '，点击更新';
+    } else {
+      badge.hidden = true;
+      badge.disabled = false;
+      badge.title = '当前 v' + (cur || '?') + (latest ? '（远端 v' + latest + ' 不高于本地）' : '（尚未检查远端）');
+    }
+  }
+
+  /* ------------------------------- 弹窗 ------------------------------- */
+
+  function openModal(o) {
+    $('#modal-title').textContent = o.title || '';
+    $('#modal-body').innerHTML = o.body || '';
+    $('#modal-foot').innerHTML = o.foot || '';
+    $('#modal-mask').hidden = false;
+    $$('#modal-foot [data-close]').forEach((btn) => btn.addEventListener('click', closeModal));
+    const input = $('#modal-body input');
+    if (input && !input.value) input.focus();
+  }
+
+  function closeModal() { $('#modal-mask').hidden = true; }
+
+  /* --------------------------- 应用内更新流程 -------------------------- */
+
+  function openUpdateModal() {
+    const u = S.update || {};
+    const cur = u.current || (S.version && S.version.version) || '—';
+    const latest = u.latest || '—';
+    openModal({
+      title: '更新到 v' + latest,
+      body:
+        '<div class="kv" style="margin-bottom:12px">' +
+        kvItem('当前版本', 'v' + cur) +
+        kvItem('目标版本', 'v' + latest) +
+        kvItem('最近检查', u.checked_at || '未检查') +
+        '</div>' +
+        '<p>更新会在后台拉取新镜像并重启容器，<b>约 1–3 分钟</b>内本页面不可用，随后自动恢复。</p>' +
+        '<p class="muted" style="margin-top:6px">需要服务端设置 <code>APB_TOKEN</code>，并已挂载 <code>/var/run/docker.sock</code>；' +
+        '否则请用命令行：<code>' + esc(u.command || 'docker compose pull && docker compose up -d') + '</code></p>' +
+        '<label class="field" style="margin-top:12px"><span>APB_TOKEN（存本机 localStorage，只填一次）</span>' +
+        '<input id="upd-token" type="password" placeholder="与服务器环境变量一致" autocomplete="off" value="' + esc(getToken()) + '"></label>' +
+        '<p class="form-msg" id="upd-msg" style="margin-top:8px"></p>',
+      foot: '<button class="btn ghost" type="button" data-close="1">取消</button>' +
+        '<button class="btn primary" id="upd-confirm" type="button">' + ICON('download') + '确认更新</button>'
+    });
+    const btn = $('#upd-confirm');
+    if (btn) btn.addEventListener('click', applyUpdate);
+  }
+
+  async function applyUpdate() {
+    const msg = $('#upd-msg');
+    const btn = $('#upd-confirm');
+    const input = $('#upd-token');
+    const token = ((input && input.value) || getToken() || '').trim();
+    if (!token) {
+      if (msg) { msg.className = 'form-msg err'; msg.textContent = '请填写 APB_TOKEN'; }
+      if (input) input.focus();
+      return;
+    }
+    setToken(token);
+    if (btn) btn.disabled = true;
+    if (msg) { msg.className = 'form-msg'; msg.textContent = '正在提交…'; }
+
+    const res = await api('/api/update/apply', {
+      method: 'POST',
+      headers: { 'X-Token': token, Accept: 'application/json' }
+    });
+    if (btn) btn.disabled = false;
+
+    if (!res.ok) {
+      const info = UPDATE_ERRORS[res.error] || { text: '更新失败：' + (res.error || 'unknown'), hint: '' };
+      if (info.clearToken) setToken('');
+      if (msg) {
+        msg.className = 'form-msg err';
+        msg.innerHTML = esc(info.text) +
+          (info.hint ? '<br><span class="muted">' + esc(info.hint) + '</span>' : '') +
+          (res.hint && res.hint !== info.hint ? '<br><span class="muted">' + esc(res.hint) + '</span>' : '');
+      }
+      toast(info.text, 'err');
+      if (res.error === 'already_latest') { loadUpdate(true); }
+      return;
+    }
+
+    const to = (res.data && res.data.to) || (S.update && S.update.latest) || '';
+    startUpdateWatch(to, (res.data && res.data.note) || '');
+  }
+
+  /** 提交成功后：显示更新中，并每 10 秒轮询 /api/version 直到版本变化 */
+  function startUpdateWatch(to, note) {
+    S.updating = true;
+    renderUpdateBadge();
+    const body = $('#modal-body');
+    const foot = $('#modal-foot');
+    if (body) {
+      body.innerHTML =
+        '<div style="text-align:center;padding:6px 0 2px">' +
+        '<div class="spinner"></div>' +
+        '<p style="margin-top:12px">更新中，目标版本 <b>v' + esc(to || '?') + '</b></p>' +
+        '<p class="muted" style="margin-top:6px">' + esc(note || '更新在后台进行，约 1-3 分钟后刷新页面') + '</p>' +
+        '<p class="mono" id="upd-watch" style="margin-top:12px;color:var(--text-3);font-size:11px">等待首次检查…</p>' +
+        '</div>';
+    }
+    if (foot) {
+      foot.innerHTML = '<button class="btn ghost" type="button" data-close="1">后台继续</button>';
+      $$('#modal-foot [data-close]').forEach((btn) => btn.addEventListener('click', closeModal));
+    }
+    const from = (S.version && S.version.version) || (S.update && S.update.current) || '';
+    let tries = 0;
+    const timer = setInterval(async () => {
+      tries += 1;
+      const line = $('#upd-watch');
+      if (line) line.textContent = '第 ' + tries + ' 次检查 · ' + new Date().toLocaleTimeString();
+      const res = await api('/api/version');
+      if (res.ok && res.data && res.data.version && res.data.version !== from) {
+        clearInterval(timer);
+        S.updating = false;
+        S.update = null;
+        if (line) line.textContent = '已更新到 v' + res.data.version;
+        toast('已更新到 v' + res.data.version + '，正在刷新…', 'ok');
+        setTimeout(() => { try { location.reload(); } catch (e) { /* ignore */ } }, 2500);
+        return;
+      }
+      if (tries >= 30) {           // 10s × 30 = 5 分钟
+        clearInterval(timer);
+        S.updating = false;
+        renderUpdateBadge();
+        if (line) line.textContent = '等待超时：请手动刷新页面确认版本';
+        toast('等待超时，请手动刷新页面', 'err');
+      }
+    }, 10000);
+  }
+
+  /* ------------------------- 设置页：检查更新卡片 ---------------------- */
+
+  function updateCard(u) {
+    const cur = (u && u.current) || (S.version && S.version.version) || '—';
+    const latest = u && u.latest;
+    const newer = isNewer(latest, cur);
+    const same = !!latest && cmpVersion(latest, cur) === 0;
+    let stateTag;
+    if (S.updating) stateTag = '<span class="tag info">更新中…</span>';
+    else if (!latest) stateTag = '<span class="tag na">尚未检查</span>';
+    else if (newer) stateTag = '<span class="tag warn">有新版本</span>';
+    else if (same) stateTag = '<span class="tag ok">已是最新</span>';
+    else stateTag = '<span class="tag na">远端更旧，已忽略</span>';
+
+    return card({
+      title: '版本与更新', sub: '来自 /api/update',
+      body: kv([
+        kvItem('当前版本', 'v' + cur),
+        kvItem('远端最新', latest ? 'v' + latest : '未知'),
+        kvItem('最近检查', (u && u.checked_at) || '未检查'),
+        '<div class="item"><span class="k">状态</span><span class="v">' + stateTag + '</span></div>'
+      ]) +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">' +
+        '<button class="btn" id="btn-check-update" type="button">' + ICON('refresh') + '检查更新</button>' +
+        (newer
+          ? '<button class="btn primary" id="btn-do-update" type="button">' + ICON('download') + '立即更新到 v' + esc(latest) + '</button>'
+          : '') +
+        '</div>' +
+        '<p class="muted" style="margin-top:10px">命令行等价操作：<code>' +
+        esc((u && u.command) || 'docker compose pull && docker compose up -d') + '</code></p>'
+    });
   }
 
   /* =============================== 总览 ================================ */
@@ -704,6 +955,173 @@
       '<div style="margin-bottom:14px">' + bannerHtml + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + navCard + bandCard + '</div>' +
       '<div class="grid two">' + (subperiodCard || detailCard) + detailCard + '</div>';
+  }
+
+  /* =============================== 市场 ================================ */
+
+  // 情绪分档 → 配色（只做「等级文字 → 颜色」的映射，温度数值原样来自 /api/market）
+  const TEMP_LEVELS = {
+    '冰点': { cls: 't-ice', color: '#3b82f6' },
+    '偏冷': { cls: 't-cold', color: 'var(--down)' },
+    '中性': { cls: 't-neutral', color: '#94a3b8' },
+    '偏热': { cls: 't-warm', color: 'var(--warn)' },
+    '过热': { cls: 't-hot', color: 'var(--up)' }
+  };
+
+  /** level 文字优先；没有 level 时才按温度区间兜底（纯展示映射） */
+  function tempTone(level, temperature) {
+    if (level && TEMP_LEVELS[level]) return TEMP_LEVELS[level];
+    const t = toNum(temperature);
+    if (t === null) return { cls: 'temp-unknown', color: 'var(--text-3)' };
+    if (t < 20) return TEMP_LEVELS['冰点'];
+    if (t < 40) return TEMP_LEVELS['偏冷'];
+    if (t < 60) return TEMP_LEVELS['中性'];
+    if (t < 80) return TEMP_LEVELS['偏热'];
+    return TEMP_LEVELS['过热'];
+  }
+
+  /** 从 ISO 时间戳取 HH:MM:SS（字符串切片，不做时区换算） */
+  function clockOf(iso) {
+    const str = String(iso || '');
+    const m = str.match(/T(\d{2}:\d{2}:\d{2})/);
+    return m ? m[1] : (str || '—');
+  }
+
+  function indexCard(it) {
+    const chg = toNum(it.chg_pct);
+    const cls = chg === null ? 'is-flat' : chg > 0 ? 'is-up' : chg < 0 ? 'is-down' : 'is-flat';
+    const arrow = chg === null ? '' : chg > 0 ? '▲ ' : chg < 0 ? '▼ ' : '— ';
+    const chgTxt = chg === null ? '—' : (chg > 0 ? '+' : '') + num(chg, 2) + '%';
+    const pts = toNum(it.change);
+    const ptsTxt = pts === null ? '' : (pts > 0 ? '+' : '') + num(pts, 2);
+    return '<div class="idx ' + cls + '" title="' + esc((it.name || '') + ' ' + (it.code || '')) + '">' +
+      '<div class="idx-name"><span>' + esc(it.name || '—') + '</span>' +
+      '<span class="idx-code">' + esc(it.code || '') + '</span></div>' +
+      '<div class="idx-price">' + esc(num(it.price, 2)) + '</div>' +
+      '<div class="idx-chg">' + esc(arrow + chgTxt) + (ptsTxt ? ' · ' + esc(ptsTxt) : '') + '</div>' +
+      '</div>';
+  }
+
+  async function pageMarket() {
+    const res = await apiCached('/api/market', 0);
+    if (!res.ok || !res.data) {
+      setSub('采集未启动');
+      return notReadyBox(res) + '<div style="height:14px"></div>' + banner({
+        tone: 'warn', icon: 'alert',
+        title: '行情采集尚未启动',
+        text: '期望 <code>data/state/market.json</code>。启动采集后本页每 60 秒自动刷新，无需手动操作。',
+        meta: '字段：as_of / indices[] / breadth / limit_up / amount_yi / sentiment'
+      });
+    }
+
+    const d = res.data;
+    const indices = Array.isArray(d.indices) ? d.indices : [];
+    const b = (d.breadth && typeof d.breadth === 'object') ? d.breadth : {};
+    const sent = (d.sentiment && typeof d.sentiment === 'object') ? d.sentiment : {};
+    const missing = Array.isArray(d.missing) ? d.missing : [];
+
+    // 温度：ok=false 时显示「—」，绝不显示 0
+    const tempOk = sent.ok === true && toNum(sent.temperature) !== null;
+    const tempVal = toNum(sent.temperature);
+    const tone = tempTone(sent.level, tempOk ? tempVal : null);
+    const width = tempOk ? Math.max(0, Math.min(100, tempVal)) : 0;
+
+    setSub('采集于 ' + clockOf(d.as_of) +
+      (toNum(d.elapsed_ms) !== null ? ' · 耗时 ' + num(d.elapsed_ms, 0) + 'ms' : '') +
+      ' · 每 60 秒自动刷新');
+
+    /* --- 情绪温度 --- */
+    const tempCard = card({
+      title: '情绪温度', sub: 'sentiment.temperature · 0–100',
+      cls: tone.cls,
+      body:
+        '<div class="big-num">' + (tempOk ? esc(num(tempVal, 1)) : '—') +
+        (tempOk ? '<span class="unit">/100</span>' : '') + '</div>' +
+        '<div style="margin-top:4px">' +
+        (tempOk && sent.level ? '<span class="tag info">' + esc(sent.level) + '</span>' : '') +
+        (!tempOk ? '<span class="tag na">暂不计算</span>' : '') + '</div>' +
+        '<div class="temp-scale">' +
+        (tempOk ? '<i style="width:' + width.toFixed(1) + '%"></i>' : '') +
+        '<b style="left:25%"></b><b style="left:50%"></b><b style="left:75%"></b></div>' +
+        '<div class="temp-ticks"><span>0 冰点</span><span>25</span><span>50 中性</span><span>75</span><span>100 过热</span></div>' +
+        (!tempOk
+          ? '<p class="muted" style="margin-top:9px">' + esc(sent.reason || '历史样本不足，温度暂不可用') + '</p>'
+          : (sent.parts
+            ? '<p class="muted" style="margin-top:9px">分项（引擎原始值）：涨跌比 ' + num(sent.parts.up_ratio_pct, 2) +
+              ' · 涨停 ' + num(sent.parts.limit_up_pct, 2) + ' · 成交额 ' + num(sent.parts.amount_pct, 2) + '</p>'
+            : ''))
+    });
+
+    /* --- 涨停 / 成交额 --- */
+    const limitCard = card({
+      title: '涨停家数', sub: 'limit_up',
+      body: '<div class="big-num">' + esc(num(d.limit_up, 0)) + '<span class="unit">家</span></div>' +
+        '<p class="muted" style="margin-top:6px">当日封板家数（含连板）</p>'
+    });
+    const amountCard = card({
+      title: '两市成交额', sub: 'amount_yi · 亿元',
+      body: '<div class="big-num">' + esc(num(d.amount_yi, 1)) + '<span class="unit">亿元</span></div>' +
+        '<p class="muted" style="margin-top:6px">沪深两市合计</p>'
+    });
+
+    /* --- 市场宽度：flex-grow 让 CSS 分配比例，JS 不做除法 --- */
+    const up = toNum(b.up);
+    const down = toNum(b.down);
+    const flat = toNum(b.flat);
+    const hasBreadth = up !== null || down !== null || flat !== null;
+    const breadthCard = card({
+      title: '市场宽度', sub: 'breadth · 上涨 / 平盘 / 下跌 家数占比',
+      body: hasBreadth
+        ? '<div class="breadth-bar">' +
+          '<i class="b-up" style="flex:' + (up || 0) + ' 1 0" title="上涨 ' + (up || 0) + ' 家"></i>' +
+          '<i class="b-flat" style="flex:' + (flat || 0) + ' 1 0" title="平盘 ' + (flat || 0) + ' 家"></i>' +
+          '<i class="b-down" style="flex:' + (down || 0) + ' 1 0" title="下跌 ' + (down || 0) + ' 家"></i>' +
+          '</div>' +
+          '<div class="breadth-legend">' +
+          '<span class="bl"><i class="sw" style="background:var(--up)"></i>上涨 <span class="num">' + esc(num(up, 0)) + '</span></span>' +
+          '<span class="bl"><i class="sw" style="background:var(--text-3);opacity:.45"></i>平盘 <span class="num">' + esc(num(flat, 0)) + '</span></span>' +
+          '<span class="bl"><i class="sw" style="background:var(--down)"></i>下跌 <span class="num">' + esc(num(down, 0)) + '</span></span>' +
+          '<span class="bl">上涨占比 <span class="num">' + esc(pct(b.up_ratio)) + '</span></span>' +
+          '</div>' +
+          (b.by_market && typeof b.by_market === 'object'
+            ? '<div class="market-foot">' + Object.keys(b.by_market).map((k) => {
+              const m = b.by_market[k] || {};
+              return '<span>' + esc(k) + ' 涨 ' + esc(num(m.up, 0)) + ' / 平 ' + esc(num(m.flat, 0)) +
+                ' / 跌 ' + esc(num(m.down, 0)) + '</span>';
+            }).join('') + '</div>'
+            : '')
+        : emptyBox('暂无宽度数据', 'breadth 字段缺失。')
+    });
+
+    /* --- 指数网格 --- */
+    const idxCard = card({
+      title: '指数行情', sub: '共 ' + indices.length + ' 个',
+      body: indices.length
+        ? '<div class="idx-grid">' + indices.map(indexCard).join('') + '</div>'
+        : emptyBox('暂无指数数据', 'indices 为空。')
+    });
+
+    /* --- 采集脚注 --- */
+    const foot = '<div class="market-foot">' +
+      '<span>as_of ' + esc(d.as_of || '—') + '</span>' +
+      '<span>最后更新 ' + esc(clockOf(d.as_of)) + '</span>' +
+      (toNum(d.elapsed_ms) !== null ? '<span>耗时 ' + esc(num(d.elapsed_ms, 0)) + ' ms</span>' : '') +
+      (missing.length ? '<span style="color:var(--warn)">缺 ' + esc(missing.join(', ')) + '</span>' : '<span>数据完整</span>') +
+      '</div>';
+
+    return '<div class="grid" style="margin-bottom:14px">' + tempCard + limitCard + amountCard + '</div>' +
+      '<div style="margin-bottom:14px">' + breadthCard + '</div>' +
+      idxCard + foot;
+  }
+
+  /** 市场页自动刷新：只替换视图，不重置滚动位置 */
+  async function refreshMarket() {
+    if (S.page !== 'market' || document.hidden) return;
+    try {
+      const html = await pageMarket();
+      if (S.page !== 'market') return;
+      $('#view').innerHTML = html;
+    } catch (e) { /* 静默失败，下个周期再试 */ }
   }
 
   /* =============================== 信号 ================================ */
@@ -1350,9 +1768,12 @@
   /* ================================ 设置 ============================== */
 
   async function pageSettings() {
-    const [verRes, healthRes] = await Promise.all([apiCached('/api/version', 0), apiCached('/api/health', 0)]);
+    const [verRes, healthRes, updRes] = await Promise.all([
+      apiCached('/api/version', 0), apiCached('/api/health', 0), apiCached('/api/update', 0)
+    ]);
     const v = (verRes.ok && verRes.data) || {};
     const h = (healthRes.ok && healthRes.data) || {};
+    const u = (updRes.ok && updRes.data) || S.update || null;
     setSub('v' + (v.version || '—') + (v.python ? ' · Python ' + v.python : ''));
 
     const files = h.files || {};
@@ -1405,7 +1826,7 @@
     const runCard = card({
       title: '触发一次更新', sub: 'POST /api/run → python -m qcore.live --once（需 X-Token）',
       body: '<div class="form" style="grid-template-columns:minmax(0,1fr) auto;align-items:end">' +
-        '<label class="field"><span>APB_TOKEN（只存本标签页 sessionStorage）</span>' +
+        '<label class="field"><span>APB_TOKEN（存本机 localStorage，只填一次）</span>' +
         '<input id="set-token" type="password" placeholder="服务端环境变量 APB_TOKEN 的值" autocomplete="off"></label>' +
         '<button class="btn primary" id="btn-run" type="button">' + ICON('play') + '运行一次</button>' +
         '</div><p class="form-msg" id="run-msg" style="margin-top:10px">' +
@@ -1433,6 +1854,7 @@
     });
 
     return '<div class="grid two" style="margin-bottom:14px">' + infoCard + filesCard + '</div>' +
+      '<div style="margin-bottom:14px">' + updateCard(u) + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + runCard + exportCard + '</div>' +
       themeCard;
   }
@@ -1441,6 +1863,7 @@
 
   const RENDERERS = {
     overview: pageOverview,
+    market: pageMarket,
     signals: pageSignals,
     ledger: pageLedger,
     paper: pagePaper,
@@ -1569,13 +1992,20 @@
     if (id === 'settings') {
       const tk = $('#set-token');
       if (tk) {
-        try { tk.value = sessionStorage.getItem('apb_token') || ''; } catch (e) { /* ignore */ }
-        tk.addEventListener('change', () => {
-          try { sessionStorage.setItem('apb_token', tk.value.trim()); } catch (e) { /* ignore */ }
-        });
+        tk.value = getToken();
+        tk.addEventListener('change', () => setToken(tk.value.trim()));
       }
       const run = $('#btn-run');
       if (run) run.addEventListener('click', runOnce);
+      const chk = $('#btn-check-update');
+      if (chk) chk.addEventListener('click', async () => {
+        chk.disabled = true;
+        await loadUpdate(true);
+        navigate('settings', false);
+        toast('已重新读取更新信息', 'ok');
+      });
+      const doUpd = $('#btn-do-update');
+      if (doUpd) doUpd.addEventListener('click', openUpdateModal);
       $$('#set-theme .seg').forEach((b) => b.addEventListener('click', () => setTheme(b.getAttribute('data-t'))));
       refreshRunStatus();
     }
@@ -1648,11 +2078,10 @@
 
   async function runOnce() {
     const msg = $('#run-msg');
-    let token = '';
-    try { token = sessionStorage.getItem('apb_token') || ''; } catch (e) { /* ignore */ }
+    let token = getToken();
     if (!token) token = window.prompt('请输入服务端环境变量 APB_TOKEN 的值', '') || '';
     if (!token) { toast('未提供 X-Token，已取消', 'err'); return; }
-    try { sessionStorage.setItem('apb_token', token); } catch (e) { /* ignore */ }
+    setToken(token);
     const btn = $('#btn-run');
     if (btn) btn.disabled = true;
     const res = await api('/api/run', { method: 'POST', headers: { 'X-Token': token } });
@@ -1709,6 +2138,15 @@
       await Promise.all([loadVersion(), loadHealth()]);
       navigate(S.page, false);
     });
+    $('#badge-update').addEventListener('click', () => { if (!S.updating) openUpdateModal(); });
+    $('#chip-version').addEventListener('click', () => navigate('settings'));
+    $('#modal-close').addEventListener('click', closeModal);
+    $('#modal-mask').addEventListener('click', (ev) => {
+      if (ev.target === $('#modal-mask')) closeModal();
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !$('#modal-mask').hidden) closeModal();
+    });
     $('#btn-theme').addEventListener('click', toggleTheme);
     $('#btn-rail').addEventListener('click', toggleRail);
     $('#btn-menu').addEventListener('click', () => {
@@ -1733,6 +2171,8 @@
       rt = setTimeout(() => { if (S.page === 'overview' || S.page === 'paper') navigate(S.page, false); }, 260);
     });
     setInterval(() => { if (!document.hidden) loadHealth(); }, 60000);
+    // 市场页：页面可见时每 60 秒拉一次 /api/market
+    setInterval(() => { refreshMarket(); }, 60000);
   }
 
   /* ------------------------------- 启动 ------------------------------- */
@@ -1746,7 +2186,7 @@
     const start = RENDERERS[fromHash] ? fromHash : (RENDERERS[last] ? last : 'overview');
     const use = $('#theme-ico use');
     if (use) use.setAttribute('href', document.documentElement.getAttribute('data-theme') === 'light' ? '#i-sun' : '#i-moon');
-    await Promise.all([loadVersion(), loadHealth()]);
+    await Promise.all([loadVersion(), loadHealth(), loadUpdate()]);
     await navigate(start, true);
   }
 
