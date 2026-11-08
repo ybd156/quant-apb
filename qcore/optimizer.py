@@ -88,8 +88,8 @@ def optimize(mu: np.ndarray, Sigma: np.ndarray, w_prev: Optional[np.ndarray] = N
     mu: (N,) 预期收益；Sigma: (N,N) 协方差。
     返回最优权重与分解（收益项/风险项/换手项）。
     """
-    mu = np.asarray(mu, dtype=float)
-    S = np.asarray(Sigma, dtype=float)
+    mu = np.nan_to_num(np.asarray(mu, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+    S = np.nan_to_num(np.asarray(Sigma, dtype=float), nan=1e-6, posinf=1e-6, neginf=1e-6)
     n = mu.size
     if n == 0:
         return {"ok": False, "reason": "empty"}
@@ -142,11 +142,20 @@ def optimize(mu: np.ndarray, Sigma: np.ndarray, w_prev: Optional[np.ndarray] = N
 
 
 def turnover_aware_backtest(mu_series: np.ndarray, ret_series: np.ndarray,
-                            Sigma_fn=None, cfg: OptimizerConfig = OptimizerConfig()) -> Dict:
+                            Sigma_fn=None, cfg: OptimizerConfig = OptimizerConfig(),
+                            rebalance_every: int = 5, warmup: int = 60) -> Dict:
     """
     对比"等权"与"均值-方差+换手惩罚"的净收益（扣换手成本）。
     mu_series: (T,N) 每期预期收益；ret_series: (T,N) 实际收益。
     """
+    mu_series = np.asarray(mu_series, dtype=float)
+    ret_series = np.asarray(ret_series, dtype=float)
+    # 容错：(N,T) 传入时自动转置
+    if mu_series.shape != ret_series.shape:
+        if mu_series.T.shape == ret_series.shape:
+            mu_series = mu_series.T
+        elif ret_series.T.shape == mu_series.shape:
+            ret_series = ret_series.T
     T, N = mu_series.shape
     w_eq = np.full(N, 1.0 / N)
     w_prev = np.full(N, 1.0 / N)
@@ -156,12 +165,23 @@ def turnover_aware_backtest(mu_series: np.ndarray, ret_series: np.ndarray,
 
     for t in range(T):
         r = np.nan_to_num(ret_series[t], nan=0.0)
+        if t < warmup:
+            continue
         # 等权（每期再平衡）
         turn_eq = float(np.abs(w_eq - w_prev).sum())
         nav_eq *= (1 + float(w_eq @ r) - cost * turn_eq)
+        to_eq.append(turn_eq)
 
-        S = Sigma_fn(t) if Sigma_fn else np.diag(np.nanvar(ret_series[:t + 1], axis=0) + 1e-6)
-        res = optimize(mu_series[t], S, w_prev, cfg=cfg)
+        if (t - warmup) % rebalance_every != 0:
+            nav_mv *= (1 + float(w_prev @ r))
+            continue
+        if Sigma_fn is not None:
+            S = Sigma_fn(t)
+        else:
+            v = np.nanvar(ret_series[max(0, t - 250):t], axis=0, ddof=0)
+            S = np.diag(np.nan_to_num(v, nan=1e-4, posinf=1e-4, neginf=1e-4) + 1e-6)
+        mu_t = np.nan_to_num(mu_series[t], nan=0.0, posinf=0.0, neginf=0.0)
+        res = optimize(mu_t, S, w_prev, cfg=cfg)
         if res.get("ok"):
             w = res["weights"]
             turn_mv = float(np.abs(w - w_prev).sum())
@@ -170,7 +190,6 @@ def turnover_aware_backtest(mu_series: np.ndarray, ret_series: np.ndarray,
             to_mv.append(turn_mv)
         else:
             nav_mv *= (1 + float(w_prev @ r))
-        to_eq.append(turn_eq)
 
     return {"equal_weight": {"final_nav": float(nav_eq),
                              "total_return": float(nav_eq - 1),

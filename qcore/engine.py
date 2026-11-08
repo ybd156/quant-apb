@@ -216,3 +216,55 @@ def run_modes(p3d: Panel3D, cfg: RunConfig = RunConfig()) -> Dict[str, Dict]:
         c.weight_cfg = cfg.weight_cfg
         outs[mode] = run_walkforward(p3d, c)
     return outs
+
+# ------------------------------------------------------------------ 带符号模式
+def run_signed_mode(p3d: Panel3D, cfg: RunConfig = RunConfig(),
+                    signed_cfg=None) -> Dict:
+    """
+    带符号线性模式：允许负权重（逐个把反的信号翻过来）。
+    与 run_walkforward 返回同样的结构，便于直接对比与接入 pipeline。
+    """
+    from .signed import SignedConfig, run_signed
+
+    h = cfg.horizon
+    T, N, S = p3d.DIR.shape
+    sc = signed_cfg or SignedConfig(refit_every=20, warmup=cfg.warmup)
+    out = run_signed(p3d.DIR, p3d.STR, p3d.RET[h], h=h, sids=p3d.sids, cfg=sc)
+
+    scores = out["scores"]                     # (T,N)
+    scores = np.where(p3d.VALID, scores, np.nan).astype(np.float32)
+
+    # 与主引擎对齐：concord/quality 用简化版（带符号模型没有"投票一致性"概念）
+    concord = np.full((T, N), np.nan, dtype=np.float32)
+    quality = np.full((T, N), np.nan, dtype=np.float32)
+    for t in range(T):
+        act = p3d.DIR[t] != 0
+        nact = act.sum(axis=1).astype(np.float32)
+        quality[t] = (0.5 * p3d.VALID[t] + 0.5 * np.minimum(1.0, nact / 5.0)).astype(np.float32)
+
+    diag = {"hit_rate": np.full(S, np.nan), "n_updates": out["n_fit"],
+            "mean_payoff": np.zeros(S), "credit": out["model"].w,
+            "alarms": np.zeros(S, dtype=int), "z": out["model"].w}
+
+    res = {
+        "dates": p3d.dates, "codes": p3d.codes, "sids": p3d.sids,
+        "scores": np.ascontiguousarray(scores.T),
+        "scores_TN": scores,
+        "concord": np.ascontiguousarray(concord.T),
+        "quality": np.ascontiguousarray(quality.T),
+        "weights_hist": out["weights"],
+        "n_active_hist": np.zeros(T, dtype=np.int16),
+        "REGIME": p3d.REGIME,
+        "OPEN": np.ascontiguousarray(p3d.OPEN.T),
+        "CLOSE": np.ascontiguousarray(p3d.CLOSE.T),
+        "RET": {k: np.ascontiguousarray(v.T) for k, v in p3d.RET.items()},
+        "SIGMA": np.ascontiguousarray(p3d.SIGMA.T),
+        "VALID": np.ascontiguousarray(p3d.VALID.T),
+        "diagnostics": diag,
+        "weighter": out["model"],
+        "meta": {**p3d.meta, "mode": "signed", "horizon": h,
+                 "signed_cfg": sc.__dict__},
+    }
+    if cfg.record_ledger:
+        res["ledger"] = build_ledger(p3d, scores, cfg)
+    return res
