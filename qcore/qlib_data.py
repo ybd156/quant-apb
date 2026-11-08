@@ -1,0 +1,198 @@
+"""
+Qlib 二进制数据读取 —— 对接 `chenditc/investment_data`（Apache-2.0）。
+
+## 为什么换这套数据
+
+我们原来的池子是「今天市值前 300 的现存股票」，有严重生存者偏差
+（AGENTS.md INV-6，实测约 +22pp/年）。
+这套社区数据是 **6170 只股票、2000-2026、含退市股**，且提供
+**point-in-time 的成分股名单**（`instruments/csi300.txt` 每行带起止日期）。
+
+## 目录结构
+
+```
+qlib_bin/
+  calendars/day.txt            每行一个交易日
+  instruments/all.txt          code \t 起始日 \t 结束日
+  instruments/csi300.txt       CSI300 成分股（带起止日期 = 点对点）
+  features/sh600519/
+      close.day.bin            float32: [起始索引, 值...]
+      factor.day.bin           复权因子：原始价 = close / factor
+      open/high/low/volume/amount/vwap/change/adjclose.day.bin
+```
+
+## 关键口径
+
+1. **`.bin` 第一个 float 是「在 calendar 中的起始索引」**，不是数据。
+2. **close 是归一化价**（首日 = 1.0）。但**所有比值都保留**，
+   所以算技术因子可以直接用归一化序列，不需要还原。
+3. 要还原原始价：`raw = close / factor`（实测 600519 首日 35.55、末日 1453.00，正确）。
+4. `volume` 单位是股；`amount` 单位是元（不复权）。
+
+## 性能
+
+单只股票 10 个字段约 0.6 MB，全市场 6170 只约 3.7 GB 原始。
+所以**默认只加载需要的池子**（如 csi300 的 300 只），不要全量读。
+"""
+from __future__ import annotations
+
+import os
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_DIR = os.path.join(ROOT, "data", "qlib", "x", "qlib_bin")
+
+FIELDS = ("open", "high", "low", "close", "volume", "amount", "vwap", "factor")
+
+_cache: Dict[str, object] = {}
+
+
+def base_dir() -> str:
+    return os.environ.get("APB_QLIB_DIR", DEFAULT_DIR)
+
+
+def available() -> bool:
+    d = base_dir()
+    return os.path.isfile(os.path.join(d, "calendars", "day.txt"))
+
+
+def load_calendar() -> pd.DatetimeIndex:
+    key = "calendar"
+    if key in _cache:
+        return _cache[key]  # type: ignore[return-value]
+    p = os.path.join(base_dir(), "calendars", "day.txt")
+    with open(p, encoding="utf-8") as f:
+        dates = [ln.strip() for ln in f if ln.strip()]
+    idx = pd.DatetimeIndex(pd.to_datetime(dates))
+    _cache[key] = idx
+    return idx
+
+
+def load_instruments(name: str = "all") -> pd.DataFrame:
+    """返回 DataFrame[code, start, end]。"""
+    key = f"inst:{name}"
+    if key in _cache:
+        return _cache[key]  # type: ignore[return-value]
+    p = os.path.join(base_dir(), "instruments", f"{name}.txt")
+    rows = []
+    with open(p, encoding="utf-8") as f:
+        for ln in f:
+            parts = ln.strip().split("\t")
+            if len(parts) >= 3:
+                rows.append({"code": parts[0].lower(),
+                             "start": pd.Timestamp(parts[1]),
+                             "end": pd.Timestamp(parts[2])})
+    df = pd.DataFrame(rows)
+    _cache[key] = df
+    return df
+
+
+def _read_bin(path: str) -> Optional[np.ndarray]:
+    """读 .bin，返回 (start_idx, values)。文件缺失返回 None。"""
+    if not os.path.isfile(path):
+        return None
+    a = np.fromfile(path, dtype="<f4")
+    if a.size < 2:
+        return None
+    return int(a[0]), a[1:]
+
+
+def load_stock(code: str, fields: Iterable[str] = FIELDS,
+               start: Optional[str] = None, end: Optional[str] = None) -> Optional[pd.DataFrame]:
+    """
+    读单只股票。返回 DataFrame[date, open, high, low, close, volume, amount, vwap, factor]。
+    `close` 是归一化价（比值保留，可直接算因子）。
+    """
+    code = str(code).lower()
+    d = os.path.join(base_dir(), "features", code)
+    if not os.path.isdir(d):
+        return None
+    cal = load_calendar()
+    cols: Dict[str, np.ndarray] = {}
+    start_idx = None
+    for f in fields:
+        r = _read_bin(os.path.join(d, f"{f}.day.bin"))
+        if r is None:
+            if f in ("open", "high", "low", "close"):
+                return None          # 核心字段缺失 -> 这只票不可用
+            continue
+        si, vals = r
+        start_idx = si if start_idx is None else start_idx
+        cols[f] = vals
+    if start_idx is None or "close" not in cols:
+        return None
+    n = min(len(v) for v in cols.values())
+    dates = cal[start_idx:start_idx + n]
+    df = pd.DataFrame({"date": dates})
+    for f, v in cols.items():
+        df[f] = v[:n].astype(np.float64)
+    if "vwap" not in df.columns:
+        df["vwap"] = (df["high"] + df["low"] + df["close"]) / 3.0
+    if start is not None:
+        df = df[df["date"] >= pd.Timestamp(start)]
+    if end is not None:
+        df = df[df["date"] <= pd.Timestamp(end)]
+    df = df.dropna(subset=["open", "high", "low", "close"])
+    df = df[(df["close"] > 0) & (df["volume"] > 0)]
+    df = df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
+    return df if len(df) else None
+
+
+def build_panel(codes: Iterable[str], start: str = "2008-01-01",
+                min_bars: int = 500, verbose: bool = False) -> Dict[str, pd.DataFrame]:
+    """批量加载。返回 {code: DataFrame}。"""
+    out: Dict[str, pd.DataFrame] = {}
+    codes = [str(c).lower() for c in codes]
+    for i, c in enumerate(codes, 1):
+        df = load_stock(c, start=start)
+        if df is None or len(df) < min_bars:
+            continue
+        out[c] = df
+        if verbose and i % 100 == 0:
+            print(f"  ... {i}/{len(codes)}", flush=True)
+    return out
+
+
+def universe_codes(name: str = "csi300", start: Optional[str] = None) -> List[str]:
+    """取成分股代码。start 给定时只保留该时点仍在成分内的。"""
+    df = load_instruments(name)
+    if start is not None:
+        t = pd.Timestamp(start)
+        df = df[(df["start"] <= t) & (df["end"] >= t)]
+    return df["code"].tolist()
+
+
+def pit_membership(name: str = "csi300") -> Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]]:
+    """点对点成分：{code: [(start,end), ...]}，用于构造 UNIV 掩码。"""
+    df = load_instruments(name)
+    out: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {}
+    for r in df.itertuples(index=False):
+        out.setdefault(r.code, []).append((r.start, r.end))
+    return out
+
+
+def summary() -> Dict:
+    if not available():
+        return {"ok": False, "reason": f"数据目录不存在: {base_dir()}"}
+    cal = load_calendar()
+    inst = load_instruments("all")
+    return {"ok": True, "dir": base_dir(), "calendar_days": len(cal),
+            "date_from": str(cal[0].date()), "date_to": str(cal[-1].date()),
+            "n_stocks": len(inst),
+            "universe_files": sorted(
+                f.replace(".txt", "") for f in os.listdir(os.path.join(base_dir(), "instruments"))
+                if f.endswith(".txt"))}
+
+
+if __name__ == "__main__":
+    import json
+    print(json.dumps(summary(), ensure_ascii=False, indent=1))
+    if available():
+        codes = universe_codes("csi300", start="2017-01-01")
+        print(f"csi300 @2017-01-01: {len(codes)} 只")
+        df = load_stock(codes[0], start="2017-01-01")
+        print(f"{codes[0]}: {len(df)} 根  {df['date'].min().date()} -> {df['date'].max().date()}")
+        print(df.head(3).to_string())

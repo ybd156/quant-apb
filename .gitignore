@@ -43,3 +43,6 @@ data/claims/
 # 临时脚本
 _*.py
 tmp/
+
+# Qlib 社区数据（544MB 压缩 / 3.7GB 解压），不入库
+data/qlib/
