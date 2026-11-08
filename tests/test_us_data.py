@@ -71,8 +71,13 @@ def _quality(name: str, df: pd.DataFrame, min_bars: int = 500) -> None:
                             (df["close"].to_numpy()[1:] / df["close"].to_numpy()[:-1] - 1) * 100,
                             atol=1e-6, rtol=0)),
            "recomputed from close")
-    _check(f"{name} dropped_jumps is small", len(df.attrs.get("dropped_jumps", [])) <= 5,
-           f"dropped={len(df.attrs.get('dropped_jumps', []))}")
+    _check(f"{name} repaired_jumps is small", len(df.attrs.get("repaired", [])) <= 5,
+           f"repaired={len(df.attrs.get('repaired', []))}")
+    # amount=0 且 volume>0 是自相矛盾的"假零"（东财美股 2017-07 前通病），必须已转 NaN；
+    # volume=0 的停市 bar 保持 0 是合理的。
+    _check(f"{name} no fake-zero amount (volume>0 & amount==0)",
+           not bool(((df["volume"] > 0) & df["amount"].notna() & (df["amount"] <= 0)).any()),
+           f"nan={int(df['amount'].isna().sum())}")
 
 
 # ---------------------------------------------------------------- 1

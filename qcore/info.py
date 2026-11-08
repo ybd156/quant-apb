@@ -433,69 +433,117 @@ def _fundamental_item(code: str, rows: List[dict], cutoff: Optional[datetime],
 # ---------------------------------------------------------------------------
 # 4) 板块（行业涨幅 + 排名）
 # ---------------------------------------------------------------------------
-_BOARD_CACHE: Dict[str, Any] = {"ts": 0.0, "rows": [], "total": 0}
-_BOARD_TTL = 600.0
+_BOARD_CACHE: Dict[str, Any] = {"ts": 0.0, "rows": [], "complete": False}
+_BOARD_TTL = 600.0                                   # 进程内 10 分钟
+_BOARD_FILE = os.path.join(ROOT, "data", "cache", "board_table.json")
+_BOARD_FILE_TTL = 12 * 3600.0                        # 落盘 12 小时：一天只付一次 5 页的代价
 
 
-def _board_table(force: bool = False) -> List[dict]:
-    """全部行业板块涨幅榜（m:90+t:2，实测 total≈496，需分页，pz 上限 100）。
-    进程内缓存 10 分钟 —— 一次快照只为"排名"付一次 5 请求的代价。"""
+def _board_table(force: bool = False) -> tuple[List[dict], bool]:
+    """全部行业板块涨幅（m:90+t:2，实测 total≈496，pz 上限 100 → 必须分 5 页）。
+
+    返回 (rows, complete)。**complete=False 时不许算排名**：少一页就会把名次算错，
+    宁可 rank=None + note，也不要一个假名次。
+    实测 clist 分页接口会被限流（RemoteDisconnected），所以：内存缓存 10 分钟 +
+    落盘 12 小时 + 每页只重试 2 次（快速失败，别让一次快照为排名卡 12 秒）。
+    """
     if (not force) and _BOARD_CACHE["rows"] and \
             (time.time() - _BOARD_CACHE["ts"]) < _BOARD_TTL:
-        return _BOARD_CACHE["rows"]
+        return _BOARD_CACHE["rows"], _BOARD_CACHE["complete"]
+    if (not force) and os.path.exists(_BOARD_FILE):
+        if (time.time() - os.path.getmtime(_BOARD_FILE)) < _BOARD_FILE_TTL:
+            try:
+                with open(_BOARD_FILE, "r", encoding="utf-8") as f:
+                    obj = json.load(f)
+                rows = obj.get("rows") or []
+                if rows:
+                    _BOARD_CACHE.update(ts=time.time(), rows=rows,
+                                        complete=bool(obj.get("complete")))
+                    return rows, bool(obj.get("complete"))
+            except Exception:               # noqa: BLE001
+                pass
     rows: List[dict] = []
+    total = None
+    complete = False
     for pn in range(1, 7):
         url = ("https://push2.eastmoney.com/api/qt/clist/get"
                f"?pn={pn}&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:2"
                "&fields=f12,f14,f3")
-        d = _get_json(url)
-        diff = ((d or {}).get("data") or {}).get("diff") or []
+        d = _get_json(url, retries=2)
+        data = (d or {}).get("data") or {}
+        diff = data.get("diff") or []
+        if total is None:
+            total = _num(data.get("total"))
         if not diff:
             break
         rows.extend(diff)
         if len(diff) < 100:
+            complete = True
+            break
+        if total is not None and len(rows) >= int(total):
+            complete = True
             break
     if rows:
-        _BOARD_CACHE.update(ts=time.time(), rows=rows, total=len(rows))
-    return rows
+        _BOARD_CACHE.update(ts=time.time(), rows=rows, complete=complete)
+        try:
+            os.makedirs(os.path.dirname(_BOARD_FILE), exist_ok=True)
+            with open(_BOARD_FILE, "w", encoding="utf-8") as f:
+                json.dump({"ts": _iso(_now()), "total": total, "complete": complete,
+                           "rows": rows}, f, ensure_ascii=False)
+        except Exception:                   # noqa: BLE001
+            pass
+    return rows, complete
 
 
 def _sector_item(code: str, quote: Optional[dict], board_code: Optional[str],
                  board_name: Optional[str], as_of_iso: str) -> InfoItem:
     bc = board_code
     bn = board_name or (quote or {}).get("f127")
+    table, complete = _board_table()
     if not bc and bn:
-        for r in _board_table():
+        for r in table:
             if r.get("f14") == bn:
                 bc = r.get("f12")
                 break
     if not bc:
         raise RuntimeError("industry board unresolved")
-    d = _get_json(f"https://push2.eastmoney.com/api/qt/stock/get?secid=90.{bc}"
-                  f"&fltt=2&invt=2&fields=f43,f57,f58,f170,f136")
-    bd = (d or {}).get("data") or None
-    if not bd:
-        raise RuntimeError(f"board quote empty for {bc}")
-    pct = _num(bd.get("f170"))
+    # 优先从已缓存的板块榜单里取涨幅/名次 —— 榜单里本来就有该板块，没必要再打一次接口
+    # （实测单独问 90.BKxxxx 会偶发断连，少一次请求就少一个失败点）。
+    row = next((r for r in table if r.get("f12") == bc), None)
+    if row is not None:
+        pct = _num(row.get("f3"))
+        bname = row.get("f14") or bn
+        amount = None
+        origin = "board_table"
+    else:
+        d = _get_json(f"https://push2.eastmoney.com/api/qt/stock/get?secid=90.{bc}"
+                      f"&fltt=2&invt=2&fields=f43,f57,f58,f170,f136", retries=3)
+        bd = (d or {}).get("data") or None
+        if not bd:
+            raise RuntimeError(f"board quote empty for {bc}")
+        pct = _num(bd.get("f170"))
+        bname = bd.get("f58") or bn
+        amount = _num(bd.get("f136"))
+        origin = "board_quote"
     rank = None
-    table = _board_table()
-    if table:
+    n_board = None
+    if table and complete:
         ordered = sorted([r for r in table if _num(r.get("f3")) is not None],
                          key=lambda r: float(_num(r.get("f3"))), reverse=True)
+        n_board = len(ordered)
         for i, r in enumerate(ordered, 1):
             if r.get("f12") == bc:
                 rank = i
                 break
-        n_board = len(ordered)
-    else:
-        n_board = None
     payload = {
         "board_code": bc,
-        "board_name": bd.get("f58") or bn,
+        "board_name": bname,
         "board_pct_chg": pct,
-        "board_amount": _num(bd.get("f136")),
+        "board_amount": amount,
         "board_rank": rank,
         "board_total": n_board,
+        "board_table_complete": complete,
+        "pct_from": origin,
         "matched_by": "f10_board_code" if board_code else "quote_industry_name",
     }
     factors = [1.0]
@@ -505,7 +553,7 @@ def _sector_item(code: str, quote: Optional[dict], board_code: Optional[str],
         notes.append("板块由行业名称反查，存在同名/跨板块误匹配风险")
     if rank is None:
         factors.append(0.95)
-        notes.append("板块排名缺失（榜单拉取失败）")
+        notes.append("板块排名缺失（榜单不完整，拒绝给假名次）")
     return _item("sector", "sector", as_of_iso, payload,
                  _reliability(SOURCE_RELIABILITY["sector"], *factors), "；".join(notes))
 
@@ -513,36 +561,66 @@ def _sector_item(code: str, quote: Optional[dict], board_code: Optional[str],
 # ---------------------------------------------------------------------------
 # 5) 市场宽度 + 涨停数
 # ---------------------------------------------------------------------------
+#: 市场级信息（宽度/涨停/板块榜）与个股无关，批量采 300 只时不能每股都打一遍。
+#: 进程内 TTL 缓存（默认 5 分钟）把单股快照的请求数从 ~11 降到 ~5。
+_MKT_CACHE: Dict[str, Any] = {}
+_MKT_TTL = 300.0
+
+
+def _market_item(key: str, builder, *args) -> InfoItem:
+    ent = _MKT_CACHE.get(key)
+    if ent and (time.time() - ent[0]) < _MKT_TTL:
+        return ent[1]
+    it = builder(*args)
+    _MKT_CACHE[key] = (time.time(), it)
+    return it
+
+
 def _breadth_item(as_of_iso: str) -> InfoItem:
-    """沪深两市涨跌家数。单只指数 stock/get 的 f104/f105/f106 恒为 0/0/100（已测不可用），
-    必须用 ulist.np/get 批量接口。"""
-    url = ("https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2"
-           "&secids=1.000001,0.399001&fields=f2,f3,f12,f14,f104,f105,f106,f6")
-    d = _get_json(url)
-    diff = ((d or {}).get("data") or {}).get("diff") or []
-    if not diff:
-        raise RuntimeError("ulist breadth empty")
+    """沪深两市涨跌家数。
+
+    两个实测坑：
+      ① 单只指数 stock/get 的 f104/f105/f106 恒为 0/0/100（已测不可用），必须用 ulist.np/get；
+      ② 一次塞两个 secid 的请求约 20% 概率被 RemoteDisconnected 掉线（5 次实测 4 成功），
+         而单 secid 的请求 5/5 稳定 → 所以**分市场各发一次**，一个失败只降级不整块丢。
+    """
+    members = (("1.000001", "SH", "沪市"), ("0.399001", "SZ", "深市"))
     up = down = flat = 0
     amt = 0.0
-    parts = {}
-    for r in diff:
+    parts: Dict[str, Any] = {}
+    failed: List[str] = []
+    for sec, tag, _ in members:
+        url = ("https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2"
+               f"&secids={sec}&fields=f2,f3,f12,f14,f104,f105,f106,f6")
+        d = _get_json(url, retries=3)
+        diff = ((d or {}).get("data") or {}).get("diff") or []
+        if not diff:
+            failed.append(tag)
+            continue
+        r = diff[0]
         u, dn, fl = (_num(r.get("f104")) or 0), (_num(r.get("f105")) or 0), (_num(r.get("f106")) or 0)
-        up += int(u); down += int(dn); flat += int(fl)
         a = _num(r.get("f6")) or 0.0
-        amt += a
-        parts[str(r.get("f12"))] = {"up": int(u), "down": int(dn), "flat": int(fl), "amount": a}
+        up += int(u); down += int(dn); flat += int(fl); amt += a
+        parts[tag] = {"up": int(u), "down": int(dn), "flat": int(fl), "amount": a,
+                      "index": r.get("f14")}
+    if not parts:
+        raise RuntimeError("ulist breadth empty for SH and SZ")
     tot = up + down + flat
     payload = {
         "up": up, "down": down, "flat": flat, "total": tot,
         "adv_dec_ratio": round(up / down, 4) if down else None,
         "up_ratio": round(up / tot * 100, 2) if tot else None,
         "amount_total": amt,
-        "by_index": parts,
+        "by_market": parts,
+        "failed_markets": failed,
         "scope": "沪深两市（不含北交所）",
     }
+    factors = [1.0 if not failed else 0.9]
+    note = "指数聚合字段，不含北交所；只覆盖当前交易日"
+    if failed:
+        note += f"；{','.join(failed)} 未取到，宽度只覆盖部分市场"
     return _item("breadth", "breadth", as_of_iso, payload,
-                 _reliability(SOURCE_RELIABILITY["breadth"]),
-                 "指数聚合字段，不含北交所；只覆盖当前交易日")
+                 _reliability(SOURCE_RELIABILITY["breadth"], *factors), note)
 
 
 def _limit_up_item(as_of_iso: str, day: Optional[str] = None) -> InfoItem:
@@ -584,25 +662,58 @@ def _norm_title(t: Any) -> str:
     return _PUNCT_RE.sub("", s)
 
 
-def _dedupe(rows: List[dict], key: str = "title") -> List[dict]:
-    """同一事件被多源转述 → 合成一条，保留最早发布的那条（最接近一手），
-    其余进 duplicates。判定：归一化标题相等 / 互为前缀（≥75% 长度）/ 前 12 字相同且数字集合相同。"""
+def _daydiff(a: Any, b: Any) -> int:
+    """两个 'YYYY-MM-DD' 相差的天数；任一缺失返回 0（视为同日，不阻断合并）。"""
+    try:
+        da = datetime.strptime(str(a)[:10], "%Y-%m-%d")
+        db = datetime.strptime(str(b)[:10], "%Y-%m-%d")
+        return abs((da - db).days)
+    except Exception:                       # noqa: BLE001
+        return 0
+
+
+def _ts_num(ts: Any) -> float:
+    """'YYYY-MM-DDTHH:MM:SS' → 可比较的时间戳（用于"最新在前"排序）。"""
+    try:
+        return datetime.strptime(str(ts)[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+    except Exception:                       # noqa: BLE001
+        return 0.0
+
+
+def _dedupe(rows: List[dict], key: str = "title", strict: bool = False,
+            max_day_gap: int = 3) -> List[dict]:
+    """同一事件被多源转述 → 合成一条，保留**最早发布**的那条（最接近一手），其余进 duplicates。
+
+    判定（必须同时满足"日期接近"，否则同一主题的旧闻会被误合并 —— 实测教训：
+    公告标题全部以"XX公司:XX公司关于…"开头，纯前缀匹配会把半年来不同公告揉成一条）：
+      strict=True  → 归一化标题完全相同（公告用：只合并真正重复的同一份文件）；
+      strict=False → 完全相同 / 互为前缀且长度比 ≥0.85 且 ≥12 字 / 前 16 字相同且数字集合相同。
+    日期窗口 max_day_gap 天。
+    """
     groups: List[dict] = []
     for r in rows:
         n = _norm_title(r.get(key))
         sig = tuple(re.findall(r"\d+(?:\.\d+)?", n))
+        d = r.get("_d") or ""
         hit = None
         for g in groups:
+            if _daydiff(d, g["_d"]) > max_day_gap:
+                continue
             gn = g["_norm"]
             if n == gn:
-                hit = g; break
+                hit = g
+                break
+            if strict or not n or not gn:
+                continue
             a, b = (n, gn) if len(n) <= len(gn) else (gn, n)
-            if a and b and b.startswith(a) and len(a) / len(b) >= 0.75:
-                hit = g; break
-            if len(n) >= 12 and len(gn) >= 12 and n[:12] == gn[:12] and sig and sig == g["_sig"]:
-                hit = g; break
+            if b.startswith(a) and len(a) >= 12 and len(a) / len(b) >= 0.85:
+                hit = g
+                break
+            if len(n) >= 16 and n[:16] == gn[:16] and sig and sig == g["_sig"]:
+                hit = g
+                break
         if hit is None:
-            groups.append({"_norm": n, "_sig": sig, "main": r, "dups": []})
+            groups.append({"_norm": n, "_sig": sig, "_d": d, "main": r, "dups": []})
         else:
             hit["dups"].append(r)
             if str(r.get("_ts", "")) < str(hit["main"].get("_ts", "")):
@@ -634,13 +745,16 @@ def _announcement_items(code: str, cutoff: Optional[datetime], as_of_iso: str,
             "art_code": r.get("art_code"),
             "columns": ",".join(c.get("column_name", "") for c in (r.get("columns") or [])),
             "url": f"https://data.eastmoney.com/notices/detail/{code}/{r.get('art_code')}.html",
+            "_d": dt.strftime("%Y-%m-%d"),
             "_ts": dt.strftime("%Y-%m-%dT%H:%M:%S"),
         })
     if not rows:
         raise RuntimeError("no announcement on/before as_of")
     rows.sort(key=lambda r: r["_ts"], reverse=True)
     out: List[InfoItem] = []
-    for g in _dedupe(rows)[:10]:
+    # 公告用 strict=True：只合并"归一化标题完全相同"的重复文件。实测若用宽松前缀匹配，
+    # 半年内不同公告（都以"XX公司:XX公司关于…"开头）会被揉成一条，数量与日期全错。
+    for g in _dedupe(rows, strict=True, max_day_gap=2)[:10]:
         m = g["main"]
         ndup = 1 + len(g["dups"])
         payload = {
@@ -657,6 +771,7 @@ def _announcement_items(code: str, cutoff: Optional[datetime], as_of_iso: str,
         out.append(_item("announcement", "announcement",
                          f"{m['notice_date']}T00:00:00+08:00", payload, rel,
                          "法定披露，一手；仅覆盖已发布公告，无法回补历史可见集合（禁止回测）"))
+    out.sort(key=lambda i: i.as_of, reverse=True)      # 最新在前（去重后组序会乱）
     return out
 
 
@@ -699,13 +814,29 @@ def _news_items(code: str, name: Optional[str], cutoff: Optional[datetime],
         rows.append({
             "title": title, "content": content[:200], "media": r.get("mediaName"),
             "url": r.get("url"), "date": dt.strftime("%Y-%m-%d %H:%M"),
-            "in_title": in_title, "_ts": dt.strftime("%Y-%m-%dT%H:%M:%S"),
+            "in_title": in_title, "_d": dt.strftime("%Y-%m-%d"),
+            "_ts": dt.strftime("%Y-%m-%dT%H:%M:%S"),
         })
     if not rows:
         raise RuntimeError("no relevant news on/before as_of")
     rows.sort(key=lambda r: r["_ts"], reverse=True)
     out: List[InfoItem] = []
-    for g in _dedupe(rows)[:10]:
+    # 相关性优先：标题命中个股的排前面（最多 8 条），仅正文提及的最多留 3 条 ——
+    # 实测搜代码会命中大量"主力动向/机构评级"大盘综述，正文里只是顺带列到该股，
+    # 全收进来会把"新闻"变成噪声。
+    groups = _dedupe(rows, strict=False, max_day_gap=5)
+    groups.sort(key=lambda g: (0 if g["main"]["in_title"] else 1,
+                               -_ts_num(g["main"]["_ts"])))
+    picked, n_body = [], 0
+    for g in groups:
+        if not g["main"]["in_title"]:
+            if n_body >= 3:
+                continue
+            n_body += 1
+        picked.append(g)
+        if len(picked) >= 10:
+            break
+    for g in picked:
         m = g["main"]
         ndup = 1 + len(g["dups"])
         rel = _reliability(
@@ -731,6 +862,7 @@ def _news_items(code: str, name: Optional[str], cutoff: Optional[datetime],
             note += "；仅正文提及，相关性弱"
         out.append(_item("news", "news",
                          m["_ts"] + "+08:00", payload, rel, note))
+    out.sort(key=lambda i: i.as_of, reverse=True)
     return out
 
 
@@ -741,7 +873,7 @@ def _snap_shell(code: str, market: str, as_of: Any) -> dict:
     return {"code": code, "market": market,
             "as_of": _iso(_parse_as_of(as_of) or _now()),
             "fetched_at": _iso(_now()), "mode": "live",
-            "items": [], "summary": {}, "missing": []}
+            "items": [], "summary": {}, "missing": [], "timings_ms": {}}
 
 
 def snapshot(code: str, market: str = "CN", as_of: str | None = None) -> dict:
@@ -783,19 +915,31 @@ def snapshot(code: str, market: str = "CN", as_of: str | None = None) -> dict:
 
     # --- 存在性探针：东财对不存在的 secid 返回 rc=100 / data=null（不是抛异常），
     #     用它做快速校验，避免对错误代码做 5 次退避重试（kline 侧要 ~12s）。
-    quote = _fetch_quote(code)
+    timings: Dict[str, float] = {}
+
+    def _timed(name: str, fn, *a, **kw):
+        """记录每个源的耗时（ms），写进 snap['timings_ms'] —— 限速+重试的锅要能查出来。"""
+        t = time.perf_counter()
+        try:
+            return fn(*a, **kw)
+        finally:
+            timings[name] = round((time.perf_counter() - t) * 1000, 1)
+
+    quote = _timed("quote", _fetch_quote, code)
     if quote is None and _probe_rc_failed(code):
         for s in SOURCE_RELIABILITY:
             miss(s, f"code {code} not found (eastmoney rc=100, data=null)")
         snap["summary"] = {"code": code, "market": mk, "n_items": 0, "n_sources": 0}
+        snap["timings_ms"] = timings
         snap["elapsed_s"] = round(time.perf_counter() - t0, 3)
         return snap
 
     # --- 1. kline（可回补，且决定"最新交易日"→ 决定 live/backfill）
     kdf_close = None
     full_last = None
+
     try:
-        ki, full_last = _kline_item(code, cutoff)
+        ki, full_last = _timed("kline", _kline_item, code, cutoff)
         items.append(ki)
         kdf_close = ki.payload.get("close")
         snap["date"] = ki.payload["date"]
@@ -823,7 +967,8 @@ def snapshot(code: str, market: str = "CN", as_of: str | None = None) -> dict:
     if live:
         if quote:
             try:
-                items.append(_valuation_item(code, quote, kdf_close, now_iso))
+                items.append(_timed("valuation", _valuation_item,
+                                    code, quote, kdf_close, now_iso))
             except Exception as e:          # noqa: BLE001
                 miss("valuation", f"{type(e).__name__}: {e}")
         else:
@@ -831,7 +976,7 @@ def snapshot(code: str, market: str = "CN", as_of: str | None = None) -> dict:
 
         # --- 3. 基本面
         try:
-            f10_rows = _fetch_f10(code)
+            f10_rows = _timed("fundamental", _fetch_f10, code)
             items.append(_fundamental_item(code, f10_rows, cutoff, now_iso))
         except Exception as e:              # noqa: BLE001
             miss("fundamental", f"{type(e).__name__}: {e}")
@@ -840,34 +985,37 @@ def snapshot(code: str, market: str = "CN", as_of: str | None = None) -> dict:
         try:
             bc = f10_rows[0].get("BOARD_CODE") if f10_rows else None
             bn = f10_rows[0].get("BOARD_NAME") if f10_rows else None
-            items.append(_sector_item(code, quote, bc, bn, now_iso))
+            items.append(_timed("sector", _sector_item, code, quote, bc, bn, now_iso))
         except Exception as e:              # noqa: BLE001
             miss("sector", f"{type(e).__name__}: {e}")
 
-        # --- 5. 宽度 + 涨停
+        # --- 5. 宽度 + 涨停（市场级 → 进程内 TTL 缓存，批量采时每股不再重复请求）
         try:
-            items.append(_breadth_item(now_iso))
+            items.append(_timed("breadth", _market_item,
+                                f"breadth:{snap.get('date')}", _breadth_item, now_iso))
         except Exception as e:              # noqa: BLE001
             miss("breadth", f"{type(e).__name__}: {e}")
         try:
-            items.append(_limit_up_item(now_iso, snap.get("date")))
+            items.append(_timed("limit_up", _market_item, f"limit_up:{snap.get('date')}",
+                                _limit_up_item, now_iso, snap.get("date")))
         except Exception as e:              # noqa: BLE001
             miss("limit_up", f"{type(e).__name__}: {e}")
 
         # --- 6. 公告
         try:
-            items.extend(_announcement_items(code, cutoff, now_iso))
+            items.extend(_timed("announcement", _announcement_items, code, cutoff, now_iso))
         except Exception as e:              # noqa: BLE001
             miss("announcement", f"{type(e).__name__}: {e}")
 
         # --- 7. 新闻
         try:
             nm = (quote or {}).get("f58")
-            items.extend(_news_items(code, nm, cutoff, now_iso))
+            items.extend(_timed("news", _news_items, code, nm, cutoff, now_iso))
         except Exception as e:              # noqa: BLE001
             miss("news", f"{type(e).__name__}: {e}")
 
     snap["items"] = items
+    snap["timings_ms"] = timings
     snap["summary"] = _summarize(code, mk, items, missing)
     snap["elapsed_s"] = round(time.perf_counter() - t0, 3)
     return snap
@@ -1080,5 +1228,6 @@ if __name__ == "__main__":
     for it in sn["items"]:
         print(f"  {it.source:12s} {it.kind:12s} rel={it.reliability:<6} "
               f"pit={it.pit_backfillable} as_of={it.as_of}")
+    print("  timings_ms:", sn.get("timings_ms"))
     for m in sn["missing"]:
         print(f"  MISSING {m['source']}: {m['reason'][:120]}")

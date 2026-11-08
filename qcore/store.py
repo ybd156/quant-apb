@@ -40,9 +40,30 @@ def _atomic_write(path: str, text: str) -> None:
         raise
 
 
+def _clean(o):
+    """递归把 NaN/Inf 转 None —— 浏览器 JSON.parse 不接受裸 NaN。"""
+    if isinstance(o, dict):
+        return {str(k): _clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_clean(v) for v in o]
+    if isinstance(o, float):
+        return None if (o != o or o in (float("inf"), float("-inf"))) else o
+    if isinstance(o, np.floating):
+        v = float(o)
+        return None if (v != v or v in (float("inf"), float("-inf"))) else v
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    if isinstance(o, np.ndarray):
+        return [_clean(v) for v in o.tolist()]
+    return o
+
+
 def write_json(name: str, obj: Any, state_dir: str = STATE_DIR) -> str:
     path = os.path.join(state_dir, name if name.endswith(".json") else f"{name}.json")
-    _atomic_write(path, json.dumps(obj, ensure_ascii=False, default=_default, indent=1))
+    _atomic_write(path, json.dumps(_clean(obj), ensure_ascii=False,
+                                   default=_default, indent=1, allow_nan=False))
     return path
 
 

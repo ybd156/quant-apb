@@ -438,6 +438,9 @@
     if (simFinal !== null && liveNav !== null) {
       out.diffItems.push({ k: '模拟期末净值', v: num(simFinal, 4) });
     }
+    if (!isNil(cmp.note)) {
+      out.diffItems.push({ k: '引擎备注 note', v: String(cmp.note) });
+    }
     return out;
   }
 
@@ -668,7 +671,7 @@
     if (!res.ok || !res.data) {
       meta.textContent = '—';
       $('#bars-top').innerHTML = notReadyBox(res);
-      $('#bars-bottom').innerHTML = '';
+      $('#bars-bottom').innerHTML = notReadyBox(res);
       renderSignalDetail(null);
       return;
     }

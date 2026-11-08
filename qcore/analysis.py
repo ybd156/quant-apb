@@ -138,8 +138,11 @@ def _conclude(summ: Dict, ls_stat: Dict, inv: Dict) -> str:
 
 def compare_learned_vs_equal(res: dict, res_eq: dict, p3d, h: int = 5) -> Dict:
     """学习器 vs 等权集成：如果学不赢等权，学习器就是无效的。"""
-    a = daily_ic_series(res["scores"], p3d.RET[h])
-    b = daily_ic_series(res_eq["scores"], p3d.RET[h])
+    ret = p3d.RET[h]
+    if ret.shape != res["scores"].shape:      # (T,N) -> (N,T)
+        ret = ret.T
+    a = daily_ic_series(res["scores"], ret)
+    b = daily_ic_series(res_eq["scores"], ret)
     sa = S.mean_tstat(a[np.isfinite(a)], lags=max(h - 1, 0))
     sb = S.mean_tstat(b[np.isfinite(b)], lags=max(h - 1, 0))
     diff = a - b

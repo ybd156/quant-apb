@@ -502,7 +502,9 @@ def run_l4_data_sanity(verbose=False):
     unexplained = 0         # 回测窗口内、无解释的异常涨跌幅 -> 硬失败
     unexplained_pre = 0     # 窗口外、无解释 -> 仅告警
     bad_px = 0
+    bad_px_pre = 0
     near_zero = 0
+    near_zero_pre = 0
     total = 0
     worst = []
     lim = pd.Timestamp(LIMIT_START)
@@ -516,9 +518,19 @@ def run_l4_data_sanity(verbose=False):
         if not len(d):
             continue
         total += len(d)
-        # 价格有效性：任何一根 bar 的非正价格都是硬缺陷（IPO 也不豁免）
-        bad_px += int(((d[["open", "high", "low", "close"]] <= 0).any(axis=1)).sum())
-        near_zero += int((d["close"] < 0.2).sum())
+        # 价格有效性：按回测窗口分流。
+        #   窗口内（>=2013）出现非正/近零价格 = 硬缺陷，直接 FAIL；
+        #   窗口外（1994-2012）只告警 —— 实测 354 根非正 bar 全部来自 5 只股票
+        #   的 1994-2006 段（601607/000408/000425/600674/600673），
+        #   说明**后复权也会越零**（缩股/重组类），并非只有前复权会。
+        #   build_panel 有 close>0 过滤，这些 bar 不会进入回测，但必须在报告里留痕。
+        neg_px = (d[["open", "high", "low", "close"]] <= 0).any(axis=1)
+        in_w = d["date"] >= smp
+        bad_px += int((neg_px & in_w).sum())
+        bad_px_pre += int((neg_px & ~in_w).sum())
+        nz = (d["close"] > 0) & (d["close"] < 0.2)
+        near_zero += int((nz & in_w).sum())
+        near_zero_pre += int((nz & ~in_w).sum())
         # 涨跌幅有效性：跳过上市初期无涨跌停窗口
         gap = d["date"].diff().dt.days
         dd = d.iloc[IPO_EXEMPT:]
@@ -549,7 +561,9 @@ def run_l4_data_sanity(verbose=False):
         print(f"  L4 hfq data sanity: files={len(files)} bars={total}")
         print(f"      hard defects: nonpos_px={bad_px} close<0.2={near_zero} "
               f"unexplained_in_window={unexplained}")
-        print(f"      pre-window unexplained (before {SAMPLE_START}, WARN only): {unexplained_pre}")
+        print(f"      pre-window WARN only (before {SAMPLE_START}): "
+              f"unexplained_ret={unexplained_pre} nonpos_px={bad_px_pre} "
+              f"close<0.2={near_zero_pre}")
         print(f"      structural jumps (suspension/resumption, ratio {ratio:.1e}): {bad_ret}")
         for name, n, nu, mx in sorted(worst, key=lambda x: -x[3])[:5]:
             print(f"      WARN {name}: {n} bar(s) |pct|>21%, max={mx:.1f}%, "
@@ -558,7 +572,8 @@ def run_l4_data_sanity(verbose=False):
         print(f"            masked out of RET[h] (see docs/03_limitations.md).")
     return ok, {"files": len(files), "bars": total, "bad_ret": bad_ret,
                 "unexplained": unexplained, "unexplained_pre": unexplained_pre,
-                "bad_px": bad_px, "near_zero": near_zero, "ratio": ratio}
+                "bad_px": bad_px, "near_zero": near_zero, "ratio": ratio,
+                "bad_px_pre": bad_px_pre, "near_zero_pre": near_zero_pre}
 
 
 # ================================================================== 主程序

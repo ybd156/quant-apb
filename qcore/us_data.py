@@ -15,9 +15,12 @@
 
 ⚠️ 美股/港股**无涨跌停**，接口给的 pct_chg/change 在复权口径下不可靠，一律用本地 close 重算。
 
-数据质量：US 后复权序列偶见"水平位移"毛刺（复权因子在某日整体错位，形成
-单日 |pct_chg| 巨大且被后续反向跳回）。`_finalize` 会丢弃 |pct_chg| > MAX_JUMP 的 bar，
-把丢弃清单写进 `df.attrs["dropped_jumps"]` 并打印 ASCII 告警 —— 不静默篡改。
+数据质量：US 后复权序列偶见"水平位移"毛刺（复权因子在某日整体错位，形成单日
+|pct_chg| 巨大、与真实拆股/分红日无关）。`_repair_level_shifts` 按 k=close[t]/close[t-1]
+把该 bar **之前的整段**缩放（等价一次拆股调整）：只抹掉该 bar 自身那一天，
+其余 bar 的收益分毫不动、不留日期缺口。修复清单进 `df.attrs["repaired"]`。
+⚠️ 该规则也会抹掉"真实的单日 ±50% 极端行情"（实测 AAPL 2000-09-29 −50.1% 是真跌）——
+收益率/波动率类信号受不了这种 bar，故按规则剔除并登记；要保留原始口径就传 `repair=False`。
 
 其他设计
   1. 单只失败抛清晰异常；批量函数（get_us_pool 的逐只补数、download）try/except 继续；
@@ -76,7 +79,11 @@ BENCH_US_SECID = "107.SPY"       # AMEX 上市的 SPDR S&P 500 ETF
 BENCH_HK = "HSI"
 BENCH_HK_SECID = "100.HSI"       # 恒生指数
 
-MAX_JUMP = 50.0                  # 单日 |pct_chg| 上限（%），超过视为复权毛刺/极端异常
+MAX_JUMP = 50.0                  # repair=True（无脑修复）的检出阈值（%）
+AUTO_JUMP = 30.0                 # repair="auto" 的检出阈值（%）：先检出，再用 fqt=0 交叉验证
+VERIFY_TOL = 2.5                 # 交叉验证容差（百分点）：两口径同日收益差 > 此值即判为因子缺陷
+MEGA_CAP = 1.0e12                # 异常标的筛查起点：市值 > $1T
+POOL_MIN_BARS = 500              # 进池最少历史 bar 数
 DEFAULT_BEG = "19900101"
 DEFAULT_END = "20500101"
 
@@ -91,7 +98,7 @@ _FALLBACK_US = [
     "TXN", "DHR", "AMGN", "IBM", "PM", "CAT", "GE", "NOW", "UBER", "SPGI",
     "RTX", "ISRG", "BKNG", "PFE", "GS", "HON", "T", "VRTX", "BLK", "MU",
     "LRCX", "AMAT", "PANW", "ADP", "SBUX", "GILD", "MDT", "REGN", "LMT", "SYK",
-    "MMC", "PLTR", "KLAC", "ADI", "INTC", "BA", "MDLZ", "VRTX", "CI", "ELV",
+    "MMC", "PLTR", "KLAC", "ADI", "INTC", "BA", "MDLZ", "CI", "ELV", "SO",
 ]
 
 
@@ -130,14 +137,15 @@ def _safe_name(ticker: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", ticker)
 
 
-def _kline_url(secid: str, adjust: int, beg: str, end: str) -> str:
+def _kline_url(secid: str, adjust: int, beg: str, end: str, lmt: int = 100000) -> str:
     return _KLINE_URL.format(secid=secid, fields=KLINE_FIELDS, fqt=int(adjust),
-                             beg=beg, end=end)
+                             beg=beg, end=end, lmt=int(lmt))
 
 
-def _raw_frame(secid: str, adjust: int, beg: str, end: str) -> Tuple[str, pd.DataFrame]:
-    """拉原始 kline -> DataFrame（未清洗）。"""
-    d = _get_json(_kline_url(secid, adjust, beg, end))
+def _raw_frame(secid: str, adjust: int, beg: str, end: str,
+               lmt: int = 100000) -> Tuple[str, pd.DataFrame]:
+    """拉原始 kline -> DataFrame（未清洗）。lmt 只取最后 N 根（轻量探测用）。"""
+    d = _get_json(_kline_url(secid, adjust, beg, end, lmt=lmt))
     data = d.get("data") or {}
     klines = data.get("klines") or []
     rows = [ln.split(",") for ln in klines if ln and ln.count(",") >= len(KLINE_COLS) - 1]
@@ -148,9 +156,86 @@ def _raw_frame(secid: str, adjust: int, beg: str, end: str) -> Tuple[str, pd.Dat
     return str(data.get("name") or ""), df
 
 
-def _finalize(df: pd.DataFrame, code: str, repair: bool = True,
-              max_jump: float = MAX_JUMP) -> pd.DataFrame:
-    """数值化 -> 排序去重 -> 重算 pct_chg/change -> 剔除复权毛刺 bar。"""
+def _returns_from_raw(raw: pd.DataFrame) -> Dict[pd.Timestamp, float]:
+    """原始 frame -> {date: 日收益%}，用于 fqt=2 / fqt=0 交叉验证。"""
+    df = raw.copy()
+    for c in ("open", "close", "high", "low"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date", "close"])
+    df = df[df["close"] > 0].sort_values("date").drop_duplicates("date")
+    s = df.set_index("date")["close"]
+    r = (s / s.shift(1) - 1.0) * 100.0
+    return {k: float(v) for k, v in r.dropna().items() if np.isfinite(v)}
+
+
+def _repair_level_shifts(df: pd.DataFrame, max_jump: float,
+                         verify: Optional[Dict[pd.Timestamp, float]] = None,
+                         tol: float = VERIFY_TOL
+                         ) -> Tuple[pd.DataFrame, List[dict], List[dict]]:
+    """处理"复权因子整体错位"造成的水平位移毛刺。
+
+    现象：东财美股后复权序列在某些日期整体位移（实测 AAPL 2001-01-02 −44%、
+    2005-01-03 +91%，与真实拆股/分红日无关），表现为单日 |pct| 巨大。
+
+    为什么不能"删掉这根 bar"：位移是**水平**的，删掉只会把同样的跳变推给下一根
+    （实测删掉 2005-01-03 后 2005-01-04 变成 +93.08%），问题原样保留。
+
+    修复方式（等价于一次拆股调整）：把这根 bar **之前的整段**按 k=close[t]/close[t-1]
+    缩放。这样 bar t 的收益变 0、价格路径连续、**其余所有 bar 的收益分毫不动**，
+    也不产生日期缺口。
+
+    `verify`（fqt=0 原始口径的 {date: 日收益}）不为空时做交叉验证：
+      两口径同日收益同方向且相差 <= tol 个百分点 -> **真实行情，不修复**（记 verified）；
+      否则 -> 供应商复权因子缺陷 -> 修复。
+    依据：单日分红除息对复权因子的影响远小于 2.5pp，超过这个量级的分歧只能是因子错位。
+
+    返回 (df, repaired, verified)。
+    """
+    repaired: List[dict] = []
+    verified: List[dict] = []
+    price_cols = ["open", "high", "low", "close"]
+    done = set()
+    for _ in range(50):
+        prev = df["close"].shift(1)
+        pct = (df["close"] / prev - 1.0) * 100.0
+        cand = [int(i) for i in df.index[pct.abs() > float(max_jump)]
+                if df.at[i, "date"] not in done]
+        if not cand:
+            break
+        t = cand[0]
+        d = df.at[t, "date"]
+        done.add(d)
+        if t == 0:
+            continue
+        r2 = float(pct.at[t])
+        r0 = verify.get(d) if verify else None
+        if r0 is not None and np.isfinite(r0) and np.sign(r0) == np.sign(r2) \
+                and abs(r2 - r0) <= float(tol):
+            verified.append({"date": str(d.date()), "pct_chg": round(r2, 4),
+                             "raw_pct_chg": round(float(r0), 4)})
+            continue                      # 真实极端行情：保留，不动
+        k = float(df.at[t, "close"] / df.at[t - 1, "close"])
+        if not np.isfinite(k) or k <= 0:
+            continue
+        for c in price_cols:
+            df.loc[df.index[:t], c] = df[c].to_numpy()[:t] * k
+        repaired.append({"date": str(d.date()), "pct_chg": round(r2, 4),
+                         "factor": round(k, 6),
+                         "raw_pct_chg": (round(float(r0), 4) if r0 is not None else None)})
+    return df, repaired, verified
+
+
+def _finalize(df: pd.DataFrame, code: str, repair: "str | bool" = "auto",
+              max_jump: Optional[float] = None,
+              verify: Optional[Dict[pd.Timestamp, float]] = None) -> pd.DataFrame:
+    """数值化 -> 排序去重 -> 修水平位移 -> 重算 pct_chg/change。
+
+    repair:
+      "auto"（默认）检出 |收益|>30%，用 fqt=0 交叉验证后才决定是否修复（真实肥尾日保留）
+      True          检出 |收益|>50%，一律修复（无脑旁路，会把真实肥尾日一起抹掉）
+      False         完全不修复（原始口径）
+    """
     for c in KLINE_COLS[1:]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -161,15 +246,22 @@ def _finalize(df: pd.DataFrame, code: str, repair: bool = True,
         raise RuntimeError(f"empty frame for {code}")
     df["code"] = str(code)
 
-    dropped: List[dict] = []
-    if repair:
-        pct = (df["close"] / df["close"].shift(1) - 1.0) * 100.0
-        bad = df.index[pct.abs() > float(max_jump)]
-        if len(bad):
-            dropped = [{"date": str(df.at[i, "date"].date()),
-                        "pct_chg": round(float(pct.at[i]), 4),
-                        "close": float(df.at[i, "close"])} for i in bad]
-            df = df.drop(index=bad).reset_index(drop=True)
+    mode = "auto" if isinstance(repair, str) and repair.lower() == "auto" else \
+           ("on" if repair else "off")
+    repaired: List[dict] = []
+    verified: List[dict] = []
+    if mode != "off":
+        thr = float(max_jump) if max_jump is not None else \
+              (AUTO_JUMP if mode == "auto" else MAX_JUMP)
+        df, repaired, verified = _repair_level_shifts(
+            df, thr, verify=(verify if mode == "auto" else None))
+
+    # ⚠️ 东财美股 amount 字段在 2017-07-11 之前**恒为 0**（volume 却有值，实测 9282 根里
+    # 6936 根如此）。"有成交量但成交额=0"是自相矛盾的，说明是**缺失**而非零成交。
+    # 统一转 NaN：不编数，也不让下游把缺失当成"零流动性"。
+    fake_zero = (df["volume"] > 0) & (df["amount"].fillna(0) <= 0)
+    if fake_zero.any():
+        df.loc[fake_zero, "amount"] = np.nan
 
     # 用本地 close 重算，不信任接口字段（美股/港股无涨跌停，复权口径下接口字段更不可信）
     df["pct_chg"] = (df["close"] / df["close"].shift(1) - 1.0) * 100.0
@@ -178,25 +270,71 @@ def _finalize(df: pd.DataFrame, code: str, repair: bool = True,
     for c in ("amplitude", "turnover"):
         if c in df:
             df[c] = df[c].astype(float)
-    df.attrs["dropped_jumps"] = dropped
+    df.attrs["repaired"] = fixed
+    df.attrs["amount_missing"] = int(fake_zero.sum())
     return df[KLINE_COLS + ["code"]]
 
 
-def _cache_read(path: str, code: str) -> Optional[pd.DataFrame]:
+def _cache_read(path: str) -> Optional[pd.DataFrame]:
+    """读缓存 —— 缓存里存的是**原始 fqt 数据**，清洗/修复每次读盘时重跑。
+
+    这样"网络路径"和"缓存路径"产出的 frame 逐元素相同，也避免把修好的结果
+    二次落盘后口径悄悄漂移。
+    """
     if not os.path.exists(path):
         return None
-    df = pd.read_csv(path, parse_dates=["date"])
-    df["code"] = str(code)
-    df["pct_chg"] = (df["close"] / df["close"].shift(1) - 1.0) * 100.0
-    df["change"] = df["close"].diff()
-    df.loc[df.index[0], ["pct_chg", "change"]] = 0.0
-    df.attrs["dropped_jumps"] = []
-    return df[KLINE_COLS + ["code"]]
+    df = pd.read_csv(path)
+    return df if len(df) > 1 else None
 
 
 def _cache_fresh(path: str, max_age_days: float) -> bool:
     return (os.path.exists(path)
             and (time.time() - os.path.getmtime(path)) / 86400.0 < max_age_days)
+
+
+def _write_cache(raw: pd.DataFrame, path: str) -> None:
+    """原子写：先写 .tmp 再 replace，避免半截文件被下次读成"有效缓存"。"""
+    tmp = path + ".tmp"
+    raw.to_csv(tmp, index=False, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _mode_is_auto(repair) -> bool:
+    return isinstance(repair, str) and repair.lower() == "auto"
+
+
+def _has_jump(raw: pd.DataFrame, thr: float) -> bool:
+    """轻量预检：有没有超过阈值的日收益（决定要不要拉 fqt=0 做验证）。"""
+    try:
+        c = pd.to_numeric(raw["close"], errors="coerce")
+        r = (c / c.shift(1) - 1.0).abs() * 100.0
+        return bool((r > float(thr)).any())
+    except Exception:  # noqa: BLE001 —— 判断不了就当有跳变，宁可多验一次
+        return True
+
+
+def _load_raw_returns(secid: str, cache_path: str, max_age_days: float = 5.0,
+                      refresh: bool = False
+                      ) -> Tuple[Optional[Dict[pd.Timestamp, float]], int]:
+    """fqt=0（原始未复权）日收益 {date: pct}，落盘缓存。
+
+    `repair="auto"` 的交叉验证底座：只在主序列检出跳变时才需要，
+    且结果落盘（`{code}_h0.csv`），所以**常态 0 次额外请求**，冷启动最多 1 次。
+    返回 (dict|None, 网络请求次数)。
+    """
+    if not refresh and _cache_fresh(cache_path, max_age_days):
+        raw = _cache_read(cache_path)
+        if raw is not None:
+            try:
+                return _returns_from_raw(raw), 0
+            except Exception:  # noqa: BLE001 —— 缓存坏了就重拉
+                pass
+    try:
+        _name, raw = _raw_frame(secid, 0, DEFAULT_BEG, DEFAULT_END)
+        _write_cache(raw, cache_path)
+        return _returns_from_raw(raw), 1
+    except Exception:  # noqa: BLE001 —— 验证失败：auto 退化为"一律修复"
+        return None, 1
 
 
 # ---------------------------------------------------------------- resolve
@@ -267,60 +405,95 @@ def resolve_ticker(ticker: str, refresh: bool = False) -> str:
 
 # ---------------------------------------------------------------- US kline
 def fetch_us_kline(ticker: str, adjust: int = ADJUST, beg: str = DEFAULT_BEG,
-                   end: str = DEFAULT_END, repair: bool = True) -> pd.DataFrame:
+                   end: str = DEFAULT_END, repair: "str | bool" = "auto") -> pd.DataFrame:
+    """不走缓存，直接拉。"""
     t = _norm_us_ticker(ticker)
     secid = resolve_ticker(t)
     name, raw = _raw_frame(secid, adjust, beg, end)
-    df = _finalize(raw, t, repair=repair)
-    df.attrs["name"] = name
-    df.attrs["secid"] = secid
-    df.attrs["adjust"] = int(adjust)
+    ver, net = (None, 0)
+    if adjust != 0 and _mode_is_auto(repair) and _has_jump(raw, AUTO_JUMP):
+        ver, net = _load_raw_returns(secid, os.path.join(US_KLINE_DIR, f"{_safe_name(t)}_h0.csv"))
+    df = _finalize(raw, t, repair=repair, verify=ver)
+    df.attrs.update(name=name, secid=secid, adjust=int(adjust),
+                    from_cache=False, verify_requests=net)
     return df
 
 
 def load_us_kline(ticker: str, adjust: int = ADJUST, refresh: bool = False,
-                  max_age_days: float = 5.0, repair: bool = True) -> pd.DataFrame:
-    """美股日线（后复权）。缓存 data/raw/kline/us/{ticker}_h{adjust}.csv。"""
+                  max_age_days: float = 5.0, repair: "str | bool" = "auto") -> pd.DataFrame:
+    """美股日线（后复权）。缓存 data/raw/kline/us/{ticker}_h{adjust}.csv。
+
+    `repair="auto"`（默认）见 `_finalize`：跳变先与 fqt=0 原始口径交叉验证，
+    真实肥尾日保留（`attrs["verified_extreme"]`），供应商因子缺陷才修（`attrs["repaired"]`）。
+    """
     t = _norm_us_ticker(ticker)
     path = os.path.join(US_KLINE_DIR, f"{_safe_name(t)}_h{int(adjust)}.csv")
+    vpath = os.path.join(US_KLINE_DIR, f"{_safe_name(t)}_h0.csv")
     if not refresh and _cache_fresh(path, max_age_days):
-        df = _cache_read(path, t)
-        if df is not None and len(df) > 1:
+        raw = _cache_read(path)
+        if raw is not None:
+            secid = _load_map().get(t, "")
+            ver, net = (None, 0)
+            if adjust != 0 and _mode_is_auto(repair) and secid and _has_jump(raw, AUTO_JUMP):
+                ver, net = _load_raw_returns(secid, vpath, max_age_days)
+            df = _finalize(raw, t, repair=repair, verify=ver)
+            df.attrs.update(name="", secid=secid, adjust=int(adjust),
+                            from_cache=True, verify_requests=net)
             return df
-    df = fetch_us_kline(t, adjust=adjust, repair=repair)
-    out = df.copy()
-    out.attrs = {}
-    out.to_csv(path, index=False, encoding="utf-8")
+    secid = resolve_ticker(t)
+    name, raw = _raw_frame(secid, adjust, DEFAULT_BEG, DEFAULT_END)
+    _write_cache(raw, path)
+    ver, net = (None, 0)
+    if adjust != 0 and _mode_is_auto(repair) and _has_jump(raw, AUTO_JUMP):
+        ver, net = _load_raw_returns(secid, vpath, max_age_days)
+    df = _finalize(raw, t, repair=repair, verify=ver)
+    df.attrs.update(name=name, secid=secid, adjust=int(adjust),
+                    from_cache=False, verify_requests=net)
     return df
 
 
 # ---------------------------------------------------------------- HK kline
 def fetch_hk_kline(code: str, adjust: int = ADJUST, beg: str = DEFAULT_BEG,
-                   end: str = DEFAULT_END, repair: bool = True) -> pd.DataFrame:
+                   end: str = DEFAULT_END, repair: "str | bool" = "auto") -> pd.DataFrame:
+    """不走缓存，直接拉。"""
     c = _norm_hk_code(code)
     secid = f"{HK_MKT}.{c}"
     name, raw = _raw_frame(secid, adjust, beg, end)
-    df = _finalize(raw, c, repair=repair)
-    df.attrs["name"] = name
-    df.attrs["secid"] = secid
-    df.attrs["adjust"] = int(adjust)
+    ver, net = (None, 0)
+    if adjust != 0 and _mode_is_auto(repair) and _has_jump(raw, AUTO_JUMP):
+        ver, net = _load_raw_returns(secid, os.path.join(HK_KLINE_DIR, f"{c}_h0.csv"))
+    df = _finalize(raw, c, repair=repair, verify=ver)
+    df.attrs.update(name=name, secid=secid, adjust=int(adjust),
+                    from_cache=False, verify_requests=net)
     return df
 
 
 def load_hk_kline(code: str, adjust: int = ADJUST, refresh: bool = False,
-                  max_age_days: float = 5.0, repair: bool = True) -> pd.DataFrame:
+                  max_age_days: float = 5.0, repair: "str | bool" = "auto") -> pd.DataFrame:
     """港股日线（后复权）。'00700' / '0700.HK' / '700' 都能吃。
     缓存 data/raw/kline/hk/{code}_h{adjust}.csv。"""
     c = _norm_hk_code(code)
+    secid = f"{HK_MKT}.{c}"
     path = os.path.join(HK_KLINE_DIR, f"{c}_h{int(adjust)}.csv")
+    vpath = os.path.join(HK_KLINE_DIR, f"{c}_h0.csv")
     if not refresh and _cache_fresh(path, max_age_days):
-        df = _cache_read(path, c)
-        if df is not None and len(df) > 1:
+        raw = _cache_read(path)
+        if raw is not None:
+            ver, net = (None, 0)
+            if adjust != 0 and _mode_is_auto(repair) and _has_jump(raw, AUTO_JUMP):
+                ver, net = _load_raw_returns(secid, vpath, max_age_days)
+            df = _finalize(raw, c, repair=repair, verify=ver)
+            df.attrs.update(name="", secid=secid, adjust=int(adjust),
+                            from_cache=True, verify_requests=net)
             return df
-    df = fetch_hk_kline(c, adjust=adjust, repair=repair)
-    out = df.copy()
-    out.attrs = {}
-    out.to_csv(path, index=False, encoding="utf-8")
+    name, raw = _raw_frame(secid, adjust, DEFAULT_BEG, DEFAULT_END)
+    _write_cache(raw, path)
+    ver, net = (None, 0)
+    if adjust != 0 and _mode_is_auto(repair) and _has_jump(raw, AUTO_JUMP):
+        ver, net = _load_raw_returns(secid, vpath, max_age_days)
+    df = _finalize(raw, c, repair=repair, verify=ver)
+    df.attrs.update(name=name, secid=secid, adjust=int(adjust),
+                    from_cache=False, verify_requests=net)
     return df
 
 
@@ -330,19 +503,19 @@ def _load_index_secid(secid: str, code: str, out_dir: str, adjust: int = ADJUST,
                       min_bars: int = 1000) -> pd.DataFrame:
     path = os.path.join(out_dir, f"{_safe_name(code)}_h{int(adjust)}.csv")
     if not refresh and _cache_fresh(path, max_age_days):
-        df = _cache_read(path, code)
-        if df is not None and len(df) >= min_bars:
-            return df
+        raw = _cache_read(path)
+        if raw is not None:
+            df = _finalize(raw, code, repair=False)
+            if len(df) >= min_bars:
+                df.attrs.update(name="", secid=secid, adjust=int(adjust), from_cache=True)
+                return df
     name, raw = _raw_frame(secid, adjust, DEFAULT_BEG, DEFAULT_END)
+    _write_cache(raw, path)
     # 指数不做毛刺剔除：指数不会拆股，|pct| 异常大概率是真实暴涨暴跌
     df = _finalize(raw, code, repair=False)
-    df.attrs["name"] = name
-    df.attrs["secid"] = secid
     if len(df) < min_bars:
         raise RuntimeError(f"benchmark {code} only {len(df)} bars (<{min_bars})")
-    out = df.copy()
-    out.attrs = {}
-    out.to_csv(path, index=False, encoding="utf-8")
+    df.attrs.update(name=name, secid=secid, adjust=int(adjust), from_cache=False)
     return df
 
 
@@ -354,6 +527,19 @@ def load_us_benchmark(refresh: bool = False) -> pd.DataFrame:
 def load_hk_benchmark(refresh: bool = False) -> pd.DataFrame:
     """恒生指数 HSI 日线 —— 港股主日历。"""
     return _load_index_secid(BENCH_HK_SECID, BENCH_HK, HK_KLINE_DIR, refresh=refresh)
+
+
+def load_benchmark(market: str = "US") -> pd.DataFrame:
+    """统一基准入口（多市场对齐用）：US -> SPY(107.SPY)，HK -> HSI(100.HSI)。
+
+    两者都是**后复权**日线，只用于收益率/日历对齐，价格绝对值不可当指数点位。
+    """
+    m = str(market).strip().upper()
+    if m in ("US", "USA", "NASDAQ", "NYSE", "AMEX"):
+        return load_us_benchmark()
+    if m in ("HK", "HKG", "HONGKONG", "HKEX"):
+        return load_hk_benchmark()
+    raise ValueError(f"unknown market {market!r}; expected 'US' or 'HK'")
 
 
 # ---------------------------------------------------------------- pool
@@ -379,6 +565,82 @@ def _clist_us(top_n: int, page_size: int = 100) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["sector"] = df["sector"].astype(str).replace({"nan": "", "-": ""})
     return df.drop_duplicates("code").reset_index(drop=True)
+
+
+_CLASS_SUFFIX = re.compile(r"[-_](A|B|C|R|W|S)$")
+
+# 已知双类别/多代码同公司（名称规则兜底用；名称里没有 -A/-B 后缀时靠这张表）
+_KNOWN_DUAL = ({"GOOGL", "GOOG"}, {"BRK_A", "BRK_B"}, {"FOX", "FOXA"},
+               {"NWS", "NWSA"}, {"LEN", "LEN_B"})
+
+
+def _probe_listing(secid: str, min_bars: int = POOL_MIN_BARS) -> dict:
+    """轻量探测某 secid 是否"正常挂牌 + 历史够长"。
+
+    只取最后 min_bars+1 根（lmt 截断），payload 很小。
+    """
+    try:
+        _n, raw = _raw_frame(secid, ADJUST, DEFAULT_BEG, DEFAULT_END, lmt=min_bars + 1)
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "bars": 0, "reason": "kline_unavailable"}
+    bars = len(raw)
+    if bars <= min_bars:
+        return {"ok": False, "bars": bars, "reason": f"history_lt_{min_bars}"}
+    tail = raw.tail(60)
+    amt = pd.to_numeric(tail["amount"], errors="coerce").fillna(0.0)
+    if float(amt.max()) <= 0:
+        return {"ok": False, "bars": bars, "reason": "amount_all_missing_last60"}
+    return {"ok": True, "bars": bars, "reason": ""}
+
+
+def _dual_class_key(name: str, code: str) -> str:
+    n = str(name or "").strip()
+    base = _CLASS_SUFFIX.sub("", n)
+    return f"name:{base}" if (base and base != n) else f"code:{code}"
+
+
+def _dedupe_dual_class(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[dict]]:
+    """同公司多类别股（谷歌-A/C、伯克希尔-A/B）去重：保留成交额大的那个。"""
+    alias: Dict[str, str] = {}
+    for grp in _KNOWN_DUAL:
+        rep = sorted(grp)[0]
+        for c in grp:
+            alias[c] = rep
+    d = df.copy()
+    d["_grp"] = [alias.get(r["code"]) or _dual_class_key(r["name"], r["code"])
+                 for _, r in d.iterrows()]
+    d["_amt"] = d["amount"].fillna(-1.0)
+    d = d.sort_values(["_grp", "_amt"], ascending=[True, False])
+    keep_mask = ~d["_grp"].duplicated(keep="first")
+    kept = d[keep_mask].set_index("_grp")["code"]
+    dropped = [{"code": r["code"], "kept": str(kept.get(r["_grp"], "")),
+                "amount": (None if pd.isna(r["amount"]) else float(r["amount"]))}
+               for _, r in d[~keep_mask].iterrows()]
+    return d[keep_mask].drop(columns=["_grp", "_amt"]).reset_index(drop=True), dropped
+
+
+def _screen_anomalies(df: pd.DataFrame, mega_cap: float = MEGA_CAP,
+                      min_bars: int = POOL_MIN_BARS) -> Tuple[pd.DataFrame, List[dict]]:
+    """剔除"市值异常大但根本不是正常挂牌"的标的（如 SPCX）。
+
+    判据（只看市值 > $1T 的极少数标的，代价可忽略）：
+      kline 取不到 / 历史不足 min_bars 根 / 最近 60 根成交额全缺失。
+    典型例：东财把 `SPCX`(SpaceX) 挂成 $1.82T 市值，但日线只有 103 根
+    （2026-06-12 起），进不了 panel，也撑不起"万亿市值"的流动性假设。
+    """
+    excluded: List[dict] = []
+    keep = np.ones(len(df), dtype=bool)
+    for i, r in enumerate(df.itertuples(index=False)):
+        cap = getattr(r, "mktcap", np.nan)
+        if not (pd.notna(cap) and float(cap) >= mega_cap):
+            continue
+        secid = f"{getattr(r, 'mkt', '')}.{r.code}".strip(".")
+        info = _probe_listing(secid, min_bars=min_bars)
+        if not info["ok"]:
+            keep[i] = False
+            excluded.append({"code": r.code, "mktcap": float(cap),
+                             "reason": info["reason"], "bars": info["bars"]})
+    return df[keep].reset_index(drop=True), excluded
 
 
 def _quote_mktcap(secid: str) -> Tuple[float, float]:
@@ -468,7 +730,7 @@ if __name__ == "__main__":
     for t in ("AAPL", "MSFT", "NVDA"):
         d = load_us_kline(t)
         print(f"{t}: bars={len(d)} {d['date'].iloc[0].date()}..{d['date'].iloc[-1].date()} "
-              f"last={d['close'].iloc[-1]:.4g} dropped={len(d.attrs.get('dropped_jumps', []))}")
+              f"last={d['close'].iloc[-1]:.4g} repaired={len(d.attrs.get('repaired', []))}")
     for c in ("00700", "09988"):
         d = load_hk_kline(c)
         print(f"{c}: bars={len(d)} {d['date'].iloc[0].date()}..{d['date'].iloc[-1].date()} "

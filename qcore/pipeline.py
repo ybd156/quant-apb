@@ -17,7 +17,11 @@ import numpy as np
 import pandas as pd
 
 from . import store
+from . import analysis as AN
 from . import confidence as C
+from . import costs as CO
+from . import meta as MT
+from . import stats as ST
 from .backtest import run_baselines, run_long_short
 from .context import stock_context
 from .data import get_pool, load_kline
@@ -89,8 +93,39 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     print("[3/7] metrics + backtest", flush=True)
     mets = evaluate_all(res, horizons=(1, 5, 20), n_groups=5)
     mets["weight_concentration"] = weight_concentration(res["weights_hist"], sids=res["sids"])
-    bt = {"long_short": run_long_short(res, horizon, n_groups=5, cost_bps=10.0),
-          "baselines": run_baselines(res, res_eq, horizon, cost_bps=10.0, n_groups=5)}
+    rt = CO.round_trip_bps(market, notional=1e6)
+    cost_bps = float(rt["round_trip_bps"])
+    print(f"      cost model [{market}]: round-trip {cost_bps:.2f} bps "
+          f"(buy {rt['buy_bps']:.2f} / sell {rt['sell_bps']:.2f})", flush=True)
+    bt_ls = run_long_short(res, horizon, n_groups=5, cost_bps=cost_bps)
+    try:
+        ls_ser = AN.long_short_series(res["scores"], p3d.RET[horizon].T, horizon)
+        if ls_ser.size:
+            cost_per_period = 0.7 * cost_bps / 1e4
+            eq_curve = np.cumprod(1.0 + ls_ser - cost_per_period)
+            step = max(1, eq_curve.size // 250)
+            bt_ls["equity"] = [round(float(x), 6) for x in eq_curve[::step]]
+            bt_ls["equity_note"] = "非重叠 h 日调仓，已扣双边成本，下采样至 ~250 点"
+    except Exception as e:  # noqa: BLE001
+        bt_ls["equity_error"] = f"{type(e).__name__}: {e}"
+    bt = {"long_short": bt_ls,
+          "baselines": run_baselines(res, res_eq, horizon, cost_bps=cost_bps, n_groups=5)}
+
+    print("[3.5/7] statistical edge test", flush=True)
+    edge = {}
+    for hh in (1, horizon, 20):
+        edge[str(hh)] = AN.edge_report(res["scores"], p3d.RET[hh].T, res["dates"],
+                                       h=hh, n_trials=S)
+    eq_cmp = AN.compare_learned_vs_equal(res, res_eq, p3d, horizon)
+
+    meta = MT.learn_meta(res["scores_TN"], p3d.RET[horizon], horizon, warmup=cfg.warmup)
+    meta_cmp = MT.compare_raw_vs_meta(res["scores_TN"], p3d.RET[horizon], meta)
+    meta_ic = MT.meta_ic(res["scores_TN"], p3d.RET[horizon], meta, horizon)
+    _ic_series = AN.daily_ic_series(res["scores"], p3d.RET[horizon].T)
+    mon = ST.rolling_edge_monitor(_ic_series[np.isfinite(_ic_series)])
+    print(f"      IC h={horizon}: {edge[str(horizon)]['ic']['mean']:+.4f} "
+          f"t={edge[str(horizon)]['ic']['t']:+.2f} | meta sign={meta['final_sign']:+d} "
+          f"hit {meta_cmp['raw']['hit_rate']:.4f}->{meta_cmp['meta']['hit_rate']:.4f}", flush=True)
 
     print("[4/7] confidence calibration", flush=True)
     cal = C.calibrate(res["scores_TN"], p3d.RET[horizon], horizon, warmup=cfg.warmup)
@@ -104,7 +139,7 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
 
     print("[5/7] paper trading (sim vs live)", flush=True)
     sim = simulate(res["scores_TN"], p3d.OPEN, p3d.CLOSE, p3d.VALID, p3d.dates,
-                   PaperConfig(top_k=10, hold=horizon, cost_bps=10.0), start_t=cfg.warmup)
+                   PaperConfig(top_k=10, hold=horizon, cost_bps=cost_bps), start_t=cfg.warmup)
     lt = load_live_trades()
     lv = live_nav(lt, p3d.CLOSE, p3d.dates, codes)
     cmp_ = compare(sim, lv, lt, sim["trades"])
@@ -136,6 +171,20 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
                                     if not isinstance(v, np.ndarray)},
                      "baselines": bt["baselines"].to_dict("records") if hasattr(bt["baselines"], "to_dict") else bt["baselines"]},
         "confidence": calrep,
+        "costs": {"market": market, "round_trip_bps": cost_bps,
+                  "breakdown": rt["breakdown"], "verified_on": rt["verified_on"],
+                  "table": CO.summary_table(),
+                  "scenarios": CO.cost_scenarios(),
+                  "drag": CO.annual_cost_drag(market, 0.7, horizon)},
+        "edge": edge,
+        "learned_vs_equal": eq_cmp,
+        "meta": {"final_sign": meta["final_sign"], "verdict": meta["verdict"],
+                 "final_mu": meta["final_mu"], "final_t": meta["final_t"],
+                 "frac_inverted": meta["frac_inverted"], "frac_silent": meta["frac_silent"],
+                 "compare": meta_cmp,
+                 "meta_ic": {"mean": meta_ic["mean"], "t": meta_ic["t"], "p": meta_ic["p"]},
+                 "monitor": {"frac_time_active": mon["frac_active"],
+                             "final_state": mon["final_state"], "final_t": mon["final_t"]}},
         "paper": cmp_,
         "context": ctx,
     }
@@ -153,11 +202,18 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
 
     out = {"ok": True, "seconds": round(time.time() - t0, 1),
            "shape": [int(T), int(N), int(S)], "metrics": mets, "backtest": perf["backtest"],
-           "confidence": calrep, "paper": cmp_, "paths": paths}
+           "confidence": calrep, "paper": cmp_, "paths": paths,
+           "edge": edge, "meta": {"verdict": meta["verdict"], "sign": meta["final_sign"],
+                                  "meta_ic_t": meta_ic["t"]},
+           "learned_vs_equal": eq_cmp}
 
     if report_path:
         try:
             md = render(res, mets, bt, report_path)
+            from .report_stats import append_stats
+            append_stats(report_path, edge, eq_cmp, meta, meta_cmp, meta_ic, mon)
+            from .report_stats import append_costs
+            append_costs(report_path, market, cost_bps, rt, CO)
             out["report"] = report_path
         except Exception as e:  # noqa: BLE001
             out["report_error"] = f"{type(e).__name__}: {e}"

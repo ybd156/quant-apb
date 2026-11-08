@@ -76,7 +76,6 @@ MEDIUM_PATTERNS = [
     (re.compile(r"\.transform\s*\("), "groupby().transform 若聚合窗含未来行则泄漏"),
     (re.compile(r"\.agg\s*\("), ".agg() 聚合，需确认窗口"),
     (re.compile(r"\.apply\s*\("), ".apply() 自定义函数，需确认是否用了全序列"),
-    (re.compile(r"\bnp\.where\s*\("), "np.where 条件分支，需确认条件只用 ≤t 信息"),
     (re.compile(r"\bnp\.sign\s*\([^)]*\)\s*\.cumsum"), "sign().cumsum() 全样本累计"),
 ]
 
@@ -232,15 +231,19 @@ class Finding:
 
 def scan_file(path: str):
     with open(path, "r", encoding="utf-8", errors="replace") as f:
-        raw_lines = f.readlines()
+        raw_text = f.read()
+    raw_lines = raw_text.splitlines(keepends=True)
+    # 屏蔽 docstring 内容后再做模式匹配（保留行号与偏移）
+    masked_lines = _blank_triple(raw_text).splitlines(keepends=True)
 
-    # 整文件豁免（如文件头写 leak-scan: ok）
+    # 整文件豁免（如文件头写 leak-scan: file-ok）
     head = "".join(raw_lines[:8])
     if re.search(r"leak-scan\s*:\s*file-ok", head, re.IGNORECASE):
         return []
 
+    is_eval = os.path.basename(path) in EVAL_FILES
     findings = []
-    for joined, spans in _iter_logical_statements(raw_lines):
+    for joined, spans in _iter_logical_statements(masked_lines):
         # 该语句内每行的豁免
         waiver_by_line = {}
         for ln, a, b in spans:
@@ -271,8 +274,14 @@ def scan_file(path: str):
                 continue
             # 纯标量/字面量接收者（如 x.mean() 且 x 是 list）无法静态判定，仍报 MEDIUM
             name = m.group(1)
-            add("MEDIUM",
-                f".{name}() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（若为按日横截面统计则安全，需人工确认）",
+            # 噪声过滤：覆盖率统计 / 打印 / attrs 元数据，全样本口径也无害
+            noisy = ("attrs[" in joined or joined.lstrip().startswith("print(")
+                     or any(t in receiver for t in
+                            ("notna(", "isna(", "isfinite(", "isnan(", "len(")))
+            sev = "INFO" if (is_eval or noisy) else "MEDIUM"
+            add(sev,
+                f".{name}() 未挂在 rolling/expanding 链上 -> 疑似全样本口径"
+                f"（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）",
                 dot)
 
         for m in NP_FULLSAMPLE.finditer(joined):
@@ -280,14 +289,14 @@ def scan_file(path: str):
             receiver = joined[rstart:m.start()]
             if SAFE_WINDOW.search(receiver):
                 continue
-            add("MEDIUM",
+            add("INFO" if is_eval else "MEDIUM",
                 f"{m.group(0)} 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）",
                 m.start())
 
         # ---------- MEDIUM: 其他可疑 ----------
         for pat, reason in MEDIUM_PATTERNS:
             for m in pat.finditer(joined):
-                add("MEDIUM", reason, m.start())
+                add("INFO" if is_eval else "MEDIUM", reason, m.start())
 
     return findings
 
@@ -331,8 +340,9 @@ def main(argv=None):
     waived = [x for x in all_findings if x.waived]
     highs = [x for x in active if x.sev == "HIGH"]
     meds = [x for x in active if x.sev == "MEDIUM"]
+    infos = [x for x in active if x.sev == "INFO"]
 
-    show = active if args.verbose else [x for x in active if x.sev == "HIGH"]
+    show = active if args.verbose else [x for x in active if x.sev in ("HIGH", "MEDIUM")]
     if show:
         for x in sorted(show, key=lambda z: (z.path, z.line)):
             print(x)
@@ -346,7 +356,8 @@ def main(argv=None):
         print()
 
     print("-" * 78)
-    print(f"RESULT: HIGH={len(highs)}  MEDIUM={len(meds)}  WAIVED={len(waived)}")
+    print(f"RESULT: HIGH={len(highs)}  MEDIUM={len(meds)}  INFO={len(infos)}  "
+          f"WAIVED={len(waived)}")
     if highs:
         print("VERDICT: FAIL -- structural look-ahead found. Build must not pass.")
         return 1

@@ -169,7 +169,10 @@ def live_nav(trades: pd.DataFrame, CLOSE: np.ndarray, dates: np.ndarray,
         nav[t] = cash + float(np.sum(pos * np.nan_to_num(CLOSE[t])))
         t += 1
 
-    nav = pd.Series(nav).ffill().bfill().to_numpy()
+    # 只向前填充（起始未建仓段用初始资金），绝不 bfill —— bfill 会把未来净值搬到当下
+    nav = pd.Series(nav).ffill().to_numpy()
+    first = np.argmax(np.isfinite(nav))
+    nav[:first] = initial
     ret = pd.Series(nav).pct_change()
     mdd = float((nav / np.maximum.accumulate(nav) - 1).min())
     ann = float((nav[-1] / nav[0]) ** (252 / max(len(nav), 1)) - 1) if nav[0] > 0 else float("nan")

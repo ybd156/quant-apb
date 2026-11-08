@@ -139,11 +139,19 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
     # ---- 收益矩阵：r_h(t) = OPEN[t+lag+h]/OPEN[t+lag] - 1（越界 NaN）
     horizons = sorted({horizon, *(extra_horizons or [])})
     RET: Dict[int, np.ndarray] = {}
+    # 停牌缺口掩码：若 [t+exec_lag, t+exec_lag+h] 区间内该股有非交易日（主日历上是 NaN），
+    # 说明这段时间停牌过，复牌跳变（实测最大 +622%）不是可交易收益，必须剔除。
+    gap = (~traded).astype(np.int32)
+    cgap = np.cumsum(gap, axis=0)
     for h in horizons:
         arr = np.full((T, N), np.nan, dtype=np.float32)
         if T > exec_lag + h:
             with np.errstate(invalid="ignore", divide="ignore"):
                 arr[:T - exec_lag - h] = OPEN[exec_lag + h:] / OPEN[exec_lag:T - h] - 1.0
+            # 区间 (t+exec_lag, t+exec_lag+h] 内的缺口数
+            span = cgap[exec_lag + h:] - cgap[exec_lag:T - h]
+            n = span.shape[0]
+            arr[:n] = np.where(span == 0, arr[:n], np.nan)
         RET[h] = arr
 
     # ---- 信号矩阵（唯一需要逐股的地方，分块填充以控制峰值内存）
