@@ -163,15 +163,26 @@ def check_state() -> None:
 
 # ---------------------------------------------------------------- 3. 账户配置
 def check_account() -> None:
-    print("\n[3] 账户配置")
+    print("")
+    print("[3] 账户配置（按市场）")
     from qcore import account_config as AC
-    base = AC.load()
+    base = AC.load("CN")
     if not (10_000 <= base["initial_capital"] <= 1e9):
-        rec("account.default", FAIL, f"默认本金越界: {base['initial_capital']}")
+        rec("account.default", FAIL, f"CN 默认本金越界: {base['initial_capital']}")
         return
-    rec("account.default", PASS, f"本金 {base['initial_capital']:,.0f}")
+    rec("account.default", PASS, f"CN 本金 {base['initial_capital']:,.0f} {base['currency']}")
+    # 三个市场都要能读，且成本口径不同
+    try:
+        sm = AC.summary()
+        mk = sm["markets"]
+        costs = {m: mk[m]["cost_bps"] for m in ("CN", "US", "HK")}
+        ok = len(set(costs.values())) == 3
+        rec("account.markets", PASS if ok else FAIL,
+            " / ".join(f"{m}={c}bps" for m, c in costs.items()))
+    except Exception as e:  # noqa: BLE001
+        rec("account.markets", FAIL, str(e)[:80])
     # 往返
-    new, err = AC.save({"initial_capital": 250000, "top_k": 7})
+    new, err = AC.save({"initial_capital": 250000, "top_k": 7}, "CN")
     if err or not new:
         rec("account.write", FAIL, err or "无返回")
     elif new["initial_capital"] != 250000 or new["top_k"] != 7:
@@ -179,10 +190,13 @@ def check_account() -> None:
     else:
         rec("account.write", PASS, "写入并回读一致")
     # 越界必须拒绝
-    _, err2 = AC.save({"initial_capital": 1})
+    _, err2 = AC.save({"initial_capital": 1}, "CN")
     rec("account.reject", PASS if err2 else FAIL, err2 or "越界值竟然被接受")
+    # 非法市场必须拒绝
+    _, err3 = AC.save({"initial_capital": 100}, "XX")
+    rec("account.bad_market", PASS if err3 else FAIL, err3 or "非法市场竟然被接受")
     # 还原
-    AC.save({"initial_capital": base["initial_capital"], "top_k": base["top_k"]})
+    AC.save({"initial_capital": base["initial_capital"], "top_k": base["top_k"]}, "CN")
 
 
 # ---------------------------------------------------------------- 4. HTTP
@@ -205,7 +219,8 @@ def check_http(port: int = 8791) -> None:
             return
         rec("http.boot", PASS, base)
 
-        endpoints = ["status", "signals", "regime", "ledger", "performance", "paper",
+        endpoints = ["status", "signals", "regime", "ledger", "performance",
+                     "paper?market=CN", "transfer",
                      "paper/trades", "run/status", "version", "behavior", "events",
                      "health", "market", "update", "names", "account/config"]
         not_ready, failed = [], []

@@ -453,7 +453,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/performance":
             return self._api_passthrough("performance")
         if path == "/api/paper":
-            return self._api_passthrough("paper")
+            return self._api_paper(query)
         if path == "/api/paper/trades":
             return self._api_paper_trades(query)
         if path == "/api/run/status":
@@ -466,6 +466,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/transfer":
+            return self._api_transfer()
         if path == "/api/tick":
             return self._api_tick(query)
         if path == "/api/watch":
@@ -473,7 +475,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/names":
             return self._api_names()
         if path == "/api/account/config":
-            return self._api_account_config()
+            return self._api_account_config(query)
         if path == "/api/market":
             return self._api_market()
         if path == "/api/update":
@@ -526,6 +528,59 @@ class ApiHandler(BaseHTTPRequestHandler):
         data, sent = self._load_or_not_ready(key)
         if sent is not None:
             return sent
+        return self._ok(data)
+
+    def _api_paper(self, query):
+        """
+        模拟盘数据。query: market=CN|US|HK
+        文件解析顺序：paper_<M>.json -> (仅 CN) paper.json
+        美股/港股没有独立文件时明确返回 not_ready，不拿 A 股数据冒充。
+        """
+        m = str(((query or {}).get("market") or ["CN"])[0]).upper()
+        if m not in ("CN", "US", "HK"):
+            m = "CN"
+        cands = [f"paper_{m}.json"]
+        if m == "CN":
+            cands.append("paper.json")     # 兼容老文件名
+        for fn in cands:
+            data, err = _read_json(fn)
+            if err is None:
+                return self._ok({"market": m, "file": fn, "data": data})
+        return self._not_ready(cands[0],
+                               f"{m} 市场尚无模拟盘数据。先运行 "
+                               f"python -m qcore.pipeline --market {m} 生成。")
+
+    def _api_paper(self, query):
+        """模拟盘 vs 实盘对账（按市场隔离）。
+
+        ?market=CN|US|HK
+          - 优先读 paper_{MKT}.json；
+          - 没有专属文件时，只有 CN 会回落到共享的 paper.json（它本来就是 A 股模拟盘）；
+          - US / HK 一律返回 no_market_data，绝不让 A 股数据冒名顶替。
+        不带 market 参数时保持老行为：原样返回 paper.json。
+        """
+        mkt = ((query or {}).get("market") or [None])[0]
+        mkt = str(mkt).strip().upper() if mkt else None
+        if mkt and mkt not in ("CN", "US", "HK"):
+            return self._fail("invalid_market", 400,
+                              detail=f"market 必须是 CN, US, HK 之一，收到 {mkt}")
+
+        if mkt:
+            data, _name, err = _read_first((f"paper_{mkt}.json",))
+            if err is None:
+                payload = dict(data) if isinstance(data, dict) else {"rows": data}
+                payload.setdefault("market", mkt)
+                return self._ok(payload)
+            if mkt != "CN":
+                return self._fail(
+                    "no_market_data", 200, market=mkt,
+                    hint=f"该市场尚无模拟盘数据；运行 python -m qcore.pipeline --market {mkt} 生成")
+
+        data, sent = self._load_or_not_ready("paper")
+        if sent is not None:
+            return sent
+        if not isinstance(data, dict):
+            return self._fail("bad_schema", 200, file=STATE_FILES["paper"], hint="期望 JSON 对象")
         return self._ok(data)
 
     def _api_paper_trades(self, query):
@@ -612,13 +667,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._ok({"names": {}, "n": 0, "hint": "尚未导出，跑一次引擎即可"})
         return self._ok(data)
 
-    def _api_account_config(self):
-        """模拟账户配置（初始资金等）。"""
+    def _api_account_config(self, query=None):
+        """
+        模拟账户配置。query:
+          market=CN|US|HK  -> 只返回该市场
+          省略            -> 返回三市场总览 + default_market
+        """
         try:
             from qcore import account_config as AC
-            return self._ok(AC.load())
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
+        m = ((query or {}).get("market") or [None])[0]
+        try:
+            if m:
+                return self._ok(AC.load(m))
+            return self._ok(AC.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("account_failed", 200, detail=str(e)[:160])
 
     def _post_account_config(self):
         """更新模拟账户配置：只允许内网或带 X-Token。"""
@@ -638,7 +703,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             from qcore import account_config as AC
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
-        new, verr = AC.save(body if isinstance(body, dict) else {})
+        market = (body.get("market") if isinstance(body, dict) else None) or "CN"
+        new, verr = AC.save(body if isinstance(body, dict) else {}, market)
         if verr:
             return self._fail("invalid_config", 400, detail=verr)
         return self._ok(new)
@@ -837,34 +903,38 @@ class ApiHandler(BaseHTTPRequestHandler):
             "server_time": _now_iso(),
         })
 
+    def _api_transfer(self):
+        """导出/导入能力清单。"""
+        try:
+            from qcore import transfer
+            return self._ok(transfer.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("transfer_failed", 200, detail=str(e)[:160])
+
     def _api_export(self, query):
-        """导出数据：把已存在的 state 文件打包成一个 JSON 附件（纯拼接，不改数值）。"""
+        """
+        导出数据。query:
+          what=all|picks|ledger|watch|trades|factors|account|status|signals|
+               regime|performance|paper|model|names|events|market
+          format=auto|csv|json   （表格类默认 CSV，带 BOM 方便 Excel）
+        """
         what = (query.get("what") or ["all"])[0]
-        bundle = {"ok": True, "_meta": {
-            "exported_at": _now_iso(),
-            "version": _read_version(),
-            "state_dir": str(STATE_DIR),
-        }}
-        keys = list(STATE_FILES) if what == "all" else [k for k in STATE_FILES if k == what]
-        if not keys:
-            return self._fail("bad_param", 400, hint="what 取 all|status|signals|regime|ledger|performance|paper")
-        got = 0
-        for key in keys:
-            data, err = _read_json(STATE_FILES[key])
-            if err is None:
-                bundle[key] = data
-                got += 1
-        if not got:
-            return self._not_ready("status.json", "没有任何可导出的状态文件")
-        body = json.dumps(_json_safe(bundle), ensure_ascii=False,
-                          separators=(",", ":"), allow_nan=False).encode("utf-8")
-        stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        fmt = (query.get("format") or ["auto"])[0]
+        try:
+            from qcore import transfer
+            r = transfer.export(what, fmt)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("export_failed", 200, detail=str(e)[:160])
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "export_failed"), 200,
+                              hint=r.get("hint"))
+        body = r["data"]
         try:
             self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Type", r["content_type"])
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Content-Disposition",
-                             f'attachment; filename="apb-state-{stamp}.json"')
+                             f'attachment; filename="{r["filename"]}"')
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             if self.command != "HEAD":
@@ -872,6 +942,26 @@ class ApiHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         return 200, len(body)
+
+    def _post_import(self):
+        """
+        导入数据。body:
+          {"watch":[...]} / {"trades":[...]} / {"account":{...}}
+          或整体 state 包（export(what=all) 的产物），加 "_replace":true 才覆盖。
+        默认**合并**，不覆盖历史（INV-7）。
+        """
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        try:
+            from qcore import transfer
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        r = transfer.import_payload(body if isinstance(body, dict) else {})
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "import_failed"), 400,
+                              hint=r.get("hint"))
+        return self._ok(r)
 
     # ---------------- 路由：POST ----------------
 
@@ -894,6 +984,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/import":
+            return self._post_import()
         if path == "/api/watch":
             return self._post_watch()
         if path == "/api/account/config":

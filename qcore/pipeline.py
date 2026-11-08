@@ -143,9 +143,14 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
 
     print("[5/7] paper trading (sim vs live)", flush=True)
     from . import account_config as AC
-    _acct = AC.load()
-    print(f"      account: 初始资金 {_acct['initial_capital']:,.0f} / "
-          f"持仓 {_acct['top_k']} / 单票上限 {_acct['max_weight']:.0%}", flush=True)
+    # 按市场取配置：A 股用 CN（美股/港股各有一套，不混用成本口径）
+    _market = str(p3d.meta.get("market") or "CN").upper()
+    if _market not in ("CN", "US", "HK"):
+        _market = "CN"
+    _acct = AC.load(_market)
+    print(f"      account[{_market}]: 初始资金 {_acct['initial_capital']:,.0f} "
+          f"{_acct.get('currency','')} / 持仓 {_acct['top_k']} / "
+          f"单票上限 {_acct['max_weight']:.0%} / 成本 {_acct['cost_bps']:.2f}bps", flush=True)
     sim = simulate(res["scores_TN"], p3d.OPEN, p3d.CLOSE, p3d.VALID, p3d.dates,
                    PaperConfig(top_k=int(_acct["top_k"]), hold=horizon,
                                cost_bps=float(_acct["cost_bps"]),
