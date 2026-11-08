@@ -6,3 +6,6 @@
 
 numpy>=2.0
 pandas>=2.2
+
+# 图表渲染（qcore/chart.py、qcore/brief.py）
+pillow>=10.0

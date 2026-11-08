@@ -38,6 +38,13 @@ for f in manifest config/privilege config/resource APB.sc cmd/service-setup ui/c
   [ -e "$SRC/$f" ] || { echo "[fpk] ERROR missing $SRC/$f"; exit 1; }
 done
 
+# 图标：优先用仓库里已提交的；缺失才报错（不依赖生成步骤）
+if [ ! -f "$SRC/ICON.PNG" ] || [ ! -f "$SRC/ICON_256.PNG" ]; then
+  echo "[fpk] icons missing, generating..."
+  python "$ROOT/scripts/make_icons.py" || true
+fi
+[ -f "$SRC/ICON.PNG" ] || { echo "[fpk] ERROR ICON.PNG missing"; exit 1; }
+
 # ---------- 2. 打应用载荷 app.tgz ----------
 mkdir -p "$WORK/app"
 cp -a "$ROOT/qcore" "$WORK/app/"
@@ -48,7 +55,7 @@ find "$WORK/app" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/nul
 find "$WORK/app" -name '*.pyc' -delete 2>/dev/null || true
 
 tar -czf "$WORK/app.tgz" -C "$WORK/app" .
-APP_TGZ_SIZE=$(stat -c%s "$WORK/app.tgz")
+APP_TGZ_SIZE=$(wc -c < "$WORK/app.tgz" | tr -d " ")
 echo "[fpk] app.tgz = $APP_TGZ_SIZE bytes"
 [ "$APP_TGZ_SIZE" -ge 10240 ] || { echo "[fpk] ERROR app.tgz too small"; exit 1; }
 
@@ -77,11 +84,13 @@ grep -E '^(appname|version|platform|checksum|service_port)' "$PKG/manifest"
 # ---------- 5. 打包 ----------
 OUT="$ROOT/${APPNAME}_${VERSION}_${PLATFORM}.fpk"
 tar -czf "$OUT" -C "$PKG" .
-echo "[fpk] built $OUT ($(stat -c%s "$OUT") bytes)"
+echo "[fpk] built $OUT ($(wc -c < "$OUT" | tr -d " ") bytes)"
 
 # ---------- 6. 自检：能否解开、关键文件是否在 ----------
 tar tzf "$OUT" >/dev/null || { echo "[fpk] ERROR corrupted"; exit 1; }
+LIST="$(tar tzf "$OUT")"
+echo "[fpk] contents:"; echo "$LIST" | head -20
 for f in manifest app.tgz cmd/service-setup config/privilege config/resource ICON.PNG; do
-  tar tzf "$OUT" | grep -qx "./$f" || { echo "[fpk] ERROR missing $f in fpk"; exit 1; }
+  echo "$LIST" | grep -q "$f" || { echo "[fpk] ERROR missing $f in fpk"; exit 1; }
 done
 echo "[fpk] OK"
