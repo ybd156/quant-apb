@@ -31,3 +31,6 @@ Thumbs.db
 logs/
 *.log
 tmp/
+
+# 本地临时脚本
+data/tmp*

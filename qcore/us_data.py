@@ -55,6 +55,7 @@ for _d in (US_KLINE_DIR, HK_KLINE_DIR, META_DIR):
 
 US_MAP_PATH = os.path.join(META_DIR, "us_map.json")
 US_POOL_PATH = os.path.join(META_DIR, "us_pool.csv")
+US_POOL_META_PATH = os.path.join(META_DIR, "us_pool_meta.json")
 
 # ---------------------------------------------------------------- endpoints
 _SUGGEST_URL = ("https://searchapi.eastmoney.com/api/suggest/get"
@@ -656,20 +657,21 @@ def _quote_mktcap(secid: str) -> Tuple[float, float]:
         return float("nan"), float("nan")
 
 
-def fetch_us_pool(top_n: int = 80) -> pd.DataFrame:
-    """美股池：优先东财 clist（按总市值降序），失败退回内置常量表 + 逐只 quote 补数。
-
-    返回列：code, name, mktcap, amount, sector
-    ⚠️ mktcap 单位是**美元**，amount 单位是**美元**（A股 data.py 里是元/手，别混用）。
-    拿不到的字段留 NaN —— 不猜、不填零。
-    """
+def _build_pool_us(top_n: int, min_amount: float = 0.0) -> pd.DataFrame:
+    """clist -> 过滤 -> 双类别去重 -> 异常标的筛查 -> 取前 top_n。"""
     top_n = int(max(1, top_n))
     try:
-        df = _clist_us(top_n)
+        df = _clist_us(top_n + 40)          # 多取一页，给去重/剔除留余量
         df = df.sort_values("mktcap", ascending=False, na_position="last")
+        if min_amount and min_amount > 0:
+            df = df[df["amount"].notna() & (df["amount"] >= float(min_amount))]
+        df, deduped = _dedupe_dual_class(df)
+        df, excluded = _screen_anomalies(df)
         out = df[["code", "name", "mktcap", "amount", "sector"]].head(top_n)
         out = out.reset_index(drop=True)
         out.attrs["source"] = "eastmoney_clist"
+        out.attrs["excluded"] = excluded
+        out.attrs["deduped"] = deduped
         out.attrs["mkt_coverage"] = float(out["mktcap"].notna().mean())
         return out
     except Exception as e:  # noqa: BLE001 —— 退回内置表
@@ -685,28 +687,76 @@ def fetch_us_pool(top_n: int = 80) -> pd.DataFrame:
         rows.append({"code": t, "name": "", "mktcap": cap, "amount": amt, "sector": ""})
     out = pd.DataFrame(rows, columns=["code", "name", "mktcap", "amount", "sector"])
     out.attrs["source"] = "builtin_fallback"
+    out.attrs["excluded"] = []
+    out.attrs["deduped"] = []
     out.attrs["mkt_coverage"] = float(out["mktcap"].notna().mean()) if len(out) else 0.0
     return out
 
 
-def get_us_pool(top_n: int = 80, cache_days: float = 3.0,
-                refresh: bool = False) -> pd.DataFrame:
-    """美股候选池（code,name,mktcap,amount,sector），带 CSV 缓存。"""
+def _write_pool_meta(excluded: List[dict], deduped: List[dict]) -> None:
+    try:
+        with open(US_POOL_META_PATH, "w", encoding="utf-8") as f:
+            json.dump({"excluded": excluded, "deduped": deduped,
+                       "updated": time.strftime("%Y-%m-%d %H:%M:%S")},
+                      f, ensure_ascii=False, indent=1)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _read_pool_meta() -> dict:
+    try:
+        with open(US_POOL_META_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def get_pool_us(top_n: int = 80, min_amount: float = 0.0,
+                cache_days: float = 3.0, refresh: bool = False) -> pd.DataFrame:
+    """美股候选池（与 A 股 `get_pool` 签名对齐）：code, name, mktcap, amount, sector。
+
+    ⚠️⚠️ **美股流动性排序 / 点对点选池必须用 `volume` 或 `volume×close` 代理，
+    禁止用 `amount` 排序。**
+    原因：东财美股 `amount` 字段在 **2017-07-11 之前恒为 0**（volume 却有值，
+    实测 AAPL 9282 根里 6936 根如此）。本模块已把"有量无额"的假 0 转成 `NaN`，
+    所以 2017 年前 amount **全部是 NaN**；拿它做排名/分位/滚动均值，NaN 会被
+    排名逻辑错误处理（要么整段被丢掉，要么被当 0 排到最后）。
+    `min_amount` 参数因此对 2017 年前的美股是"无差别剔除"，请勿依赖。
+
+    其他口径：
+      * mktcap / amount 单位都是**美元**（A 股 data.py 里是元/手，别混用）；
+      * 同公司多类别股（GOOGL/GOOG、BRK_A/BRK_B）**保留成交额大的那个**，
+        被去重的记在 `attrs["deduped"]`；
+      * 市值 > $1T 但历史不足 500 根 / 取不到日线 / 成交额长期缺失的标的
+        （如 `SPCX`——东财挂成 $1.82T 但只有 103 根日线）**默认剔除**，
+        清单在 `attrs["excluded"]`；
+      * 拿不到的字段留 NaN —— 不猜、不填零。
+    """
     if not refresh and _cache_fresh(US_POOL_PATH, cache_days):
         try:
             df = pd.read_csv(US_POOL_PATH, dtype={"code": str})
             if len(df) >= min(int(top_n), 100):
                 df = df.head(int(top_n)).reset_index(drop=True)
+                meta = _read_pool_meta()
                 df.attrs["source"] = "cache"
+                df.attrs["excluded"] = meta.get("excluded", [])
+                df.attrs["deduped"] = meta.get("deduped", [])
                 df.attrs["mkt_coverage"] = float(df["mktcap"].notna().mean())
                 return df
         except Exception:  # noqa: BLE001
             pass
-    df = fetch_us_pool(top_n=top_n)
+    df = _build_pool_us(top_n=top_n, min_amount=min_amount)
     out = df.copy()
+    attrs = dict(df.attrs)
     out.attrs = {}
     out.to_csv(US_POOL_PATH, index=False, encoding="utf-8")
+    _write_pool_meta(attrs.get("excluded", []), attrs.get("deduped", []))
     return df
+
+
+# 向后兼容旧名
+get_us_pool = get_pool_us
+fetch_us_pool = _build_pool_us
 
 
 # ---------------------------------------------------------------- batch
