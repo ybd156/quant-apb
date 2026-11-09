@@ -54,6 +54,11 @@ try:
 except Exception:
     _DEF = None
 
+# Cloudflare 的 Browser Integrity Check 会拦掉非浏览器 UA（error 1010）。
+# 训练机是脚本，必须伪装成浏览器，否则连 healthz 都过不去。
+_BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
 DEFAULT_HORIZONS = (_DEF.horizons() if _DEF else [1, 3, 5, 10, 15])
 _DEF_TREES = (_DEF.get()["trees"] if _DEF else 250)
 _DEF_STOCKS = (_DEF.get()["stocks"] if _DEF else 300)
@@ -156,7 +161,8 @@ def ensure_data(skip: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------- 3. 训练
-def train_horizons(horizons, trees: int, stocks: int, verbose: bool = True) -> list:
+def train_horizons(horizons, trees: int, stocks: int, verbose: bool = True,
+                   nas: str = "", token: str = "", upload: bool = True) -> list:
     from qcore import live_model as LM
     from qcore import horizons as HZ
 
@@ -174,13 +180,86 @@ def train_horizons(horizons, trees: int, stocks: int, verbose: bool = True) -> l
         if r.get("ok"):
             say(f"    {OK('完成')} {dt/60:.1f} 分钟 - {r.get('n_stocks')} 只 - "
                 f"{r.get('n_trees')} 树 - {r.get('train_n')} 样本")
-            results.append({"horizon": h, "ok": True, "seconds": round(dt, 1),
-                            "n_trees": r.get("n_trees"), "label": label})
+            item = {"horizon": h, "ok": True, "seconds": round(dt, 1),
+                    "n_trees": r.get("n_trees"), "label": label}
+            # 训完立刻上传，不攒到最后打包
+            if upload and nas:
+                say(f"    -> 上传到 {nas} ...")
+                up = _push_one(nas, token, h)
+                item["uploaded"] = bool(up.get("ok"))
+                item["upload_detail"] = up
+                if up.get("ok"):
+                    say(f"    {OK('已上传')} {up.get('size_kb')} KB")
+                else:
+                    say(f"    {WARN('上传失败')} {up.get('reason')}")
+            results.append(item)
         else:
             say(f"    {ERR('失败')} {r.get('reason')}（{dt/60:.1f} 分钟）")
             results.append({"horizon": h, "ok": False, "seconds": round(dt, 1),
                             "reason": r.get("reason"), "label": label})
     return results
+
+
+# ---------------------------------------------------------------- 3.5 实时上传
+def _push_one(nas: str, token: str, horizon: int, timeout: int = 180) -> dict:
+    """
+    训完一个周期就立刻传上去 —— 不用先打包。
+    失败就返回错误，由调用方决定要不要留 zip 兜底。
+    """
+    import base64
+    import urllib.error
+    import urllib.request
+
+    from qcore import model_transfer as MT
+
+    ex = MT.export_bundle(int(horizon))
+    if not ex.get("ok"):
+        return {"ok": False, "reason": ex.get("reason") or "export_failed"}
+    try:
+        with open(ex["path"], "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"read_failed: {type(e).__name__}"}
+
+    url = nas.rstrip("/") + "/api/sync/push"
+    payload = json.dumps({"data": b64, "horizon": int(horizon)}).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json",
+               "User-Agent": _BROWSER_UA}
+    if token:
+        headers["X-APB-Token"] = token
+    req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = r.read().decode("utf-8", "replace")
+            d = json.loads(body) if body.strip() else {}
+        if d.get("ok"):
+            return {"ok": True, "size_kb": round(os.path.getsize(ex["path"]) / 1024, 1)}
+        return {"ok": False, "reason": str(d.get("error") or d.get("detail"))[:80],
+                "checks": d.get("checks")}
+    except urllib.error.HTTPError as e:
+        try:
+            d = json.loads(e.read().decode("utf-8", "replace"))
+            reason = str(d.get("error") or d.get("detail") or f"http_{e.code}")[:80]
+        except Exception:
+            reason = f"http_{e.code}"
+        return {"ok": False, "reason": reason, "http": e.code}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:60]}",
+                "network": True}
+
+
+def _nas_reachable(nas: str, token: str, timeout: int = 12) -> bool:
+    """开训前先探一下 NAS 通不通，不通就别指望实时上传。"""
+    import urllib.error
+    import urllib.request
+    try:
+        req = urllib.request.Request(nas.rstrip("/") + "/api/healthz",
+                                     headers={"User-Agent": _BROWSER_UA,
+                                              "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ---------------------------------------------------------------- 4. 打包
@@ -278,6 +357,12 @@ def main(argv=None) -> int:
     ap.add_argument("--gpu", action="store_true", help="尝试使用 GPU（需 cupy）")
     ap.add_argument("--skip-data", action="store_true", help="跳过数据下载检查")
     ap.add_argument("--dry-run", action="store_true", help="只检查环境，不训练")
+    ap.add_argument("--nas", default="",
+                    help="训练完直接传到这个地址（默认读 apb_defaults.json）")
+    ap.add_argument("--token", default=os.environ.get("APB_TOKEN", ""),
+                    help="NAS 的 APB_TOKEN（也可用环境变量 APB_TOKEN）")
+    ap.add_argument("--no-upload", action="store_true",
+                    help="只训练不上传（模型留在 dist/models/）")
     a = ap.parse_args(argv)
 
     try:
@@ -321,28 +406,56 @@ def main(argv=None) -> int:
 
     # 3
     step(3, 4, "训练")
+    nas = "" if a.no_upload else (a.nas or _DEF_NAS)
+    token = a.token or ""
+    upload = bool(nas)
+    if upload:
+        say(f"  上传目标：{BOLD(nas)}")
+        if _nas_reachable(nas, token):
+            say(f"  {OK('NAS 可达')} —— 每个周期训完立刻上传，不打包")
+        else:
+            # 预检失败不代表一定传不上去（Cloudflare 可能挡了探测请求），
+            # 照常尝试；真传不上去会自然退回打包兜底。
+            say(f"  {WARN('预检没通')} —— 仍会尝试上传，传不上去再打包兜底")
+    else:
+        say("  --no-upload：只训练，模型留在 dist/models/")
     if env.get("gpu") and a.gpu:
         say(f"  {WARN('GPU 可用')}，但本项目的 GBDT 直方图是内存受限的，"
             f"实测独显约 6× 加速、核显反而更慢")
-    res = train_horizons(hs, a.trees, a.stocks)
+    res = train_horizons(hs, a.trees, a.stocks, nas=nas, token=token, upload=upload)
     ok_n = sum(1 for r in res if r["ok"])
-
-    # 4
-    step(4, 4, "打包")
-    if ok_n == 0:
-        say(ERR("  没有任何模型训练成功，跳过打包"))
-        return 1
-    good = [r["horizon"] for r in res if r["ok"]]
-    b = bundle(good)
-    if not b.get("ok"):
-        say(ERR(f"  打包失败：{b.get('reason')}"))
-        return 1
+    up_n = sum(1 for r in res if r.get("uploaded"))
 
     total = time.time() - t_start
     say("")
     say(BOLD("=" * 62))
     say(BOLD(f"  完成：{ok_n}/{len(hs)} 个周期，总耗时 {total/60:.1f} 分钟"))
     say(BOLD("=" * 62))
+
+    if ok_n == 0:
+        say("")
+        say(ERR("  没有任何模型训练成功，跳过上传/打包"))
+        return 1
+
+    good = [r["horizon"] for r in res if r["ok"]]
+
+    # 全部上传成功就不打包了 —— 打包只是为了网络不通时兜底
+    if upload and up_n >= ok_n:
+        step(4, 4, "完成")
+        say(f"  {OK('全部已上传')}（{up_n}/{ok_n} 个周期），不需要打包")
+        say("")
+        say("  NAS 上已经是最新模型，刷新页面就能用。")
+        say("")
+        return 0
+
+    step(4, 4, "打包兜底")
+    if upload and up_n < ok_n:
+        say(f"  有 {ok_n - up_n} 个周期没传上去，打包留底：")
+    b = bundle(good)
+    if not b.get("ok"):
+        say(ERR(f"  打包失败：{b.get('reason')}"))
+        return 1
+
     say("")
     say(f"  打包文件：{BOLD(b['zip'])}")
     say(f"  大小：{b['size_kb']} KB")
