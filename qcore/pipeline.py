@@ -328,6 +328,15 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     if led is not None and len(led):
         store.append_ledger(led[led["as_of"] >= p3d.dates[-1] - np.timedelta64(90, "D")].to_dict("records"))
 
+    # 记录主台账属于哪个周期 —— 否则下游无法判断
+    # 「已对账」该归到 h=1 还是 h=5，只能靠猜。
+    store.write_json("ledger_meta", {
+        "horizon": int(horizon),
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "n": int(len(led)) if led is not None else 0,
+        "note": "主台账（pipeline 逐日重放）的周期归属",
+    })
+
     st = store.read_json("status", default={}) or {}
     st["last_processed"] = str(pd.Timestamp(p3d.dates[-1]).date())
     st["rebuilt_at"] = datetime.now().isoformat(timespec="seconds")

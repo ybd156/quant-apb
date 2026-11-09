@@ -34,6 +34,7 @@ import argparse
 import importlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -457,6 +458,59 @@ def check_smoke(port: int = 8791) -> None:
         rec("smoke.pages", WARN, f"{type(e).__name__}: {str(e)[:60]}")
 
 
+def check_docker() -> None:
+    """
+    Dockerfile 的 COPY 源必须存在，且不能被 .dockerignore 排除。
+
+    实测踩过：Dockerfile 加了 `COPY tests/ ./tests/`，
+    但 .dockerignore 里写着 `tests/` —— 本地怎么都正常，
+    CI 构建直接失败，整个 Release 挂掉，tag 已经打出去了却发不了版。
+    """
+    df = os.path.join(ROOT, "Dockerfile")
+    if not os.path.isfile(df):
+        rec("docker.dockerfile", WARN, "没有 Dockerfile")
+        return
+
+    # 读 .dockerignore
+    ignore = []
+    ip = os.path.join(ROOT, ".dockerignore")
+    if os.path.isfile(ip):
+        for ln in open(ip, encoding="utf-8"):
+            ln = ln.strip()
+            if ln and not ln.startswith("#"):
+                ignore.append(ln.rstrip("/"))
+
+    src = open(df, encoding="utf-8").read()
+    missing, ignored = [], []
+    for m in re.finditer(r"^COPY\s+(.+?)\s+\S+\s*$", src, re.M):
+        spec = m.group(1).strip()
+        # `COPY --from=deps /install /usr/local` 的源是镜像内部路径，
+        # 不是构建上下文里的文件，跳过。
+        if "--from" in spec:
+            continue
+        if spec.startswith("--"):
+            continue
+        for part in spec.split():
+            if part.startswith("--") or "$" in part:
+                continue
+            p = os.path.join(ROOT, part)
+            if not os.path.exists(p):
+                missing.append(part)
+                continue
+            # 检查是否被 dockerignore 排除（只查顶层目录名）
+            top = part.split("/")[0]
+            if top in ignore:
+                ignored.append(part)
+
+    if missing:
+        rec("docker.copy_src", FAIL, f"COPY 源不存在: {', '.join(missing[:4])}")
+    elif ignored:
+        rec("docker.copy_src", FAIL,
+            f"COPY 源被 .dockerignore 排除（CI 会失败）: {', '.join(ignored[:4])}")
+    else:
+        rec("docker.copy_src", PASS, "所有 COPY 源存在且未被排除")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="跳过测试套件")
@@ -470,6 +524,7 @@ def main() -> int:
     check_account()
     check_http()
     check_wiring()
+    check_docker()
     if not a.quick:
         check_smoke()
         check_suites()

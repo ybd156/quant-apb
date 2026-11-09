@@ -14,9 +14,13 @@ reports/
 logs/
 tmp/
 
-# 开发用
+# 测试与审计代码不进生产镜像（1.7MB 夹具 + 测试脚本）。
+# 不变量检查改为在 qcore/invariants.py 里内联实现，不依赖这些文件。
 tests/
-audit/
+audit/*
+!audit/leak_scan.py
+
+# 开发用
 docs/
 *.md
 !README.md

@@ -62,11 +62,13 @@ def inv2_order() -> tuple:
            ("fail", "对账出现在打分之前")
 
 
-def inv3_rolling() -> tuple:
+def inv3_rolling():
     """INV-3 统计量必须滚动：静态扫描高危全样本统计。"""
     script = os.path.join(ROOT, "audit", "leak_scan.py")
     if not os.path.exists(script):
-        return "skip", "audit/leak_scan.py 不存在"
+        return "skip", ("静态扫描器未随镜像发布（audit/leak_scan.py）。"
+                        "该检查在 CI 每次发版执行，见 GitHub Actions 的 "
+                        "「无未来函数检验」步骤")
     try:
         r = subprocess.run([sys.executable, script], cwd=ROOT,
                            capture_output=True, text=True, timeout=300)
@@ -76,11 +78,10 @@ def inv3_rolling() -> tuple:
         if high == 0:
             return "pass", "HIGH=0（MEDIUM 项为评估层统计，已人工确认）"
         if high > 0:
-            return "fail", f"HIGH={high}"
-        return "skip", "扫描未输出结果"
+            return "fail", f"HIGH={high} 处疑似全样本统计"
+        return "skip", "扫描器输出无法解析"
     except Exception as e:  # noqa: BLE001
-        return "skip", f"{type(e).__name__}: {e}"
-
+        return "skip", f"扫描器异常: {type(e).__name__}"
 
 def inv4_hac() -> tuple:
     """INV-4 重叠收益必须用 HAC：检查评估层是否统一传 lags。"""

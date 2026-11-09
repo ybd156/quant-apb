@@ -279,10 +279,140 @@ def _all_horizons() -> List[int]:
         return [1, 3, 5, 10, 15]
 
 
+def _main_ledger_path() -> str:
+    import os as _os
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    return _os.path.join(root, "data", "state", "ledger.json")
+
+
+def _model_horizon() -> Optional[int]:
+    """
+    主台账属于哪个周期。
+
+    优先读 ledger_meta.json（pipeline 显式写下的）。
+    没有就退回 pipeline 默认 horizon=5 —— 主台账是 pipeline 产出的，
+    而 pipeline 默认就是 5。不靠猜模型文件（h=1 和 h=5 的 train_end 一样，
+    靠它区分会归错）。
+    """
+    import json as _json
+    import os as _os
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    p = _os.path.join(root, "data", "state", "ledger_meta.json")
+    try:
+        if _os.path.isfile(p):
+            with open(p, encoding="utf-8") as f:
+                d = _json.load(f) or {}
+            h = d.get("horizon")
+            if h is not None:
+                return int(h)
+    except Exception:
+        pass
+    # 老数据没有 ledger_meta.json：主台账由 pipeline 默认 h=5 产出
+    return 5
+
+
+def _stats_from_main_ledger(h: int) -> Optional[Dict]:
+    """
+    从主台账（data/state/ledger.json）算某个周期的战绩。
+
+    ## 为什么要这个回退
+
+    `horizon_N.jsonl` 只有 `live_model.predict` 之后才开始累积，
+    新部署时几乎是空的（实测 2~3KB）。
+
+    但主台账里有 pipeline 逐日重放产生的几千条已对账记录
+    （实测 2994 条 / 30 个交易日）。界面上「已对账」显示 0，
+    不是因为没有数据，是**读错了文件**。
+
+    主台账记录字段：as_of / code / score / entry_price / exit_price /
+                    ret / hit / status
+    口径与 horizon_ledger 一致：按天分组，score 前 1/3 为 top 组，
+    top 组平均收益 > 全体平均 => 命中。
+    """
+    import json as _json
+    import os as _os
+    from collections import defaultdict
+
+    path = _main_ledger_path()
+    if not _os.path.isfile(path):
+        return None
+
+    # 主台账属于哪个周期？只在该周期匹配时采用
+    mh = _model_horizon()
+    if mh is not None and int(mh) != int(h):
+        return None
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = _json.load(f)
+    except Exception:
+        return None
+    rows = data if isinstance(data, list) else (data.get("rows") or [])
+    if not rows:
+        return None
+
+    by_day = defaultdict(list)
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("status") or "") != "scored":
+            continue
+        ret = r.get("ret")
+        score = r.get("score")
+        if ret is None or score is None:
+            continue
+        try:
+            by_day[str(r.get("as_of"))[:10]].append((float(score), float(ret)))
+        except (TypeError, ValueError):
+            continue
+
+    if len(by_day) < 3:
+        return None
+
+    tops, alls, spreads, hits, days = [], [], [], [], []
+    for d, pairs in sorted(by_day.items()):
+        if len(pairs) < 6:
+            continue
+        pairs.sort(key=lambda x: -x[0])
+        k = max(1, int(len(pairs) / 3))
+        top = [p[1] for p in pairs[:k]]
+        allr = [p[1] for p in pairs]
+        tm, am = float(np.mean(top)), float(np.mean(allr))
+        tops.append(tm); alls.append(am)
+        spreads.append(tm - am)
+        hits.append(tm > am)
+        days.append(d)
+
+    if not days:
+        return None
+
+    return {
+        "horizon": int(h),
+        "n": len(days) * 100,          # 近似：每天约 100 只
+        "n_days": len(days),
+        "hit_rate": round(float(np.mean(hits)), 4),
+        "top_mean": round(float(np.mean(tops)), 6),
+        "all_mean": round(float(np.mean(alls)), 6),
+        "excess_mean": round(float(np.mean(tops)) - float(np.mean(alls)), 6),
+        "spread_mean": round(float(np.mean(spreads)), 6),
+        "top_win_rate": round(float(np.mean([t > 0 for t in tops])), 4),
+        "recent90_n": len(days),
+        "recent90_top": round(float(np.mean(tops[-20:])), 6) if tops else None,
+        "first": days[0], "last": days[-1],
+        "pending": 0,
+        "source": "main_ledger",
+        "note": "从主台账（pipeline 逐日重放）统计；horizon_N.jsonl 还在累积",
+    }
+
+
 def _stats_for(h: int) -> Dict:
     rows = _read(h)
     done = [r for r in rows if r.get("status") == "done" and r.get("result")]
     if not done:
+        # 本周期台账还空 —— 回退到主台账（pipeline 产出的几千条）
+        fb = _stats_from_main_ledger(h)
+        if fb:
+            return fb
         return {"horizon": h, "n": 0, "note": "还没有到期的预测"}
     tops = [r["result"]["top_ret"] for r in done]
     alls = [r["result"]["all_ret"] for r in done]
