@@ -150,6 +150,21 @@ if r.get('ok'):
     PIDS="$PIDS $!"
 fi
 
+# 5.6) 事件学习（每小时：登记新事件 + 到期对账 + 重算命中率）
+if [ "$ENABLE_EVENT_LEARN" != "0" ]; then
+    (
+        sleep 70
+        while true; do
+            python -c "
+from qcore import event_learning as EL
+r = EL.run(verbose=True)
+" 2>&1 | tail -4 || true
+            sleep 3600
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (

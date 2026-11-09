@@ -466,6 +466,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/event/learning":
+            return self._api_event_learning(query)
         if path == "/api/news/live":
             return self._api_news_live(query)
         if path == "/api/data/quality":
@@ -941,6 +943,27 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._ok(fn(verbose=False))
         except Exception as e:  # noqa: BLE001
             return self._fail("session_failed", 200, detail=str(e)[:160])
+
+    def _api_event_learning(self, query):
+        """
+        事件学习：预测方向 vs 实际反应。query: run=1 跑一轮（登记+对账+校准）。
+        返回命中率（按 type 和 type×sector）与校准倍数。
+        """
+        try:
+            from qcore import event_learning as EL
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        force = str(((query or {}).get("run") or ["0"])[0]) in ("1", "true", "yes")
+        if force:
+            try:
+                return self._ok(EL.run(verbose=False))
+            except Exception as e:  # noqa: BLE001
+                return self._fail("run_failed", 200, detail=str(e)[:160])
+        d = EL.summary()
+        if not d.get("hit_rate"):
+            return self._not_ready("event_learning.json",
+                                   "还没有事件学习数据，跑一次 /api/event/learning?run=1")
+        return self._ok(d)
 
     def _api_news_live(self, query):
         """
