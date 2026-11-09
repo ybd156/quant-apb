@@ -1,0 +1,197 @@
+"""
+控制面 —— NAS 下发任务，训练机领取、执行、回传。模型也能直接推上来。
+
+## 解决什么问题
+
+之前是纯手工：
+    别的电脑训练 → 导出 zip → scp → docker cp → 容器里 import
+
+每一步都可能出错，而且你不在电脑前就干不了。本模块把它变成：
+
+    NAS 上排一个任务  →  训练机（或本机）自动领取 → 训练 → 自动上传 → 结果回传
+
+## 两种角色
+
+**NAS（服务端）**
+- `POST /api/sync/task`    排一个训练任务（horizons / trees / stocks）
+- `GET  /api/sync/task`    查看队列
+- `POST /api/sync/push`    直接上传模型（base64 zip），等价于 model/import
+
+**训练机（客户端）**
+- `python tools/sync_agent.py --nas http://192.168.250.3:8765 --once`
+  领一个任务 → 训练 → 上传模型 → 回报
+
+## 安全
+
+所有写操作要 `X-APB-Token`。token 从 `APB_TOKEN` 环境变量读；
+**未设置时只允许内网访问**（和现有 /api/run 同一策略）。
+
+## 状态
+
+任务队列落 `data/state/sync_tasks.json`，只追加不改历史（INV-7 精神）。
+每个任务有 id / 状态 / 领取时间 / 结果，超时未回传的标 `expired`。
+"""
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STATE = os.path.join(ROOT, "data", "state")
+TASKS = os.path.join(STATE, "sync_tasks.json")
+
+# 任务超过这么久没回传就算过期（分钟）
+EXPIRE_MIN = 240
+
+
+def _now() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _atomic(path: str, obj) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=1, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _load() -> Dict:
+    try:
+        with open(TASKS, encoding="utf-8") as f:
+            d = json.load(f)
+            if isinstance(d, dict) and "tasks" in d:
+                return d
+    except Exception:
+        pass
+    return {"tasks": [], "updated_at": None}
+
+
+def _save(d: Dict) -> None:
+    d["updated_at"] = _now()
+    _atomic(TASKS, d)
+
+
+def _expire(d: Dict) -> int:
+    """把领取超时的任务标成 expired。"""
+    n = 0
+    cutoff = datetime.now().astimezone() - timedelta(minutes=EXPIRE_MIN)
+    for t in d.get("tasks", []):
+        if t.get("status") != "claimed":
+            continue
+        try:
+            at = datetime.fromisoformat(str(t.get("claimed_at")))
+        except Exception:
+            continue
+        if at < cutoff:
+            t["status"] = "expired"
+            t["expired_at"] = _now()
+            n += 1
+    return n
+
+
+# ---------------------------------------------------------------- 任务
+def create_task(horizons: List[int], trees: int = 250, stocks: int = 300,
+                note: str = "", created_by: str = "api") -> Dict:
+    """排一个训练任务。"""
+    d = _load()
+    _expire(d)
+    tid = uuid.uuid4().hex[:12]
+    task = {
+        "id": tid,
+        "horizons": [int(h) for h in horizons],
+        "trees": int(trees), "stocks": int(stocks),
+        "note": str(note)[:200],
+        "created_by": created_by, "created_at": _now(),
+        "status": "pending", "claimed_by": None, "claimed_at": None,
+        "finished_at": None, "result": None,
+    }
+    d.setdefault("tasks", []).append(task)
+    _save(d)
+    return {"ok": True, "task": task}
+
+
+def claim_task(worker: str = "unknown") -> Dict:
+    """领一个待办任务（FIFO）。没有就返回 pending=0。"""
+    d = _load()
+    _expire(d)
+    for t in d.get("tasks", []):
+        if t.get("status") == "pending":
+            t["status"] = "claimed"
+            t["claimed_by"] = str(worker)[:60]
+            t["claimed_at"] = _now()
+            _save(d)
+            return {"ok": True, "task": t}
+    _save(d)
+    return {"ok": True, "task": None, "pending": 0,
+            "note": "队列为空，等 NAS 排新任务"}
+
+
+def report_task(task_id: str, ok: bool, detail: Dict = None,
+                worker: str = "") -> Dict:
+    """训练机回传结果。"""
+    d = _load()
+    for t in d.get("tasks", []):
+        if t.get("id") == task_id:
+            t["status"] = "done" if ok else "failed"
+            t["finished_at"] = _now()
+            t["result"] = detail or {}
+            if worker:
+                t["claimed_by"] = str(worker)[:60]
+            _save(d)
+            return {"ok": True, "task": t}
+    return {"ok": False, "reason": "task_not_found", "id": task_id}
+
+
+def list_tasks(limit: int = 30) -> Dict:
+    d = _load()
+    _expire(d)
+    _save(d)
+    ts = list(reversed(d.get("tasks", [])))[:limit]
+    counts = {}
+    for t in d.get("tasks", []):
+        counts[t.get("status")] = counts.get(t.get("status"), 0) + 1
+    return {"ok": True, "tasks": ts, "counts": counts,
+            "total": len(d.get("tasks", [])),
+            "expire_min": EXPIRE_MIN}
+
+
+def cancel_task(task_id: str) -> Dict:
+    d = _load()
+    for t in d.get("tasks", []):
+        if t.get("id") == task_id and t.get("status") in ("pending", "claimed"):
+            t["status"] = "cancelled"
+            t["finished_at"] = _now()
+            _save(d)
+            return {"ok": True, "task": t}
+    return {"ok": False, "reason": "not_cancellable"}
+
+
+def summary() -> Dict:
+    r = list_tasks(limit=10)
+    return {"ok": True, "counts": r["counts"], "total": r["total"],
+            "recent": [{"id": t["id"], "status": t["status"],
+                        "horizons": t.get("horizons"), "trees": t.get("trees"),
+                        "claimed_by": t.get("claimed_by"),
+                        "created_at": t.get("created_at"),
+                        "finished_at": t.get("finished_at")}
+                       for t in r["tasks"][:10]]}
+
+
+if __name__ == "__main__":
+    import sys
+    if "--add" in sys.argv:
+        hs = [1, 5]
+        for a in sys.argv:
+            if a.startswith("--horizons="):
+                hs = [int(x) for x in a.split("=", 1)[1].split(",")]
+        print(json.dumps(create_task(hs), ensure_ascii=False, indent=1))
+    elif "--list" in sys.argv:
+        print(json.dumps(list_tasks(), ensure_ascii=False, indent=1)[:1500])
+    else:
+        print(json.dumps(summary(), ensure_ascii=False, indent=1))

@@ -494,6 +494,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_calendar(query)
         if path == "/api/lot":
             return self._api_lot(query)
+        if path == "/api/sync":
+            return self._api_sync_summary()
+        if path == "/api/sync/task":
+            return self._api_sync_task(query)
         if path == "/api/model/local":
             return self._api_model_local()
         if path == "/api/model/health":
@@ -1125,6 +1129,111 @@ class ApiHandler(BaseHTTPRequestHandler):
         w = {c: 1.0 / n for c in scores}
         return self._ok(L.plan(cap, w, prices, mkt))
 
+    def _sync_auth(self):
+        """同步端点的鉴权：设了 APB_TOKEN 就要 X-APB-Token（或 X-Token）。"""
+        expected = os.environ.get("APB_TOKEN", "")
+        given = (self.headers.get("X-APB-Token") or self.headers.get("X-Token") or "")
+        if expected:
+            if not hmac.compare_digest(given, expected):
+                return self._fail("unauthorized", 403,
+                                  hint="X-APB-Token 与 APB_TOKEN 不匹配")
+        else:
+            client = (self.client_address or ("", 0))[0]
+            if not _is_private_ip(client):
+                return self._fail("forbidden", 403,
+                                  hint="未设 APB_TOKEN 时只允许内网")
+        return None
+
+    def _api_sync_summary(self):
+        try:
+            from qcore import sync as SY
+            return self._ok(SY.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("sync_failed", 200, detail=str(e)[:160])
+
+    def _api_sync_task(self, query):
+        """GET /api/sync/task —— 查看任务队列。"""
+        try:
+            from qcore import sync as SY
+            limit = _clamp_int((query or {}).get("limit"), 30, 1, 200)
+            return self._ok(SY.list_tasks(limit=limit))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("task_failed", 200, detail=str(e)[:160])
+
+    def _post_sync_task(self):
+        """
+        POST /api/sync/task
+          {"horizons":[1,5],"trees":250,"stocks":300}  排新任务
+          {"claim":true,"worker":"xxx"}                领一个任务
+        """
+        denied = self._sync_auth()
+        if denied:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        try:
+            from qcore import sync as SY
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        if body.get("claim"):
+            return self._ok(SY.claim_task(worker=str(body.get("worker") or "unknown")))
+        hs = body.get("horizons") or [1]
+        try:
+            hs = [int(x) for x in hs]
+        except Exception:
+            return self._fail("bad_param", 400, hint="horizons 必须是整数数组")
+        return self._ok(SY.create_task(hs,
+                                       trees=int(body.get("trees") or 250),
+                                       stocks=int(body.get("stocks") or 300),
+                                       note=str(body.get("note") or "")))
+
+    def _post_sync_result(self):
+        denied = self._sync_auth()
+        if denied:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        tid = body.get("id")
+        if not tid:
+            return self._fail("bad_param", 400, hint="需要 id")
+        try:
+            from qcore import sync as SY
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        r = SY.report_task(str(tid), bool(body.get("ok")),
+                           detail=body.get("detail") or {},
+                           worker=str(body.get("worker") or ""))
+        return self._ok(r) if r.get("ok") else self._fail(r.get("reason", "failed"), 200)
+
+    def _post_sync_push(self):
+        """POST /api/sync/push —— 训练机直接上传模型（base64 zip）。"""
+        denied = self._sync_auth()
+        if denied:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        if not isinstance(body, dict):
+            return self._fail("bad_param", 400, hint="需要 JSON 对象")
+        data = body.get("data") or body.get("base64")
+        if not data:
+            return self._fail("bad_param", 400, hint="需要 data（zip 的 base64）")
+        h = body.get("horizon")
+        try:
+            from qcore import model_transfer as MT
+            r = MT.import_bundle(str(data), horizon=(int(h) if h else None))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("push_failed", 200, detail=str(e)[:160])
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "validation_failed"), 200,
+                              detail=r.get("detail"), checks=r.get("checks"),
+                              hint="校验未通过，未安装；线上模型保持不变")
+        return self._ok(r)
+
     def _api_model_local(self):
         """本机各 horizon 的模型状态（训练可以在别的机器做，导入进来）。"""
         try:
@@ -1298,6 +1407,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/sync/task":
+            return self._post_sync_task()
+        if path == "/api/sync/result":
+            return self._post_sync_result()
+        if path == "/api/sync/push":
+            return self._post_sync_push()
         if path == "/api/model/import":
             return self._post_model_import()
         if path == "/api/model/export":
