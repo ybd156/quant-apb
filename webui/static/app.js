@@ -775,7 +775,20 @@
     startUpdateWatch(to, (res.data && res.data.note) || '');
   }
 
-  /** 提交成功后：显示更新中，并每 10 秒轮询 /api/version 直到版本变化 */
+  /**
+   * 更新进度看板。
+   *
+   * 之前的实现只有一个转圈 + 「等待首次检查…」，用户完全不知道：
+   *   · 开始了吗
+   *   · 在拉镜像还是重建容器
+   *   · 卡住了还是正常
+   *
+   * 现在读 /api/update/progress，显示：
+   *   阶段名 + 进度条 + 已耗时 + 预计剩余 + 每一步的时间线
+   *
+   * 关键：服务重启期间请求会失败 —— 那不是错误，是正常现象，
+   * 明确提示「服务正在重启」，避免用户以为挂了。
+   */
   function startUpdateWatch(to, note) {
     S.updating = true;
     renderUpdateBadge();
@@ -783,41 +796,138 @@
     const foot = $('#modal-foot');
     if (body) {
       body.innerHTML =
-        '<div style="text-align:center;padding:6px 0 2px">' +
-        '<div class="spinner"></div>' +
-        '<p style="margin-top:12px">更新中，目标版本 <b>v' + esc(to || '?') + '</b></p>' +
-        '<p class="muted" style="margin-top:6px">' + esc(note || '更新在后台进行，约 1-3 分钟后刷新页面') + '</p>' +
-        '<p class="mono" id="upd-watch" style="margin-top:12px;color:var(--text-3);font-size:11px">等待首次检查…</p>' +
+        '<div id="upd-panel" style="min-height:150px">' +
+        '<div style="text-align:center;padding:4px 0 2px">' +
+        '<p>更新中，目标版本 <b>v' + esc(to || '?') + '</b></p>' +
+        '<p class="muted" style="margin-top:4px;font-size:12px">' +
+          esc(note || '进度会实时刷新，服务重启期间页面会短暂断开') + '</p>' +
+        '</div>' +
+        '<div class="upd-bar" style="margin:14px 0 8px;height:6px;border-radius:3px;' +
+          'background:var(--surface-3,#1c2434);overflow:hidden">' +
+          '<div id="upd-fill" style="height:100%;width:6%;background:var(--brand,#4a7dff);' +
+            'transition:width .5s"></div>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:space-between;font-size:12px">' +
+          '<span id="upd-stage" class="muted">排队中</span>' +
+          '<span id="upd-eta" class="mono muted">—</span>' +
+        '</div>' +
+        '<div id="upd-steps" class="mono" style="margin-top:12px;font-size:11px;' +
+          'color:var(--text-3);line-height:1.7;max-height:150px;overflow:auto"></div>' +
         '</div>';
     }
     if (foot) {
       foot.innerHTML = '<button class="btn ghost" type="button" data-close="1">后台继续</button>';
       $$('#modal-foot [data-close]').forEach((btn) => btn.addEventListener('click', closeModal));
     }
+
     const from = (S.version && S.version.version) || (S.update && S.update.current) || '';
     let tries = 0;
+    let servRestart = false;
+
+    const paint = (d) => {
+      const fill = $('#upd-fill');
+      const stage = $('#upd-stage');
+      const eta = $('#upd-eta');
+      const steps = $('#upd-steps');
+      const pct = Math.max(3, Math.min(100, Number(d.percent) || 0));
+      if (fill) fill.style.width = pct + '%';
+      if (stage) {
+        stage.textContent = (d.stage_label || d.stage || '进行中') + ' · ' + pct + '%';
+      }
+      if (eta) {
+        const el = Number(d.elapsed_seconds);
+        const rem = Number(d.eta_seconds);
+        let t = '';
+        if (isFinite(el) && el > 0) t += '已用 ' + Math.round(el) + 's';
+        if (isFinite(rem) && rem > 0 && d.state === 'running') {
+          t += (t ? ' · ' : '') + '预计还需 ' + Math.round(rem) + 's';
+        }
+        eta.textContent = t || '—';
+      }
+      if (steps && Array.isArray(d.steps)) {
+        steps.innerHTML = d.steps.slice(-8).map((x) => {
+          const mark = x.ok === false ? '✗' : '✓';
+          const t = String(x.at || '').slice(11, 19);
+          return '<div>' + mark + ' ' + t + ' ' + esc(x.label || x.stage) +
+            (x.detail ? ' <span style="opacity:.7">' + esc(String(x.detail).slice(0, 60)) + '</span>' : '') +
+            '</div>';
+        }).join('');
+      }
+    };
+
     const timer = setInterval(async () => {
       tries += 1;
-      const line = $('#upd-watch');
-      if (line) line.textContent = '第 ' + tries + ' 次检查 · ' + new Date().toLocaleTimeString();
+
+      // 1) 先看进度
+      const pr = await api('/api/update/progress');
+      if (pr && pr.ok && pr.data) {
+        servRestart = false;
+        const d = pr.data;
+        paint(d);
+
+        if (d.state === 'done') {
+          clearInterval(timer);
+          S.updating = false;
+          S.update = null;
+          toast('更新完成：' + (d.target || ''), 'ok');
+          setTimeout(() => { try { location.reload(); } catch (e) { /* ignore */ } }, 2500);
+          return;
+        }
+        if (d.state === 'failed' || d.state === 'rolled_back') {
+          clearInterval(timer);
+          S.updating = false;
+          renderUpdateBadge();
+          const stage = $('#upd-stage');
+          if (stage) {
+            stage.className = 'err-text';
+            stage.textContent = (d.stage_label || '更新失败') +
+              (d.error ? '：' + String(d.error).slice(0, 80) : '');
+          }
+          toast(d.state === 'rolled_back' ? '更新失败，已回滚' : '更新失败', 'err');
+          return;
+        }
+        if (d.state === 'stale') {
+          const stage = $('#upd-stage');
+          if (stage) {
+            stage.className = 'warn-text';
+            stage.textContent = '超过 10 分钟没有进展 —— 辅助容器可能已退出，请检查日志';
+          }
+        }
+      } else {
+        // 请求失败 = 服务正在重启，这是更新流程的正常一环
+        servRestart = true;
+        const stage = $('#upd-stage');
+        if (stage) stage.textContent = '服务正在重启（页面暂时断开）…';
+      }
+
+      // 2) 再确认版本是否已变
       const res = await api('/api/version');
-      if (res.ok && res.data && res.data.version && res.data.version !== from) {
+      if (res && res.ok && res.data && res.data.version &&
+          from && res.data.version !== from) {
         clearInterval(timer);
         S.updating = false;
         S.update = null;
-        if (line) line.textContent = '已更新到 v' + res.data.version;
+        const stage = $('#upd-stage');
+        if (stage) stage.textContent = '已更新到 v' + res.data.version;
         toast('已更新到 v' + res.data.version + '，正在刷新…', 'ok');
-        setTimeout(() => { try { location.reload(); } catch (e) { /* ignore */ } }, 2500);
+        setTimeout(() => { try { location.reload(); } catch (e) { /* ignore */ } }, 2000);
         return;
       }
-      if (tries >= 30) {           // 10s × 30 = 5 分钟
+
+      // 3) 超时保护：3 分钟
+      if (tries >= 60) {
         clearInterval(timer);
         S.updating = false;
         renderUpdateBadge();
-        if (line) line.textContent = '等待超时：请手动刷新页面确认版本';
-        toast('等待超时，请手动刷新页面', 'err');
+        const stage = $('#upd-stage');
+        if (stage) {
+          stage.className = 'warn-text';
+          stage.textContent = servRestart
+            ? '服务仍未恢复 —— 请在 NAS 上查看：docker logs apb'
+            : '等待超时 —— 请手动刷新页面确认版本';
+        }
       }
-    }, 10000);
+    }, 3000);
   }
 
   /* ------------------------- 设置页：检查更新卡片 ---------------------- */
@@ -1244,10 +1354,12 @@
     const picksCard = card({
       title: '当前推荐持仓',
       sub: picks
-        ? 'as_of ' + esc(picks.as_of || '—') + ' · 共 ' + esc(num(picks.n, 0)) + ' 只' +
-          (picks.top_k ? ' · top_k ' + esc(num(picks.top_k, 0)) : '') +
-          (picks.horizon ? ' · 周期 h' + esc(num(picks.horizon, 0)) +
-            (picks.horizon_label ? '（' + esc(picks.horizon_label) + '）' : '') : '')
+        ? 'as_of ' + esc(picks.as_of || '—') +
+          ' · ' + (picks.horizon_label
+            ? '周期 ' + esc(picks.horizon_label)
+            : (picks.horizon ? '周期 h' + esc(num(picks.horizon, 0)) : '周期 —')) +
+          ' · 共 ' + esc(num(picks.n, 0)) + ' 只' +
+          (picks.top_k ? ' · top_k ' + esc(num(picks.top_k, 0)) : '')
         : '未就绪',
       cls: 'flush',
       tools: '<span class="tag ok">持有中 = 缓冲带内不动</span>',
@@ -2568,7 +2680,9 @@
           '<button type="button" class="seg' + ((S.paBucket || 'day') === v ? ' is-active' : '') +
           '" data-b="' + v + '">' + l + '</button>').join('') +
         '</div><button type="button" class="btn ghost sm" id="pa-rebal" style="margin-left:8px">' +
-        ICON('play') + '本周期调仓</button>',
+        ICON('play') + '本周期调仓</button>' +
+        '<button type="button" class="btn ghost sm" id="pa-reset" style="margin-left:6px">' +
+        ICON('trash') + '清空重设</button>',
       body: (A.equity != null
         ? '<div class="quote-grid" style="grid-template-columns:repeat(auto-fit,minmax(104px,1fr));margin-bottom:14px">' +
             [['净值', fmtMoney(A.equity)], ['现金', fmtMoney(A.cash)],
@@ -3381,6 +3495,15 @@
       '</div><div class="card"><div class="skeleton" style="width:100%;height:120px"></div></div>';
   }
 
+  /** 重新渲染当前页（不切换路由、不压历史栈）。 */
+  function rerender() {
+    try {
+      return navigate(S.page || 'overview', false, true);
+    } catch (e) {
+      return null;
+    }
+  }
+
   async function navigate(id, push, silent) {
     if (!RENDERERS[id]) id = 'overview';
     stopAutoRefresh();
@@ -3635,6 +3758,41 @@
                 (noPicks ? '，' + noPicks + ' 个还没预测' : ''), 'ok');
           rerender();
         } else toast('调仓失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+      });
+      const rsb = $('#pa-reset');
+      if (rsb) rsb.addEventListener('click', async () => {
+        const mktNow = S.paperMarket || 'CN';
+        const hzNow = S.paHorizon || 1;
+        const curNav = (A && A.equity != null) ? A.equity : (A && A.initial_capital) || 0;
+        const inp = window.prompt(
+          '清空 ' + mktNow + ' / h' + hzNow + ' 的模拟盘，用新金额重新开始。\n\n' +
+          '当前净值：' + fmtMoney(curNav) + '\n' +
+          '会删除该账户的全部成交记录（其他市场/周期不受影响）。\n' +
+          '默认自动备份到 data/paper/backup/\n\n' +
+          '输入新的本金（留空则沿用原值）：',
+          String(Math.round(Number(curNav) || 1000000)));
+        if (inp === null) return;
+        const cap = inp.trim() === '' ? null : Number(inp.replace(/[, ]/g, ''));
+        if (cap !== null && (!isFinite(cap) || cap <= 0)) {
+          toast('金额无效', 'err'); return;
+        }
+        if (!window.confirm('确认清空 ' + mktNow + ' / h' + hzNow + ' 并' +
+            (cap === null ? '沿用原本金' : '用 ' + cap.toLocaleString() + ' 重新开始') + '？')) return;
+        rsb.disabled = true;
+        const r = await api('/api/paper/reset', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ market: mktNow, horizon: hzNow, capital: cap })
+        });
+        rsb.disabled = false;
+        if (r && r.ok) {
+          const d = r.data || {};
+          toast('已清空 ' + mktNow + ' h' + hzNow + '：删除 ' +
+                (d.cleared_trades || 0) + ' 条成交，本金 ' +
+                Number(d.capital || 0).toLocaleString(), 'ok');
+          rerender();
+        } else {
+          toast('清空失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+        }
       });
       const rb = $('#pa-rebal');
       if (rb) rb.addEventListener('click', async () => {

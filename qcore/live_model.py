@@ -134,6 +134,21 @@ def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
     from qcore import qlib_data as QD
     from qcore.gbdt import GBDT
 
+    # 横截面排名归一化（_cs_rank_norm）需要足够多的票才能算出分位。
+    # 实测：50 只 -> 归一化后全 NaN -> 展平得到 0 样本 -> 报"样本 0"，
+    # 用户完全看不懂。100 只就正常。所以提前拦住并说清原因。
+    MIN_STOCKS = 80
+    try:
+        _st = int(stocks)
+    except (TypeError, ValueError):
+        _st = 300
+    if _st < MIN_STOCKS:
+        return {"ok": False, "reason": "stocks_too_few",
+                "horizon": horizon, "stocks": _st, "min_stocks": MIN_STOCKS,
+                "hint": f"--stocks={_st} 太少。横截面排名归一化需要至少 "
+                        f"{MIN_STOCKS} 只票（实测 50 只会使归一化结果全为 NaN，"
+                        f"最终样本数 0）。请用 --stocks 100 以上，推荐默认 300"}
+
     codes = QD.universe_codes(universe, start=train_end)
     if verbose:
         print(f"  {universe}: {len(codes)} 只，训练截至 {train_end}，"
@@ -154,7 +169,15 @@ def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
                       "2099-12-31")
     Xtr, ytr = bench._flatten(Xn, y, sp["train"])
     if Xtr.shape[0] < 5000:
-        return {"ok": False, "reason": f"样本不足 {Xtr.shape[0]}"}
+        # 区分两种原因：票太少（归一化失败）vs 时间太短
+        _n_fin = int(np.isfinite(Xn).sum())
+        _hint = ("横截面归一化后几乎没有有效值，通常是股票数太少"
+                 if _n_fin == 0 else
+                 f"训练窗口内样本不足。当前 train_end={train_end}，"
+                 f"可扩大数据范围或减少 horizon")
+        return {"ok": False, "reason": f"样本不足 {Xtr.shape[0]}",
+                "horizon": horizon, "n_stocks": len(d.get("codes") or []),
+                "hint": _hint}
     t0 = time.time()
     model = GBDT(n_estimators=trees, max_depth=4, learning_rate=0.1,
                  min_samples_leaf=200, subsample=0.8, colsample=0.8,
@@ -285,8 +308,18 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
         _mkt = str(getattr(_QD, "MARKET", "CN") or "CN").upper()
     except Exception:
         _mkt = "CN"
+    # horizon / horizon_label 也写进去。
+    # 之前缺这两个字段，UI 只能拿模型的 hold_days（回测参数，常见 20 日）来显示，
+    # 于是「选中 T+1 短线」却写着「持有 20 日」—— 用户一眼就看出矛盾。
+    _hlab = ""
+    try:
+        from . import horizons as _HZ
+        _hlab = _HZ.label_for(int(horizon))
+    except Exception:
+        _hlab = f"h{horizon}"
     payload = {"as_of": str(dates[last].date()), "rows": rows, "n": len(rows),
-               "market": _mkt,
+               "market": _mkt, "horizon": int(horizon),
+               "horizon_label": _hlab,
                "top_k": top_k, "horizon": horizon,
                "horizon_label": HZ.label_for(horizon),
                "model_age_days": round(model_age_days(horizon) or 0, 1),

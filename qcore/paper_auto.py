@@ -129,9 +129,12 @@ def load_trades(market: Optional[str] = None,
 def init_account(capital: float, market: str = "CN", horizon: int = 1) -> Dict:
     m = str(market).upper()
     h = int(horizon or 1)
+    # equity 一开始就等于本金 —— 否则刚建好的账户在 UI 上显示「净值 —」，
+    # 用户会以为没生效。n_positions 同理记 0。
     acc = {"market": m, "horizon": h, "cash": float(capital),
            "initial_capital": float(capital), "positions": {},
-           "trade_periods": 0,
+           "equity": float(capital), "n_positions": 0, "total_return": 0.0,
+           "trade_periods": 0, "as_of": None,
            "created_at": _now(), "updated_at": _now()}
     _atomic(_account_path(m, h), acc)
     return acc
@@ -412,6 +415,128 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
             "account": acc, "dry_run": dry_run}
 
 
+def reset(market: str = "CN", horizon: int = 1,
+          capital: Optional[float] = None,
+          backup: bool = True) -> Dict:
+    """
+    清空某个 (市场, 周期) 的模拟盘，用新金额重开。
+
+    ## 清什么
+
+      · 该账户的持仓、现金、净值（重建为初始本金）
+      · `trades.jsonl` 里属于该 (market, horizon) 的成交记录
+      · **不动**其他市场/周期的数据
+
+    ## 备份
+
+    默认备份到 `data/paper/backup/<时间戳>_<market>_h<horizon>/`，
+    含账户 JSON + 该账户的成交记录。清空是危险操作，万一清错了还能找回。
+
+    ## 金额
+
+    capital 为空时沿用原账户的 initial_capital；
+    传了就用新值（这就是「重新按照现有的金额模拟」）。
+    """
+    m = str(market or "CN").upper()
+    h = int(horizon or 1)
+
+    old_acc = load_account(m, h)
+    old_trades = load_trades(m, h)
+
+    # 金额：显式传入 > 原账户本金 > 配置默认
+    if capital is None:
+        capital = float((old_acc or {}).get("initial_capital") or 0) or None
+    if capital is None:
+        try:
+            from . import account_config as AC
+            capital = float(AC.load(m).get("initial_capital") or 1_000_000)
+        except Exception:
+            capital = 1_000_000.0
+    capital = float(capital)
+    if capital <= 0:
+        return {"ok": False, "reason": "bad_capital", "capital": capital}
+
+    # ---- 备份 ----
+    backup_dir = ""
+    if backup and (old_acc or old_trades):
+        try:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_dir = os.path.join(PAPER_DIR, "backup", f"{ts}_{m}_h{h}")
+            os.makedirs(backup_dir, exist_ok=True)
+            if old_acc:
+                _atomic(os.path.join(backup_dir, "account.json"), old_acc)
+            if old_trades:
+                with open(os.path.join(backup_dir, "trades.jsonl"), "w",
+                          encoding="utf-8") as f:
+                    for t in old_trades:
+                        f.write(json.dumps(t, ensure_ascii=False, default=str) + "\n")
+        except Exception:
+            backup_dir = ""
+
+    # ---- 清成交记录（只删本市场+本周期的）----
+    removed = 0
+    if os.path.isfile(TRADES):
+        try:
+            keep = []
+            with open(TRADES, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        t = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    tm = str(t.get("market") or "CN").upper()
+                    th = int(t.get("horizon") or 1)
+                    if tm == m and th == h:
+                        removed += 1
+                    else:
+                        keep.append(line)
+            tmp = TRADES + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                for line in keep:
+                    f.write(line + "\n")
+            os.replace(tmp, TRADES)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "reason": "clear_trades_failed", "detail": str(e)[:120]}
+
+    # ---- 重建账户 ----
+    acc = init_account(capital, m, h)
+    try:
+        from . import account_config as AC
+        AC.save({"initial_capital": capital}, m)
+    except Exception:
+        pass
+
+    return {"ok": True, "market": m, "horizon": h,
+            "capital": round(capital, 2),
+            "cleared_trades": removed,
+            "backup_dir": backup_dir,
+            "account": acc,
+            "note": (f"已清空 {m} / h{h}，用 {capital:,.2f} 重新开始"
+                     + (f"；原数据备份在 {backup_dir}" if backup_dir else ""))}
+
+
+def reset_all(market: str = "CN", capital: Optional[float] = None,
+              backup: bool = True) -> Dict:
+    """清空某市场的所有周期账户。"""
+    try:
+        from . import horizons as HZ
+        hs = [x for x in HZ.all_horizons() if x > 0]
+    except Exception:
+        hs = [1, 3, 5, 10, 15]
+    out = []
+    for h in hs:
+        r = reset(market, h, capital=capital, backup=backup)
+        out.append({"horizon": h, "ok": bool(r.get("ok")),
+                    "cleared_trades": r.get("cleared_trades"),
+                    "reason": r.get("reason")})
+    return {"ok": True, "market": str(market).upper(), "capital": capital,
+            "results": out,
+            "total_cleared": sum(x.get("cleared_trades") or 0 for x in out)}
+
+
 def summary(market: str = "CN", horizon: int = 1) -> Dict:
     """单个 (市场, 周期) 账户摘要。"""
     m = str(market or "CN").upper()
@@ -422,6 +547,22 @@ def summary(market: str = "CN", horizon: int = 1) -> Dict:
                 "horizon": h,
                 "hint": f"先跑 python -m qcore.paper_auto --init "
                         f"--market={m} --horizon={h}"}
+    # 老账户可能缺 equity / n_positions（早期版本没有这两个字段）。
+    # 用现金 + 持仓成本兜底，避免 UI 显示「净值 —」看起来像没生效。
+    if acc.get("equity") is None:
+        cash = float(acc.get("cash") or 0)
+        pos = acc.get("positions") or {}
+        mv = 0.0
+        for c, p in pos.items():
+            try:
+                mv += float(p.get("qty") or 0) * float(p.get("price") or p.get("cost") or 0)
+            except (TypeError, ValueError):
+                pass
+        acc["equity"] = round(cash + mv, 2)
+        acc.setdefault("n_positions", len(pos))
+        init = float(acc.get("initial_capital") or 0)
+        if init > 0:
+            acc["total_return"] = round(acc["equity"] / init - 1.0, 6)
     trades = load_trades(m, h)
     return {"ok": True, "market": m, "horizon": h, "account": acc,
             "n_trades": len(trades),
@@ -601,8 +742,12 @@ def by_horizon(market: str = "CN") -> Dict:
             "fee_avg_bps": fs.get("avg_bps"),
             "as_of": a.get("as_of"),
         })
-    # 排名：总收益高的在前（只有有数据的才排）
-    ranked = sorted([x for x in rows if x.get("ok") and x.get("total_return") is not None],
+    # 排名：只算真正交易过的账户。
+    # 没成交的账户收益率恒为 0，会排在亏损账户前面 —— 那是假象，
+    # 用户会以为「T+3 最好」，其实它根本没建仓。
+    ranked = sorted([x for x in rows
+                     if x.get("ok") and x.get("total_return") is not None
+                     and (x.get("n_trades") or 0) > 0],
                     key=lambda x: -float(x["total_return"]))
     best = ranked[0] if ranked else None
     return {"ok": True, "market": str(market).upper(), "rows": rows,
@@ -610,7 +755,10 @@ def by_horizon(market: str = "CN") -> Dict:
             "verdict": (
                 f"目前最好的是 {best['label']}（累计 {best['total_return']*100:+.2f}%，"
                 f"成交 {best['n_trades']} 笔，费用 {best['fee_total']} 元）"
-                if best else "还没有任何周期账户产生数据")}
+                if best else
+                ("各周期账户都还没成交 —— 先跑一次调仓" if any(
+                    (x.get("ok") and (x.get("n_trades") or 0) == 0) for x in rows)
+                 else "还没有任何周期账户产生数据"))}
 
 
 def _label(h: int) -> str:
@@ -658,6 +806,15 @@ if __name__ == "__main__":
     elif "--dry" in sys.argv:
         print(json.dumps(rebalance(market=market, horizon=horizon, dry_run=True),
                          ensure_ascii=False, indent=1)[:1500])
+    elif "--reset" in sys.argv:
+        cap = _arg("capital", "")
+        capv = float(cap) if cap else None
+        if "--all-horizons" in sys.argv:
+            print(json.dumps(reset_all(market, capital=capv),
+                             ensure_ascii=False, indent=1))
+        else:
+            print(json.dumps(reset(market, horizon, capital=capv),
+                             ensure_ascii=False, indent=1))
     elif "--matrix" in sys.argv:
         print(json.dumps(summary_all(), ensure_ascii=False, indent=1)[:2500])
     elif "--by-horizon" in sys.argv:

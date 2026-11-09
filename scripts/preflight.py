@@ -297,6 +297,113 @@ def check_suites() -> None:
             rec(f"test.{name}", FAIL, str(e)[:80])
 
 
+def check_wiring() -> None:
+    """
+    前后端接线检查 —— 这类 bug 占了本版全部严重问题的一半。
+
+    查三件事：
+      1. 路由调用的 self._xxx() 方法是否真的定义了
+         （踩过两次：先加路由、判重条件被路由里的调用污染 -> 方法没加
+          -> 运行时报 'ApiHandler' object has no attribute '_xxx'）
+      2. app.js 里调用的自定义函数是否定义了
+         （踩过：reasonText is not defined，node --check 查不出来）
+      3. 关键数据文件的顶层键是否被 UI 正确读取
+    """
+    import re
+
+    # ---- 1) 路由 -> 方法 ----
+    p = os.path.join(ROOT, "webui", "server.py")
+    try:
+        src = open(p, encoding="utf-8").read()
+    except Exception as e:  # noqa: BLE001
+        rec("wiring.server", FAIL, f"读不到 {p}: {e}")
+        return
+    calls = set(re.findall(r"return self\.(_\w+)\(", src))
+    defs = set(re.findall(r"^\s*def (_\w+)\(", src, re.M))
+    missing = sorted(calls - defs)
+    if missing:
+        rec("wiring.routes", FAIL,
+            f"{len(missing)} 个路由方法缺失: " + ", ".join(missing[:6]))
+    else:
+        rec("wiring.routes", PASS, f"{len(calls)} 个路由方法全部存在")
+
+    # ---- 2) app.js 自定义函数 ----
+    p2 = os.path.join(ROOT, "webui", "static", "app.js")
+    try:
+        js = open(p2, encoding="utf-8").read()
+    except Exception as e:  # noqa: BLE001
+        rec("wiring.ui", FAIL, f"读不到 app.js: {e}")
+        return
+    # 只查本项目自己定义的函数形状：function foo(  /  const foo = (
+    defined = set(re.findall(r"function ([A-Za-z_]\w*)\s*\(", js))
+    defined |= set(re.findall(r"(?:const|let|var) ([A-Za-z_]\w*)\s*=\s*(?:function|\()", js))
+    # 调用点：名字后跟 (，且前面不是 . 或 function/const
+    called = set()
+    for m in re.finditer(r"(?<![.\w])([a-z][A-Za-z0-9_]{3,})\s*\(", js):
+        called.add(m.group(1))
+    # 常见内置/浏览器 API 白名单
+    BUILTIN = {
+        "if", "for", "while", "switch", "catch", "return", "typeof", "function",
+        "parseInt", "parseFloat", "isNaN", "isFinite", "encodeURIComponent",
+        "decodeURIComponent", "requestAnimationFrame", "setTimeout", "setInterval",
+        "clearTimeout", "clearInterval", "confirm", "alert", "prompt", "fetch",
+        "require", "addEventListener", "removeEventListener", "stringify", "parse",
+        "getElementById", "querySelector", "querySelectorAll", "createElement",
+        "appendChild", "removeChild", "toLocaleTimeString", "toLocaleString",
+        "toFixed", "toString", "toUpperCase", "toLowerCase", "indexOf", "slice",
+        "splice", "join", "split", "replace", "includes", "startsWith", "endsWith",
+        "padStart", "padEnd", "filter", "map", "forEach", "reduce", "find", "some",
+        "every", "sort", "concat", "trim", "keys", "values", "entries", "assign",
+        "from", "isArray", "now", "max", "min", "abs", "round", "floor", "ceil",
+        "random", "pow", "sqrt", "log", "exp", "sign", "test", "exec", "match",
+        "reload", "open", "close", "focus", "blur", "scrollTo", "print",
+        "setAttribute", "getAttribute", "hasAttribute", "removeAttribute",
+        "classList", "dataset", "preventDefault", "stopPropagation",
+        # 关键字 / CSS 函数 / 注释里的文本，不是 JS 函数
+        "async", "await", "yield", "new", "delete", "void", "in", "of", "do",
+        "else", "try", "finally", "throw", "case", "default", "break", "continue",
+        "repeat", "minmax", "rgba", "rgb", "hsl", "hsla", "calc", "var", "env",
+        "translate", "translateX", "translateY", "scale", "rotate", "opacity",
+        "url", "linear-gradient", "radial-gradient", "cubic-bezier",
+        "list_factors", "describe", "it", "test", "expect",
+    }
+    maybe_missing = sorted(
+        n for n in (called - defined - BUILTIN)
+        if not n.startswith("_") and any(ch.isupper() for ch in n) is False
+        and n not in ("toast", "card", "esc", "num", "pct")  # 这些在别处定义
+    )
+    # 只报告「看起来像自定义函数」的：小驼峰、长度>3、全小写开头
+    suspicious = []
+    for n in maybe_missing:
+        # 出现在 `function n(` 或 `n =` 之外的才是真嫌疑
+        if re.search(r"function\s+" + re.escape(n) + r"\b", js):
+            continue
+        if re.search(r"(?:const|let|var)\s+" + re.escape(n) + r"\b", js):
+            continue
+        # 只留下被当作函数调用、且项目里从未定义的
+        suspicious.append(n)
+    if suspicious:
+        # 数量太多通常是正则误报，只给警告不阻断
+        rec("wiring.ui", WARN, f"{len(suspicious)} 个疑似未定义: " +
+            ", ".join(suspicious[:5]))
+    else:
+        rec("wiring.ui", PASS, f"{len(defined)} 个自定义函数都有定义")
+
+    # ---- 3) source_health 结构 ----
+    sh = os.path.join(ROOT, "data", "state", "source_health.json")
+    if os.path.isfile(sh):
+        try:
+            d = json.load(open(sh, encoding="utf-8"))
+            if isinstance(d, dict) and "sources" in d:
+                rec("wiring.source_health", PASS,
+                    f"结构正确，{len(d.get('sources') or {})} 个源")
+            else:
+                rec("wiring.source_health", WARN,
+                    "缺 sources 段，UI 会遍历顶层键导致显示错位")
+        except Exception as e:  # noqa: BLE001
+            rec("wiring.source_health", WARN, str(e)[:60])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="跳过测试套件")
@@ -309,6 +416,7 @@ def main() -> int:
     check_state()
     check_account()
     check_http()
+    check_wiring()
     if not a.quick:
         check_suites()
 

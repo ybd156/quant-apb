@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from . import docker_api as D
+from . import update_progress as UP
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LOG = os.path.join(ROOT, "logs", "update.log")
@@ -63,13 +64,26 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
     repo, tag0 = _split_image(image_ref)
     tag = tag or tag0
     _log(f"=== 开始更新 {target} -> {repo}:{tag} ===")
+    try:
+        UP.begin(target=f"{repo}:{tag}")
+    except Exception:
+        pass
 
     if not D.available(sock):
+        try:
+            UP.fail("docker_socket_unavailable",
+                    "容器未挂载 /var/run/docker.sock")
+        except Exception:
+            pass
         return {"ok": False, "reason": "docker_socket_unavailable",
                 "hint": "容器未挂载 /var/run/docker.sock，无法应用内更新"}
 
     old = D.find_container(target, sock)
     if old is None:
+        try:
+            UP.fail("target_not_found", f"找不到容器 {target}")
+        except Exception:
+            pass
         return {"ok": False, "reason": "target_not_found", "target": target}
     old_id = old["Id"]
     old_image = old.get("Image", "")
@@ -87,9 +101,17 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
     _log(f"配置: binds={len(binds)} env={len(env)} ports={list(port_bindings)}")
 
     # 1) 拉新镜像
+    try:
+        UP.step("pulling", f"{repo}:{tag}")
+    except Exception:
+        pass
     pr = D.pull(repo, tag, sock=sock)
     if not pr.get("ok"):
         _log(f"拉取失败: {pr.get('error')}")
+        try:
+            UP.fail("pull_failed", str(pr.get("error"))[:200])
+        except Exception:
+            pass
         return {"ok": False, "reason": "pull_failed", "error": pr.get("error")}
     _log("镜像拉取完成")
 
@@ -99,13 +121,25 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
 
     # 2) 停 + 删旧
     _log("停止旧容器")
+    try:
+        UP.step("stopping", "主服务即将断开，页面会短暂不可用")
+    except Exception:
+        pass
     D.stop(old_id, sock)
     time.sleep(2)
     _log("删除旧容器")
+    try:
+        UP.step("removing")
+    except Exception:
+        pass
     D.remove(old_id, sock)
     time.sleep(1)
 
     # 3) 用新镜像重建
+    try:
+        UP.step("creating", new_ref)
+    except Exception:
+        pass
     created = D.create(target, new_ref, ports=port_bindings, env=env,
                        binds=binds, restart=restart, sock=sock)
     if not created.get("ok"):
@@ -117,12 +151,30 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
             _log("回滚成功，已用旧镜像恢复")
         else:
             _log(f"回滚也失败: {rb.get('error')} —— 需要手工介入")
+        try:
+            UP.step("rolled_back" if rb.get("ok") else "failed",
+                    detail=str(created.get("error"))[:200], ok=False,
+                    error=None if rb.get("ok") else str(created.get("error"))[:200])
+        except Exception:
+            pass
         return {"ok": False, "reason": "recreate_failed",
                 "error": created.get("error"), "rollback_ok": bool(rb.get("ok"))}
 
     # 4) 启动
+    try:
+        UP.step("starting", (created.get("id") or "")[:12])
+    except Exception:
+        pass
     ok = D.start(created["id"], sock)
     _log(f"启动{'成功' if ok else '失败'}")
+    try:
+        if ok:
+            UP.step("health", "容器已启动，等待健康检查")
+            UP.finish(f"{new_ref} 已启动")
+        else:
+            UP.fail("start_failed", "容器创建成功但启动失败")
+    except Exception:
+        pass
     return {"ok": bool(ok), "container": target, "image": new_ref,
             "id": (created.get("id") or "")[:12]}
 

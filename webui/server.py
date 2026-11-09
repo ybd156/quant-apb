@@ -559,6 +559,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_account_config(query)
         if path == "/api/market":
             return self._api_market()
+        if path == "/api/update/progress":
+            return self._api_update_progress()
         if path == "/api/update":
             return self._api_update()
         if path == "/api/model":
@@ -781,6 +783,25 @@ class ApiHandler(BaseHTTPRequestHandler):
         if sent is not None:
             return sent
         return self._ok(data)
+
+    def _api_update_progress(self):
+        """
+        更新进度。让用户知道「开始没开始、到哪了、还要多久」。
+
+        辅助容器每做一步写一次 data/state/update_progress.json，
+        这个文件在 data 挂载里，所以主容器被停掉后新容器启动还能读到
+        —— 刷新页面就知道上次更新成功没有。
+        """
+        try:
+            from qcore import update_progress as UP
+            d = UP.read()
+        except Exception as e:  # noqa: BLE001
+            return self._fail("progress_failed", 200, detail=str(e)[:120])
+        if not d:
+            return self._ok({"state": "idle", "percent": 0,
+                             "stage_label": "没有进行中的更新",
+                             "note": "点「确认更新」后这里会显示实时进度"})
+        return self._ok(d)
 
     def _api_update(self):
         """版本检查 —— 只比对本地 VERSION 与 update.json 记录的远端版本。"""
@@ -1372,6 +1393,52 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._ok(d)
         except Exception as e:  # noqa: BLE001
             return self._fail("weekly_failed", 200, detail=str(e)[:160])
+
+    def _post_paper_reset(self):
+        """
+        清空某个 (市场, 周期) 的模拟盘，用新金额重开。
+
+        body:
+          market        CN|US|HK
+          horizon       1|3|5|10|15（默认 1）
+          capital       新本金（可选，空则沿用原本金）
+          all_horizons  true 时清空该市场全部周期
+          backup        默认 true，备份到 data/paper/backup/
+
+        危险操作：会删除该账户的成交记录。默认备份，可在 backup 目录找回。
+        """
+        denied = self._write_allowed()
+        if denied is not None:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        if not isinstance(body, dict):
+            body = {}
+        mkt = str(body.get("market") or "CN").upper()
+        try:
+            h = int(body.get("horizon") or 1)
+        except (TypeError, ValueError):
+            h = 1
+        cap = body.get("capital")
+        try:
+            cap = float(cap) if cap not in (None, "") else None
+        except (TypeError, ValueError):
+            cap = None
+        do_backup = body.get("backup", True) is not False
+
+        try:
+            from qcore import paper_auto as PA
+            if body.get("all_horizons"):
+                r = PA.reset_all(mkt, capital=cap, backup=do_backup)
+            else:
+                r = PA.reset(mkt, h, capital=cap, backup=do_backup)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("reset_failed", 200, detail=str(e)[:160])
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "reset_failed"), 200,
+                              hint=r.get("hint"), detail=r.get("detail"))
+        return self._ok(r)
 
     def _api_paper_auto(self, query=None):
         """
@@ -2374,6 +2441,8 @@ f.addEventListener('submit',async(e)=>{
             return self._post_run()
         if path == "/api/fees/save":
             return self._post_fees_save()
+        if path == "/api/paper/reset":
+            return self._post_paper_reset()
         if path == "/api/paper/rebalance":
             return self._post_paper_rebalance()
         if path == "/api/login":
@@ -2534,6 +2603,12 @@ f.addEventListener('submit',async(e)=>{
         if denied is not None:
             return denied
 
+        try:
+            from qcore import update_progress as _UP
+            _UP.begin(target=str(body.get("version") or "latest"),
+                      from_version=_read_version())
+        except Exception:
+            pass
         try:
             from qcore import docker_api as D
         except Exception as e:  # noqa: BLE001

@@ -1082,3 +1082,9 @@ select { cursor: pointer; }
   transition: background .12s; }
 .day-bar:hover { background: rgba(74,125,255,.7); }
 .day-bar.is-on { background: #4a7dff; }
+
+/* 更新进度 */
+.upd-bar { position: relative; }
+#upd-fill { box-shadow: 0 0 8px rgba(74,125,255,.5); }
+.err-text { color: #ff6b6b; }
+.warn-text { color: #f0b429; }
