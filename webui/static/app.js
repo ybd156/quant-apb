@@ -2286,13 +2286,17 @@
     const mkt = MKTS.indexOf(S.paperMarket) >= 0 ? S.paperMarket : 'CN';
     const label = mktLabel(mkt);
 
-    const [sumRes, cfgRes, paperRes, tradesRes] = await Promise.all([
+    const CUR_H = Number(S.paHorizon || 1);
+    const [sumRes, cfgRes, paperRes, tradesRes, autoRes, periodRes] = await Promise.all([
       apiCached('/api/account/config', 0),
       apiCached('/api/account/config?market=' + mkt, 0),
       apiCached('/api/paper?market=' + mkt, 0),
       mkt === 'CN'
         ? apiCached('/api/paper/trades?limit=20', 0)
-        : Promise.resolve({ ok: true, data: { rows: [], n: 0 } })
+        : Promise.resolve({ ok: true, data: { rows: [], n: 0 } }),
+      apiCached('/api/paper/auto?market=' + mkt + '&by_horizon=1', 3000),
+      apiCached('/api/paper/period?market=' + mkt + '&bucket=' +
+                (S.paBucket || 'day') + '&horizon=' + CUR_H, 3000)
     ]);
 
     const summary = (sumRes.ok && sumRes.data) ? sumRes.data : null;
@@ -2436,80 +2440,115 @@
           'alert')
       });
 
-    // ---- 自动交易账户（paper_auto）----
-    const AU = (autoRes && autoRes.ok && autoRes.data) ? autoRes.data : {};
-    const PD = (periodRes && periodRes.ok && periodRes.data) ? periodRes.data : {};
-    const PG = PD.period || {};
-    const FS = PD.fees || {};
-    const A = AU.account || {};
-    const auTrades = AU.recent_trades || [];
-    const hasAuto = !!A.equity;
+    // ================= 按周期分账户（每个周期独立本金/成本/成交）=================
+    const HB = (autoRes && autoRes.ok && autoRes.data) ? autoRes.data : {};
+    const hbRows = HB.rows || [];
+    const curLabel = (hbRows.find((x) => Number(x.horizon) === CUR_H) || {}).label || ('h' + CUR_H);
+
+    const hzAccountCard = card({
+      title: '按周期分账户', sub: 'T+1 / T+3 / 1周 / 2周 / 15天 各自独立，不走同一个池子',
+      tools: '<button type="button" class="btn ghost sm" id="pa-all">' +
+        ICON('play') + '全周期调仓</button>',
+      body: hbRows.length
+        ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+          '<th>周期</th><th>状态</th><th>净值</th><th>累计收益</th>' +
+          '<th>持仓</th><th>成交</th><th>调仓</th><th>费用</th>' +
+          '</tr></thead><tbody>' + hbRows.map((r) => {
+            const on = Number(r.horizon) === CUR_H;
+            const tr = toNum(r.total_return);
+            const tone = tr == null ? '' : (tr > 0 ? 'is-up' : tr < 0 ? 'is-down' : '');
+            const noData = !r.ok || r.equity == null;
+            return '<tr' + (on ? ' class="row-on"' : '') + '>' +
+              '<td><a class="link-btn" data-pahz="' + r.horizon + '">' +
+                esc(r.label || ('h' + r.horizon)) + '</a></td>' +
+              '<td>' + (noData ? '<span class="tag pending">未建仓</span>'
+                               : '<span class="tag hit">在跑</span>') + '</td>' +
+              '<td class="num">' + (r.equity == null ? '—' : fmtMoney(r.equity)) + '</td>' +
+              '<td class="num ' + tone + '">' + (tr == null ? '—' :
+                (tr > 0 ? '+' : '') + (tr * 100).toFixed(2) + '%') + '</td>' +
+              '<td class="num">' + (r.n_positions == null ? '—' : r.n_positions) + '</td>' +
+              '<td class="num">' + (r.n_trades == null ? '—' : r.n_trades) + '</td>' +
+              '<td class="num">' + (r.trade_periods == null ? '—' : r.trade_periods) + '</td>' +
+              '<td class="num">' + (r.fee_total == null ? '—' : r.fee_total.toFixed(2)) + '</td>' +
+              '</tr>';
+          }).join('') + '</tbody></table></div>' +
+          (HB.verdict ? '<p class="muted" style="margin-top:10px">' + esc(HB.verdict) + '</p>' : '')
+        : emptyBox('还没有周期账户', '点右上角「全周期调仓」为每个已训练周期建仓')
+    });
+
+    // ================= 当前周期的自动交易账户 =================
+    const AU = (periodRes && periodRes.ok && periodRes.data) ? periodRes.data : {};
+    const A = (AU.account && AU.account.account) ? AU.account.account : {};
+    const auTrades = (AU.account && AU.account.recent_trades) || [];
+    const PG = AU.period || {};
+    const FS = AU.fees || {};
 
     const autoCard = card({
-      title: '自动交易账户', sub: '按模型推荐自动下单（不是回测，是真在记账）',
+      title: '自动交易账户 · ' + curLabel,
+      sub: '按该周期推荐自动下单（不是回测，是真在记账）',
       tools: '<div class="segmented" id="pa-bucket">' +
         [['day', '按日'], ['week', '按周'], ['month', '按月']].map(([v, l]) =>
           '<button type="button" class="seg' + ((S.paBucket || 'day') === v ? ' is-active' : '') +
           '" data-b="' + v + '">' + l + '</button>').join('') +
         '</div><button type="button" class="btn ghost sm" id="pa-rebal" style="margin-left:8px">' +
-        ICON('play') + '按推荐调仓</button>',
-      body: hasAuto
+        ICON('play') + '本周期调仓</button>',
+      body: (A.equity != null
         ? '<div class="quote-grid" style="grid-template-columns:repeat(auto-fit,minmax(104px,1fr));margin-bottom:14px">' +
             [['净值', fmtMoney(A.equity)], ['现金', fmtMoney(A.cash)],
              ['持仓', (A.n_positions || 0) + ' 只'],
              ['累计收益', (A.total_return == null ? '—'
                : (A.total_return > 0 ? '+' : '') + (A.total_return * 100).toFixed(2) + '%')],
-             ['成交笔数', AU.n_trades || 0],
+             ['成交笔数', (AU.account && AU.account.n_trades) || 0],
              ['估值日', A.as_of || '—']]
               .map(([k, v]) => '<div class="qg-item"><span class="qg-k">' + k +
                 '</span><span class="qg-v">' + esc(String(v)) + '</span></div>').join('') +
-          '</div>' +
-          (auTrades.length
-            ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
-              '<th>日期</th><th>方向</th><th>代码</th><th>数量</th><th>价格</th><th>金额</th><th>原因</th>' +
-              '</tr></thead><tbody>' + auTrades.slice().reverse().map((t) =>
-                '<tr><td class="mono">' + esc(String(t.date || '').slice(5)) + '</td>' +
-                '<td class="' + (t.side === 'buy' ? 'is-up' : 'is-down') + '">' +
-                  (t.side === 'buy' ? '买入' : '卖出') + '</td>' +
-                '<td class="mono"><a class="link-btn" data-goto="' + esc(t.code) + '">' +
-                  esc(t.code) + '</a></td>' +
-                '<td class="num">' + esc(t.qty) + '</td>' +
-                '<td class="num">' + (Number(t.price) || 0).toFixed(2) + '</td>' +
-                '<td class="num">' + fmtMoney(t.amount) + '</td>' +
-                '<td class="muted">' + esc(t.reason || '—') + '</td></tr>').join('') +
-              '</tbody></table></div>'
-            : emptyBox('还没有成交', '点右上角「按当前推荐调仓」就会按 picks 建仓')) +
-          (PG.buckets && PG.buckets.length
-            ? '<div style="margin-top:16px"><div class="muted" style="margin-bottom:8px">' +
-              '分时段汇总（' + ({ day: '日', week: '周', month: '月' }[PG.bucket] || '日') + '）</div>' +
-              '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
-              '<th>时段</th><th>笔数</th><th>买</th><th>卖</th><th>买入额</th><th>卖出额</th><th>费用</th>' +
-              '</tr></thead><tbody>' + PG.buckets.slice(0, 12).map((b) =>
-                '<tr><td class="mono">' + esc(b.period) + '</td>' +
-                '<td class="num">' + b.n + '</td>' +
-                '<td class="num is-up">' + b.buys + '</td>' +
-                '<td class="num is-down">' + b.sells + '</td>' +
-                '<td class="num">' + fmtMoney(b.buy_amount) + '</td>' +
-                '<td class="num">' + fmtMoney(b.sell_amount) + '</td>' +
-                '<td class="num">' + b.fee.toFixed(2) + '</td></tr>').join('') +
-              '</tbody></table></div></div>'
-            : '') +
-          (FS.items && FS.items.length
-            ? '<div style="margin-top:16px"><div class="muted" style="margin-bottom:8px">' +
-              '费用构成（合计 ' + (FS.total || 0).toFixed(2) + '，' +
-              (FS.avg_bps == null ? '—' : FS.avg_bps + ' bps') + '）</div>' +
-              '<div class="bars">' + FS.items.map((it) =>
-                '<div class="bar-row"><span class="bar-label">' + esc(it.item) +
-                '</span><span class="bar-track"><span class="bar-fill" style="width:' +
-                Math.max(2, (it.share || 0) * 100).toFixed(1) + '%"></span></span>' +
-                '<span class="bar-val">' + it.amount.toFixed(2) + '</span></div>').join('') +
-              '</div></div>'
-            : '')
-        : emptyBox('自动交易账户未初始化',
-            '先跑一次 <code>python -m qcore.paper_auto --init --capital=1000000</code>')
+          '</div>'
+        : '') +
+        (auTrades.length
+          ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+            '<th>日期</th><th>方向</th><th>代码</th><th>数量</th><th>价格</th><th>金额</th><th>费用</th><th>原因</th>' +
+            '</tr></thead><tbody>' + auTrades.slice().reverse().slice(0, 20).map((t) =>
+              '<tr><td class="mono">' + esc(String(t.date || '').slice(5)) + '</td>' +
+              '<td class="' + (t.side === 'buy' ? 'is-up' : 'is-down') + '">' +
+                (t.side === 'buy' ? '买入' : '卖出') + '</td>' +
+              '<td class="mono"><a class="link-btn" data-goto="' + esc(t.code) + '">' +
+                esc(t.code) + '</a></td>' +
+              '<td class="num">' + esc(t.qty) + '</td>' +
+              '<td class="num">' + (Number(t.price) || 0).toFixed(2) + '</td>' +
+              '<td class="num">' + fmtMoney(t.amount) + '</td>' +
+              '<td class="num">' + (t.cost == null ? '—' : Number(t.cost).toFixed(2)) + '</td>' +
+              '<td class="muted">' + esc(t.reason || '—') + '</td></tr>').join('') +
+            '</tbody></table></div>'
+          : emptyBox('该周期还没有成交', '点右上角「本周期调仓」建仓；该周期没模型时需先训练+预测')) +
+        (PG.buckets && PG.buckets.length
+          ? '<div style="margin-top:16px"><div class="muted" style="margin-bottom:8px">分时段（' +
+            ({ day: '日', week: '周', month: '月' }[PG.bucket] || '日') + '）</div>' +
+            '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+            '<th>时段</th><th>笔数</th><th>买</th><th>卖</th><th>买入额</th><th>卖出额</th><th>费用</th>' +
+            '</tr></thead><tbody>' + PG.buckets.slice(0, 10).map((b) =>
+              '<tr><td class="mono">' + esc(b.period) + '</td>' +
+              '<td class="num">' + b.n + '</td>' +
+              '<td class="num is-up">' + b.buys + '</td>' +
+              '<td class="num is-down">' + b.sells + '</td>' +
+              '<td class="num">' + fmtMoney(b.buy_amount) + '</td>' +
+              '<td class="num">' + fmtMoney(b.sell_amount) + '</td>' +
+              '<td class="num">' + b.fee.toFixed(2) + '</td></tr>').join('') +
+            '</tbody></table></div></div>'
+          : '') +
+        (FS.items && FS.items.length
+          ? '<div style="margin-top:16px"><div class="muted" style="margin-bottom:8px">费用构成（合计 ' +
+            (FS.total || 0).toFixed(2) + '，' + (FS.avg_bps == null ? '—' : FS.avg_bps + ' bps') + '）</div>' +
+            '<div class="bars">' + FS.items.map((it) =>
+              '<div class="bar-row"><span class="bar-label">' + esc(it.item) +
+              '</span><span class="bar-track"><span class="bar-fill" style="width:' +
+              Math.max(2, (it.share || 0) * 100).toFixed(1) + '%"></span></span>' +
+              '<span class="bar-val">' + it.amount.toFixed(2) + '</span></div>').join('') +
+            '</div></div>'
+          : '')
     });
 
     return '<div style="margin-bottom:12px">' + marketTabsHtml(summary, mkt) + '</div>' +
+      '<div style="margin-bottom:14px">' + hzAccountCard + '</div>' +
       '<div style="margin-bottom:14px">' + autoCard + '</div>' +
       '<div style="margin-bottom:14px">' + acctCard + '</div>' +
       body + forms;
@@ -3275,35 +3314,6 @@
   /* --------------------------- 页内事件绑定 --------------------------- */
 
   function bindPageEvents(id) {
-    if (id === 'paper') {
-      $$('#pa-bucket .seg').forEach((b) => b.addEventListener('click', () => {
-        S.paBucket = b.getAttribute('data-b');
-        navigate('paper', false);
-      }));
-      const rb = $('#pa-rebal');
-      if (rb) rb.addEventListener('click', async () => {
-        if (!window.confirm('按当前推荐调仓？会真实写入模拟盘成交记录。')) return;
-        rb.disabled = true;
-        const r = await api('/api/paper/rebalance', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ market: S.paperMarket || 'CN' })
-        });
-        rb.disabled = false;
-        if (r && r.ok) {
-          const o = (r.data && r.data.orders) || [];
-          const sk = (r.data && r.data.skipped) || [];
-          toast('已调仓：' + o.length + ' 笔' + (sk.length ? '，跳过 ' + sk.length + ' 只' : ''), 'ok');
-          rerender();
-        } else {
-          toast('调仓失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
-        }
-      });
-      $$('[data-goto]').forEach((a) => a.addEventListener('click', () => {
-        S.chartCode = a.getAttribute('data-goto');
-        navigate('chart', false);
-      }));
-      return;
-    }
     if (id === 'hotspot') {
       const r = $('#hs-refresh');
       if (r) r.addEventListener('click', async () => {
@@ -3462,6 +3472,55 @@
     }
 
     if (id === 'paper') {
+      $$('#pa-bucket .seg').forEach((b) => b.addEventListener('click', () => {
+        S.paBucket = b.getAttribute('data-b');
+        navigate('paper', false);
+      }));
+      $$('[data-pahz]').forEach((a) => a.addEventListener('click', () => {
+        S.paHorizon = Number(a.getAttribute('data-pahz'));
+        navigate('paper', false);
+      }));
+      const allBtn = $('#pa-all');
+      if (allBtn) allBtn.addEventListener('click', async () => {
+        if (!window.confirm('对所有已训练周期各调一次仓？（每个周期独立账户）')) return;
+        allBtn.disabled = true;
+        const r = await api('/api/paper/rebalance', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ market: S.paperMarket || 'CN', all_horizons: true })
+        });
+        allBtn.disabled = false;
+        if (r && r.ok) {
+          const res = (r.data && r.data.results) || [];
+          const acted = res.filter((x) => x.ok && !x.skipped_all).length;
+          const noPicks = res.filter((x) => x.reason === 'no_picks').length;
+          toast('处理 ' + res.length + ' 个周期：' + acted + ' 个有动作' +
+                (noPicks ? '，' + noPicks + ' 个还没预测' : ''), 'ok');
+          rerender();
+        } else toast('调仓失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+      });
+      const rb = $('#pa-rebal');
+      if (rb) rb.addEventListener('click', async () => {
+        if (!window.confirm('按当前周期推荐调仓？会真实写入成交记录。')) return;
+        rb.disabled = true;
+        const r = await api('/api/paper/rebalance', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ market: S.paperMarket || 'CN',
+                                 horizon: S.paHorizon || 1 })
+        });
+        rb.disabled = false;
+        if (r && r.ok) {
+          const o = (r.data && r.data.orders) || [];
+          const sk = (r.data && r.data.skipped) || [];
+          toast('已调仓：' + o.length + ' 笔' + (sk.length ? '，跳过 ' + sk.length + ' 只' : ''), 'ok');
+          rerender();
+        } else {
+          toast('调仓失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+        }
+      });
+      $$('[data-goto]').forEach((a) => a.addEventListener('click', () => {
+        S.chartCode = a.getAttribute('data-goto');
+        navigate('chart', false);
+      }));
       const form = $('#trade-form');
       if (form) {
         const d = form.elements.date;

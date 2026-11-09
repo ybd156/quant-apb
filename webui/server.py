@@ -1133,11 +1133,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         if b not in ("day", "week", "month"):
             b = "day"
         try:
+            h = int((q.get("horizon") or ["0"])[0]) or None
+        except (TypeError, ValueError):
+            h = None
+        try:
             from qcore import paper_auto as PA
-            return self._ok({"market": m,
-                             "period": PA.by_period(m, b),
-                             "fees": PA.fee_summary(m),
-                             "account": PA.summary(m)})
+            return self._ok({"market": m, "horizon": h,
+                             "period": PA.by_period(m, b, h),
+                             "fees": PA.fee_summary(m, h),
+                             "account": PA.summary(m, h or 1)})
         except Exception as e:  # noqa: BLE001
             return self._fail("period_failed", 200, detail=str(e)[:160])
 
@@ -1163,17 +1167,27 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _api_paper_auto(self, query=None):
         """
-        模拟盘自动交易。query: market=CN|US|HK，all=1 取三个市场。
-        三个市场各自独立的本金、成本、币种、成交，绝不混在一起。
+        模拟盘自动交易。每个 (市场, 周期) 是独立账户。
+
+        query:
+          market=CN|US|HK      市场（默认 CN）
+          horizon=1|3|5|10|15  周期（默认 1）
+          all=1                三市场 × 全周期 矩阵
+          by_horizon=1         单市场按周期横向对比
         """
         q = query or {}
-        want_all = str((q.get("all") or ["0"])[0]) in ("1", "true", "yes")
         m = str((q.get("market") or ["CN"])[0]).upper()
         try:
+            h = int((q.get("horizon") or ["1"])[0])
+        except (TypeError, ValueError):
+            h = 1
+        try:
             from qcore import paper_auto as PA
-            if want_all:
+            if str((q.get("all") or ["0"])[0]) in ("1", "true", "yes"):
                 return self._ok(PA.summary_all())
-            return self._ok(PA.summary(m))
+            if str((q.get("by_horizon") or ["0"])[0]) in ("1", "true", "yes"):
+                return self._ok(PA.by_horizon(m))
+            return self._ok(PA.summary(m, h))
         except Exception as e:  # noqa: BLE001
             return self._fail("paper_auto_failed", 200, detail=str(e)[:160])
 
@@ -1189,16 +1203,26 @@ class ApiHandler(BaseHTTPRequestHandler):
             from qcore import paper_auto as PA
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
+        mkt = str(body.get("market") or "CN").upper()
+        dry = bool(body.get("dry_run"))
+        force = bool(body.get("force"))
         try:
-            r = PA.rebalance(market=str(body.get("market") or "CN"),
+            # all_horizons=true：对所有已训练周期各调一次
+            if body.get("all_horizons"):
+                return self._ok(PA.rebalance_all(mkt, dry_run=dry, force=force,
+                                                 verbose=False))
+            try:
+                h = int(body.get("horizon") or 1)
+            except (TypeError, ValueError):
+                h = 1
+            r = PA.rebalance(market=mkt, horizon=h,
                              top_k=(int(body["top_k"]) if body.get("top_k") else None),
-                             dry_run=bool(body.get("dry_run")),
-                             verbose=False)
+                             dry_run=dry, force=force, verbose=False)
         except Exception as e:  # noqa: BLE001
             return self._fail("rebalance_failed", 200, detail=str(e)[:160])
         if not r.get("ok"):
             return self._fail(r.get("reason", "rebalance_failed"), 200,
-                              hint=r.get("hint"))
+                              hint=r.get("hint"), horizon=r.get("horizon"))
         return self._ok(r)
 
     def _api_live_features(self):
