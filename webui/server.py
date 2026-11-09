@@ -1468,6 +1468,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        # 必须在任何分支返回前把请求体读干净。
+        # 否则在 keep-alive 连接上，残留的 body 会被当成下一个请求的起始行，
+        # 表现为 501 "Unsupported method ('{...}POST')"。
+        # Cloudflare / 反向代理会复用连接，所以这个错位是必现的（实测 50%）。
+        # 每次请求都要重新 drain。handler 实例在 keep-alive 连接上是复用的，
+        # 上一个请求缓存的 _raw_body 必须清掉，否则会跳过读取、残留 body。
+        self._raw_body = None
+        self._body_error = None
+        if not self._drain_body():
+            return
         _g = self._guard_request()
         if _g is not None:
             return
@@ -1513,17 +1523,51 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._fail("unknown_endpoint", 404, path=path)
         return self._fail("not_found", 404, path=path)
 
-    def _read_body(self):
-        """返回 (obj, error)。"""
+    def _drain_body(self) -> bool:
+        """
+        把请求体一次性读进内存并缓存。返回 False 表示已经发过错误响应。
+        超长时继续读空（不中断连接），但标记为 too_large。
+        """
+        if getattr(self, "_raw_body", None) is not None:
+            return True      # 本次请求内重复调用（如 _read_body 兜底）
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
-            return None, "bad_length"
+            self._raw_body = b""
+            self._body_error = "bad_length"
+            return True
         if length <= 0:
-            return None, "empty_body"
+            self._raw_body = b""
+            self._body_error = None
+            return True
         if length > MAX_BODY_BYTES:
-            return None, "body_too_large"
-        raw = self.rfile.read(length)
+            # 读完丢弃，保持连接可用；再由 _read_body 返回错误
+            remaining = length
+            while remaining > 0:
+                chunk = self.rfile.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+            self._raw_body = b""
+            self._body_error = "body_too_large"
+            return True
+        try:
+            self._raw_body = self.rfile.read(length)
+        except Exception:
+            self._raw_body = b""
+            self._body_error = "read_error"
+        self._body_error = None
+        return True
+
+    def _read_body(self):
+        """返回 (obj, error)。body 已在 do_POST 入口读完并缓存。"""
+        if getattr(self, "_raw_body", None) is None:
+            self._drain_body()
+        if getattr(self, "_body_error", None):
+            return None, self._body_error
+        raw = getattr(self, "_raw_body", b"") or b""
+        if not raw:
+            return None, "empty_body"
         try:
             obj = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError):

@@ -94,11 +94,21 @@ def real_ip(client_address: str, headers: Dict[str, str]) -> str:
     """
     还原真实客户端 IP。
 
-    只在 client_address 是可信代理时才看 X-Forwarded-For，
-    并且**从右往左**找第一个不属于可信代理的地址 —— 左侧可被客户端伪造。
+    优先级：
+      1. CF-Connecting-IP  —— 走 Cloudflare 时这是权威值（XFF 里会混进 CF 节点 IP）
+      2. X-Forwarded-For   —— 从右往左找第一个不属于可信代理的地址
+                              （左侧可被客户端伪造，只有右侧才可信）
+      3. client_address    —— 直连时的对端
+
+    前提都是：client_address 必须是可信代理。
     """
     if not client_address or not is_trusted_proxy(client_address):
         return client_address or ""
+
+    # Cloudflare 会给一个权威头，比 XFF 链更可靠（XFF 里会混进 CF 的节点 IP）
+    cf = headers.get("CF-Connecting-IP") or headers.get("cf-connecting-ip") or ""
+    if cf.strip():
+        return cf.strip()
 
     xff = ""
     for k in ("X-Forwarded-For", "X-Real-IP"):
