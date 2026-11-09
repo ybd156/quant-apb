@@ -1610,6 +1610,35 @@
       bannerHtml = notReadyBox(perfRes);
     }
 
+    /* --- 学习器为什么无效：逐条给原因，不只说「无显著差异」 --- */
+    let diagCard = '';
+    const dg = (perf && perf.learned && perf.learned.diagnosis) || null;
+    if (dg && dg.ok !== false && ((dg.reasons || []).length || (dg.checks || []).length)) {
+      const chk = (dg.checks || []).map((c) =>
+        '<tr><td>' + esc(c.name) + '</td>' +
+        '<td class="num mono">' + esc(c.value == null ? '—' : String(c.value)) + '</td>' +
+        '<td class="muted">' + esc(c.detail || '') + '</td></tr>').join('');
+      const reasons = (dg.reasons || []).map((r) =>
+        '<li style="margin:6px 0">' + esc(r) + '</li>').join('');
+      const paths = (dg.paths || []).map((r) =>
+        '<li style="margin:6px 0">' + esc(r) + '</li>').join('');
+      diagCard = card({
+        title: '为什么无效', sub: 'qcore/analysis.py · diagnose_learner',
+        body:
+          (chk ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+            '<th>检查项</th><th>实测</th><th>说明</th></tr></thead><tbody>' +
+            chk + '</tbody></table></div>' : '') +
+          (reasons ? '<div style="margin-top:14px"><div style="font-weight:600;margin-bottom:6px">' +
+            '原因</div><ul style="margin:0;padding-left:20px">' + reasons + '</ul></div>' : '') +
+          (paths ? '<div style="margin-top:14px"><div style="font-weight:600;margin-bottom:6px">' +
+            '可以试的方向</div><ul style="margin:0;padding-left:20px">' + paths + '</ul></div>' : '') +
+          (dg.sensitivity_skipped
+            ? '<p class="muted" style="margin-top:10px">参数敏感性扫描（ρ×κ 共 6 组）未运行' +
+              '（要跑 6 次完整回测，几分钟）。需要时跑 ' +
+              '<code>python -m qcore.pipeline --diagnose</code></p>' : '')
+      });
+    }
+
     /* --- 净值曲线：优先多空 equity，其次模拟/实盘净值 --- */
     let navCard;
     if (perf && perf.curve && perf.curve.length) {
@@ -1675,6 +1704,7 @@
     return '<div style="margin-bottom:14px">' + (await modelBarHtml(modelRes)) + '</div>' +
       '<div class="grid four" style="margin-bottom:14px">' + kpis + '</div>' +
       '<div style="margin-bottom:14px">' + bannerHtml + '</div>' +
+      (diagCard ? '<div style="margin-bottom:14px">' + diagCard + '</div>' : '') +
       '<div class="grid two" style="margin-bottom:14px">' + navCard + bandCard + '</div>' +
       '<div class="grid two">' + (subperiodCard || detailCard) + detailCard + '</div>';
   }
