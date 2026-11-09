@@ -90,6 +90,15 @@ def nas_models(nas: str, token: str, timeout: int = 25):
         with urllib.request.urlopen(req, timeout=timeout) as r:
             d = json.loads(r.read().decode("utf-8", "replace"))
         return (d.get("data") or {}).get("models") or []
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            print(f"  [!] 鉴权失败（HTTP {e.code}）—— token 不对或没设。")
+            print("      当前 token 前 8 位:", (token[:8] + "...") if token else "(空)")
+            print("      正确做法：用服务端 APB_TOKEN 环境变量的值。")
+            print("      在 NAS 上查：docker inspect apb --format '{{json .Config.Env}}' | grep TOKEN")
+        else:
+            print(f"  [!] 问 NAS 失败: HTTP {e.code}")
+        return None
     except Exception as e:  # noqa: BLE001
         print(f"  [!] 问 NAS 失败: {type(e).__name__}: {str(e)[:60]}")
         return None

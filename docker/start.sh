@@ -338,6 +338,22 @@ else:
     PIDS="$PIDS $!"
 fi
 
+# 5.14) 启动时快照 HostConfig（组权限/网络/挂载），供重建时对照
+(
+    sleep 20
+    python -c "
+try:
+    from qcore import docker_api as D, env_guard as EG
+    info = D.inspect('apb')
+    if info:
+        hc = EG.capture_hostconfig(info)
+        print('[hostconfig] 快照:', {k: (v if not isinstance(v, list) else len(v)) for k, v in hc.items()})
+except Exception as e:
+    print('[hostconfig] 跳过:', type(e).__name__)
+" 2>&1 | tail -2 || true
+) &
+PIDS="$PIDS $!"
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (

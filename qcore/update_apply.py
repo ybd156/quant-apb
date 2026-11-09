@@ -108,7 +108,16 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
     binds = hc.get("Binds") or []
     port_bindings = hc.get("PortBindings") or {}
     restart = ((hc.get("RestartPolicy") or {}).get("Name")) or "unless-stopped"
-    _log(f"配置: binds={len(binds)} env={len(env)} ports={list(port_bindings)}")
+    # 这些字段必须一起复制。漏了 GroupAdd 会让容器失去 docker 组，
+    # 下次就无法再更新自己（实测踩过，服务报「未挂载 docker.sock」）。
+    group_add = hc.get("GroupAdd") or []
+    network_mode = hc.get("NetworkMode") or ""
+    extra_hosts = hc.get("ExtraHosts") or []
+    cap_add = hc.get("CapAdd") or []
+    devices = hc.get("Devices") or []
+    _log(f"配置: binds={len(binds)} env={len(env)} ports={list(port_bindings)} "
+         f"group_add={group_add} net={network_mode or 'default'} "
+         f"caps={len(cap_add)} devices={len(devices)}")
 
     # 1) 拉新镜像
     try:
@@ -151,11 +160,19 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
     except Exception:
         pass
     created = D.create(target, new_ref, ports=port_bindings, env=env,
-                       binds=binds, restart=restart, sock=sock)
+                       binds=binds, restart=restart, sock=sock,
+                       group_add=group_add,
+                       network_mode=(network_mode if network_mode not in ("", "default") else None),
+                       extra_hosts=extra_hosts, cap_add=cap_add,
+                       devices=devices)
     if not created.get("ok"):
         _log(f"重建失败: {created.get('error')}，尝试回滚")
         rb = D.create(target, old_image, ports=port_bindings, env=env,
-                      binds=binds, restart=restart, sock=sock)
+                      binds=binds, restart=restart, sock=sock,
+                      group_add=group_add,
+                      network_mode=(network_mode if network_mode not in ("", "default") else None),
+                      extra_hosts=extra_hosts, cap_add=cap_add,
+                      devices=devices)
         if rb.get("ok"):
             D.start(rb["id"], sock)
             _log("回滚成功，已用旧镜像恢复")

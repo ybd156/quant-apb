@@ -137,3 +137,42 @@ def verify(env: List[str]) -> Dict:
     elif missing:
         warn = f"提示：以下变量没带过来 {missing}（不影响登录，但可能影响反代/白名单）"
     return {"ok": has_login, "missing": missing, "warn": warn}
+
+def capture_hostconfig(info: Dict) -> Dict:
+    """
+    快照容器的 HostConfig 关键字段。
+
+    ## 为什么环境变量不够
+
+    环境变量有快照保护，但**组权限没有**。
+    实测事故：重建容器漏了 GroupAdd -> 容器不再属于 docker 组 ->
+    访问不了 /var/run/docker.sock -> 应用内更新永久失效。
+
+    这里把会影响运行的 HostConfig 字段一起记下来，重建时对照。
+    """
+    hc = (info.get("HostConfig") or {})
+    keep = {
+        "GroupAdd": hc.get("GroupAdd") or [],
+        "NetworkMode": hc.get("NetworkMode") or "",
+        "ExtraHosts": hc.get("ExtraHosts") or [],
+        "CapAdd": hc.get("CapAdd") or [],
+        "Devices": hc.get("Devices") or [],
+        "Binds": hc.get("Binds") or [],
+        "PortBindings": hc.get("PortBindings") or {},
+        "RestartPolicy": (hc.get("RestartPolicy") or {}).get("Name") or "",
+    }
+    snap = load_snapshot()
+    snap["hostconfig"] = keep
+    snap["hostconfig_at"] = _now()
+    try:
+        os.makedirs(os.path.dirname(SNAPSHOT), exist_ok=True)
+        tmp = SNAPSHOT + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snap, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, SNAPSHOT)
+    except Exception:
+        pass
+    return keep
+

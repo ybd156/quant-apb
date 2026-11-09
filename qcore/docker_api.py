@@ -117,15 +117,43 @@ def remove(container_id: str, sock: str = SOCK) -> bool:
 def create(name: str, image: str, ports: Optional[dict] = None,
            env: Optional[List[str]] = None, binds: Optional[List[str]] = None,
            restart: str = "unless-stopped", entrypoint: Optional[List[str]] = None,
-           cmd: Optional[List[str]] = None, sock: str = SOCK) -> Dict:
+           cmd: Optional[List[str]] = None, sock: str = SOCK,
+           group_add: Optional[List[str]] = None,
+           network_mode: Optional[str] = None,
+           extra_hosts: Optional[List[str]] = None,
+           cap_add: Optional[List[str]] = None,
+           devices: Optional[List[dict]] = None) -> Dict:
+    """
+    创建容器。
+
+    ## 为什么参数这么多
+
+    只写死 RestartPolicy/Binds/PortBindings 是危险的：重建一次就丢一批配置。
+    实测踩过：漏了 GroupAdd -> 容器不再属于 docker 组 ->
+    访问不了 /var/run/docker.sock -> **下次更新再也做不了**（自我毁灭）。
+
+    凡是旧容器 HostConfig 里有的、会影响运行的字段，都必须能传进来。
+    """
+    hc: Dict = {
+        "RestartPolicy": {"Name": restart},
+        "Binds": binds or [],
+        "PortBindings": ports or {},
+    }
+    if group_add:
+        hc["GroupAdd"] = [str(g) for g in group_add]
+    if network_mode:
+        hc["NetworkMode"] = network_mode
+    if extra_hosts:
+        hc["ExtraHosts"] = extra_hosts
+    if cap_add:
+        hc["CapAdd"] = cap_add
+    if devices:
+        hc["Devices"] = devices
+
     body = {
         "Image": image,
         "Env": env or [],
-        "HostConfig": {
-            "RestartPolicy": {"Name": restart},
-            "Binds": binds or [],
-            "PortBindings": ports or {},
-        },
+        "HostConfig": hc,
     }
     # 覆盖入口：辅助容器需要跑 update_apply，而不是镜像默认的 start.sh
     if entrypoint is not None:

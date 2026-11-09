@@ -857,6 +857,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         elif latest:
             note = f"已是最新版本 v{cur}"
 
+        # 能不能应用内更新：需要 docker.sock 可访问。
+        # 提前告诉用户，别等他点了「确认更新」才报错。
+        can_self_update, why_not = False, ""
+        try:
+            from qcore import docker_api as D
+            can_self_update = bool(D.available())
+            if not can_self_update:
+                why_not = ("容器访问不到 /var/run/docker.sock。"
+                           "常见原因：没挂载这个 socket，或者容器用户不在 docker 组里"
+                           "（重建容器时漏了 --group-add）。")
+        except Exception as e:  # noqa: BLE001
+            why_not = f"检测失败: {type(e).__name__}"
+
         return self._ok({
             "current": cur, "latest": latest,
             "has_update": has_update,
@@ -864,6 +877,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             "checked_at": checked,
             "forced": force,
             "note": note,
+            "can_self_update": can_self_update,
+            "self_update_blocked_reason": why_not,
             "command": "docker compose pull && docker compose up -d",
         })
 
