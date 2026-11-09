@@ -405,7 +405,7 @@
       const sectors = Array.isArray(e.sectors) ? e.sectors : (e.sectors ? [e.sectors] : []);
       const dirTxt = dir === null ? '—' : dir > 0 ? '利好' : dir < 0 ? '利空' : '中性';
       return '<li class="tl-item ' + cls + '">' +
-        (r._live ? '<span class="tag" title="实时抓取，未经人工核实">实时</span> ' : '') +
+        (e._live ? '<span class="tag" title="实时抓取，未经人工核实">实时</span> ' : '') +
       '<div class="tl-head"><span class="tl-date">' + esc(e.date || '—') + '</span>' +
         '<span class="tag info">' + esc(type) + '</span>' +
         '<span class="tag ' + (dir > 0 ? 'hit' : dir < 0 ? 'miss' : 'na') + '">' + esc(dirTxt) + '</span>' +
@@ -2873,6 +2873,10 @@
     const liveMeta = res.data.live_meta || {};
     const types = Array.from(new Set(rows.map((r) => r.type).filter(Boolean)));
     const years = Array.from(new Set(rows.map((r) => String(r.date || '').slice(0, 4)).filter(Boolean))).sort();
+    // 人工整理的事件止于 curatedUntil（实测 2025-06），之后只能靠实时抓取。
+    // 必须在 setSub 之前定义 —— const 有暂时性死区，先用后定义会抛
+    // 「Cannot access 'curatedUntil' before initialization」
+    const curatedUntil = years.length ? years[years.length - 1] : '';
     setSub('人工 ' + rows.length + ' 条（截至 ' + (curatedUntil || '—') + '）'
       + (live.length ? ' + 实时 ' + live.length + ' 条' : '')
       + ' · ' + types.length + ' 类 · '
@@ -2881,9 +2885,7 @@
     const tf = S.filter.evType;
     const df = S.filter.evDir;
 
-    // 人工整理的事件止于 curatedUntil（实测 2025-06），之后只能靠实时抓取。
     // 把 live 也并进时间线，否则 2026 年那一段是空的 —— 看起来像"系统坏了"。
-    const curatedUntil = years.length ? years[years.length - 1] : '';
     const liveAsEvents = live.map((r) => ({
       date: String(r.date || r.time || '').slice(0, 10),
       type: r.type, direction: r.direction, sectors: r.sectors || [],

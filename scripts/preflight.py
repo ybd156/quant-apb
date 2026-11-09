@@ -202,7 +202,12 @@ def check_account() -> None:
 # ---------------------------------------------------------------- 4. HTTP
 def check_http(port: int = 8791) -> None:
     print(f"\n[4] HTTP 端点 (port {port})")
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    # 本地自检实例必须完全开放：不要继承 APB_TOKEN / APB_PASSWORD，
+    # 否则 /api/account/config 这类 POST 会被 _write_allowed 拦成 403
+    # （实测：在命令行设了 APB_TOKEN 跑 preflight，两个 POST 检查全红）
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("APB_TOKEN", "APB_PASSWORD")}
+    env["PYTHONUNBUFFERED"] = "1"
     proc = subprocess.Popen(
         [sys.executable, "-m", "webui.server", "--port", str(port), "--no-run"],
         cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -404,6 +409,54 @@ def check_wiring() -> None:
             rec("wiring.source_health", WARN, str(e)[:60])
 
 
+def check_smoke(port: int = 8791) -> None:
+    """
+    页面冒烟 —— 用 headless Chrome 打开每个页面，抓渲染错误。
+
+    ## 为什么要放在 preflight
+
+    实测教训：`node --check` 只查语法，查不出「调用了不存在的变量」。
+    我写完 `reasonText` / `curatedUntil` / `r._live` 三处 TDZ/未定义错误，
+    语法全过、preflight 全绿，但页面一点开就是「渲染失败」。
+
+    更糟的是：冒烟脚本自己有编码 bug（Windows 用 GBK 解码 Chrome 的 UTF-8），
+    导致它一直报 13/13 通过 —— **验证工具失灵比被测代码出错更危险**。
+
+    所以：
+      1. 冒烟必须自动化跑，不能靠人记得
+      2. 跑不通要能明确看到是哪一页
+    """
+    import subprocess as sp
+    smoke = os.path.join(ROOT, "scripts", "smoke_pages.py")
+    if not os.path.isfile(smoke):
+        rec("smoke.pages", WARN, "没有 smoke_pages.py")
+        return
+    try:
+        r = sp.run([sys.executable, smoke, f"--base=http://127.0.0.1:{port}"],
+                   capture_output=True, text=True, timeout=420,
+                   encoding="utf-8", errors="replace",
+                   env={k: v for k, v in os.environ.items()
+                        if k not in ("APB_TOKEN", "APB_PASSWORD")})
+        out = (r.stdout or "") + (r.stderr or "")
+        if "未找到 Chrome" in out:
+            rec("smoke.pages", WARN, "没装 Chrome，跳过页面冒烟")
+            return
+        m = None
+        for line in out.splitlines():
+            if "[smoke]" in line and "通过" in line:
+                m = line.strip()
+        if r.returncode == 0:
+            rec("smoke.pages", PASS, m or "全部页面通过")
+        else:
+            fails = [ln.strip() for ln in out.splitlines() if "[FAIL]" in ln]
+            rec("smoke.pages", FAIL,
+                (m + " | " if m else "") + "; ".join(fails[:3]))
+    except sp.TimeoutExpired:
+        rec("smoke.pages", FAIL, "超时（>7 分钟）")
+    except Exception as e:  # noqa: BLE001
+        rec("smoke.pages", WARN, f"{type(e).__name__}: {str(e)[:60]}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true", help="跳过测试套件")
@@ -418,6 +471,7 @@ def main() -> int:
     check_http()
     check_wiring()
     if not a.quick:
+        check_smoke()
         check_suites()
 
     n_fail = sum(1 for _, s, _ in results if s == FAIL)

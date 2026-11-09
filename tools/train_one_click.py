@@ -356,6 +356,8 @@ def main(argv=None) -> int:
                     help=f"股票池大小（默认 {_DEF_STOCKS}）")
     ap.add_argument("--gpu", action="store_true", help="尝试使用 GPU（需 cupy）")
     ap.add_argument("--skip-data", action="store_true", help="跳过数据下载检查")
+    ap.add_argument("--skip-kit-check", action="store_true",
+                    help="跳过套件新旧检查（不推荐）")
     ap.add_argument("--dry-run", action="store_true", help="只检查环境，不训练")
     ap.add_argument("--nas", default="",
                     help="训练完直接传到这个地址（默认读 apb_defaults.json）")
@@ -392,6 +394,19 @@ def main(argv=None) -> int:
         say("请先解决上面的问题再运行。")
         return 1
     say(f"  {OK('环境 OK')}")
+
+    # 套件新旧检查 —— 旧版不会自己说"我太旧了"，用户只看到一堆看不懂的错
+    try:
+        from qcore import kit_doctor as _KD
+        if not _KD.print_report():
+            if not a.skip_kit_check:
+                say("")
+                say("请重新下载最新套件后再运行（或加 --skip-kit-check 强行继续）。")
+                return 1
+    except ImportError:
+        say("  [!] 没有 kit_doctor 模块 —— 这套代码偏旧，建议重新下载最新套件")
+    except Exception as _e:
+        say(f"  [!] 套件自检跳过: {type(_e).__name__}")
 
     if a.dry_run:
         say("")

@@ -97,11 +97,17 @@ def check_page(chrome: str, base: str, page: str, timeout: int = 40,
             "--disable-dev-shm-usage", f"--user-data-dir={prof}",
             "--virtual-time-budget=9000", "--dump-dom", url,
         ]
+        # 必须显式指定 utf-8：Windows 下 text=True 会用 locale(GBK) 解码，
+        # 而 Chrome 输出 UTF-8 -> 中文变乱码 -> 下面的关键字判断永远 False
+        # -> 冒烟测试永远报 OK（实测踩过：页面明明报错，13/13 却全过）
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           errors="replace")
+                           encoding="utf-8", errors="replace")
         dom = r.stdout or ""
-        # 页面渲染失败的特征
-        if "页面渲染出错" in dom:
+        # 双重判据：
+        #   1) 关键字（编码修好后可靠）
+        #   2) 结构特征：<h2>渲染失败</h2> —— 即使关键字被编码搞坏也能抓到
+        _bad = ("页面渲染出错" in dom) or ("渲染失败</h2>" in dom)             or ("渲染失败<" in dom)
+        if _bad:
             m = re.search(r"页面渲染出错[^<]*<[^>]*>([^<]{0,160})", dom)
             return {"page": page, "ok": False,
                     "reason": "render_error",
