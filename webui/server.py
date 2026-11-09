@@ -1812,8 +1812,33 @@ class ApiHandler(BaseHTTPRequestHandler):
         w = {c: 1.0 / n for c in scores}
         return self._ok(L.plan(cap, w, prices, mkt))
 
-    def _sync_auth(self):
-        """同步端点的鉴权：设了 APB_TOKEN 就要 X-APB-Token（或 X-Token）。"""
+    def _sync_auth(self, allow_session: bool = False):
+        """
+        同步端点的鉴权。
+
+        ## 两种调用方
+
+        1. **训练机**（机器）：带 X-APB-Token / X-Token
+           —— claim / result / push 走这条
+
+        2. **网页用户**（人）：已经用密码登录了
+           —— 「设置 → 训练任务 → 排任务」走这条
+
+        之前一律只认 token，导致用户登录后在网页点「排任务」直接
+        `unauthorized`（实测）。人已经登录了，不该再要机器令牌。
+
+        allow_session=True 时先认登录会话，再走 token 校验。
+        """
+        if allow_session:
+            try:
+                from qcore import auth as AUTH
+                if AUTH.enabled():
+                    sid = self._cookie("apb_session")
+                    if sid and AUTH.verify_session(sid, touch=False):
+                        return None
+            except Exception:
+                pass
+
         expected = os.environ.get("APB_TOKEN", "")
         given = (self.headers.get("X-APB-Token") or self.headers.get("X-Token") or "")
         if expected:
@@ -2245,10 +2270,12 @@ f.addEventListener('submit',async(e)=>{
     def _post_sync_task(self):
         """
         POST /api/sync/task
-          {"horizons":[1,5],"trees":250,"stocks":300}  排新任务
-          {"claim":true,"worker":"xxx"}                领一个任务
+          {"horizons":[1,5],"trees":250,"stocks":300}  排新任务（网页用户）
+          {"claim":true,"worker":"xxx"}                领一个任务（训练机）
         """
-        denied = self._sync_auth()
+        # 网页用户已登录就能排任务；训练机用 token 领任务。
+        # 之前只认 token，导致登录用户在网页点「排任务」直接 unauthorized。
+        denied = self._sync_auth(allow_session=True)
         if denied:
             return denied
         body, err = self._read_body()
