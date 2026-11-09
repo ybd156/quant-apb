@@ -160,9 +160,14 @@ jobs:
         run: |
           set -x
           TAG="${{ needs.meta.outputs.tag }}"
+          # 只传文件，不传目录 —— dist/ 下可能有子目录（如 models/），
+          # gh 传目录会报 "read dist/models: is a directory" 然后整个 job 失败
+          FILES=$(find dist -maxdepth 1 -type f | sort)
+          echo "上传文件："
+          echo "$FILES"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
+            gh release upload "$TAG" $FILES --clobber
           else
-            gh release create "$TAG" dist/* --title "APB $TAG" --notes-file dist/INSTALL.md
+            gh release create "$TAG" $FILES --title "APB $TAG" --notes-file dist/INSTALL.md
           fi
           gh release view "$TAG" --json assets --jq '.assets[].name'

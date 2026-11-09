@@ -210,6 +210,21 @@ LF.extract_all(verbose=True)
     PIDS="$PIDS $!"
 fi
 
+# 5.10) 周报（每天算一次，展示最近 7 天；周一看上周）
+if [ "$ENABLE_WEEKLY" != "0" ]; then
+    (
+        sleep 200
+        while true; do
+            python -c "
+from qcore import weekly as WK
+WK.build(days=7, verbose=True)
+" 2>&1 | tail -12 || true
+            sleep 21600
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (

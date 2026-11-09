@@ -47,3 +47,21 @@ tmp/
 # Qlib 社区数据（544MB 压缩 / 3.7GB 解压），不入库
 data/qlib/
 apb-train-kit_*.zip
+
+# 训练机产物与便携运行时（不该进仓库，CI 会重新生成）
+dist/
+runtime/
+data/tick/
+data/live/
+data/hotspot/
+data/paper/
+apb-train-kit_*.zip
+
+# 运行期产物，不该进仓库（每次运行都会变，造成无意义 diff）
+data/backup/
+data/paper/
+data/model/
+data/live/
+data/hotspot/
+data/market_history.jsonl
+data/state/

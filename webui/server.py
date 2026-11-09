@@ -493,6 +493,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_export(query)
         if path == "/api/train/kit/download":
             return self._api_train_kit_download()
+        if path == "/api/weekly":
+            return self._api_weekly(query)
         if path == "/api/paper/auto":
             return self._api_paper_auto()
         if path == "/api/live/features":
@@ -1081,6 +1083,26 @@ class ApiHandler(BaseHTTPRequestHandler):
             return True
         except Exception as e:  # noqa: BLE001
             return self._fail("send_failed", 200, detail=str(e)[:100])
+
+    def _api_weekly(self, query):
+        """周报：模拟盘 / 各周期台账 / 归因 / 实时特征 / 模型健康。"""
+        q = query or {}
+        try:
+            days = _clamp_int(q.get("days"), 7, 1, 90)
+        except Exception:
+            days = 7
+        force = str((q.get("refresh") or ["0"])[0]) in ("1", "true", "yes")
+        try:
+            from qcore import weekly as WK
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        try:
+            d = WK.build(days=days, verbose=False) if force else WK.summary()
+            if not d or not d.get("summary_lines"):
+                d = WK.build(days=days, verbose=False)
+            return self._ok(d)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("weekly_failed", 200, detail=str(e)[:160])
 
     def _api_paper_auto(self):
         """模拟盘自动交易：账户 + 成交记录。"""
