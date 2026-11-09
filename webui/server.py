@@ -419,6 +419,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             blob = candidate.read_bytes()
         except OSError:
             return self._fail("read_error", 200, path=rel)
+        # 静态资源版本号：每次发版换 URL，彻底绕开浏览器缓存。
+        # 之前遇到过「代码部署了但页面还是旧的」，就是缓存导致的。
+        if rel.endswith("index.html"):
+            blob = blob.replace(b"__APB_VER__", _read_version().encode("utf-8"))
         ctype = MIME.get(candidate.suffix.lower(), "application/octet-stream")
         try:
             self.send_response(200)
@@ -493,10 +497,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_export(query)
         if path == "/api/train/kit/download":
             return self._api_train_kit_download()
+        if path == "/api/fees":
+            return self._api_fees(query)
+        if path == "/api/paper/period":
+            return self._api_paper_period(query)
         if path == "/api/weekly":
             return self._api_weekly(query)
         if path == "/api/paper/auto":
-            return self._api_paper_auto()
+            return self._api_paper_auto(query)
         if path == "/api/live/features":
             return self._api_live_features()
         if path == "/api/train/kit":
@@ -1084,6 +1092,55 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("send_failed", 200, detail=str(e)[:100])
 
+    def _api_fees(self, query):
+        """各市场费用明细 + 对照。query: market=CN 只返回该市场。"""
+        try:
+            from qcore import fees as FEES
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        m = str(((query or {}).get("market") or [""])[0]).upper()
+        try:
+            if m:
+                return self._ok({"market": m, "fee": FEES.get(m),
+                                 "sources": FEES.SOURCES.get(m, []),
+                                 "sample": FEES.trade_fees(m, "buy", 100000, 10000, 10)})
+            return self._ok(FEES.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("fees_failed", 200, detail=str(e)[:160])
+
+    def _post_fees_save(self):
+        """改某个市场的费率。body: {"market":"CN","patch":{"commission_bps":1.5}}"""
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        m = str(body.get("market") or "").upper()
+        if not m:
+            return self._fail("bad_param", 400, hint="需要 market")
+        patch = body.get("patch") or body.get("fees") or {}
+        try:
+            from qcore import fees as FEES
+            r = FEES.save(m, patch)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("save_failed", 200, detail=str(e)[:160])
+        return self._ok(r) if r.get("ok") else self._fail(r.get("reason", "failed"), 200)
+
+    def _api_paper_period(self, query):
+        """模拟盘分时段成交汇总。query: market=CN&bucket=day|week|month"""
+        q = query or {}
+        m = str((q.get("market") or ["CN"])[0]).upper()
+        b = str((q.get("bucket") or ["day"])[0]).lower()
+        if b not in ("day", "week", "month"):
+            b = "day"
+        try:
+            from qcore import paper_auto as PA
+            return self._ok({"market": m,
+                             "period": PA.by_period(m, b),
+                             "fees": PA.fee_summary(m),
+                             "account": PA.summary(m)})
+        except Exception as e:  # noqa: BLE001
+            return self._fail("period_failed", 200, detail=str(e)[:160])
+
     def _api_weekly(self, query):
         """周报：模拟盘 / 各周期台账 / 归因 / 实时特征 / 模型健康。"""
         q = query or {}
@@ -1104,11 +1161,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("weekly_failed", 200, detail=str(e)[:160])
 
-    def _api_paper_auto(self):
-        """模拟盘自动交易：账户 + 成交记录。"""
+    def _api_paper_auto(self, query=None):
+        """
+        模拟盘自动交易。query: market=CN|US|HK，all=1 取三个市场。
+        三个市场各自独立的本金、成本、币种、成交，绝不混在一起。
+        """
+        q = query or {}
+        want_all = str((q.get("all") or ["0"])[0]) in ("1", "true", "yes")
+        m = str((q.get("market") or ["CN"])[0]).upper()
         try:
             from qcore import paper_auto as PA
-            return self._ok(PA.summary())
+            if want_all:
+                return self._ok(PA.summary_all())
+            return self._ok(PA.summary(m))
         except Exception as e:  # noqa: BLE001
             return self._fail("paper_auto_failed", 200, detail=str(e)[:160])
 
@@ -2013,6 +2078,8 @@ f.addEventListener('submit',async(e)=>{
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/fees/save":
+            return self._post_fees_save()
         if path == "/api/paper/rebalance":
             return self._post_paper_rebalance()
         if path == "/api/login":

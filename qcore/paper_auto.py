@@ -47,7 +47,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(ROOT, "data", "state")
 PAPER_DIR = os.path.join(ROOT, "data", "paper")
 TRADES = os.path.join(PAPER_DIR, "trades.jsonl")
-ACCOUNT = os.path.join(STATE, "paper_auto.json")
+def _account_path(market: str) -> str:
+    """
+    按市场分账户文件。三个市场各自独立的资金、持仓、成交，
+    绝不混在一起（成本口径和币种都不同）。
+    """
+    m = str(market).upper()
+    return os.path.join(STATE, "paper_auto.json" if m == "CN"
+                        else f"paper_auto_{m.lower()}.json")
+
+
+ACCOUNT = os.path.join(STATE, "paper_auto.json")   # CN 的兼容路径
 
 
 def _now() -> str:
@@ -70,15 +80,19 @@ def _append(rec: Dict) -> None:
         f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
 
 
-def load_account() -> Dict:
+def load_account(market: str = "CN") -> Dict:
+    p = _account_path(market)
+    # 老版本只有 paper_auto.json（CN），非 CN 市场不要误读
+    if not os.path.isfile(p) and str(market).upper() != "CN":
+        return {}
     try:
-        with open(ACCOUNT, encoding="utf-8") as f:
+        with open(p, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 
-def load_trades() -> List[Dict]:
+def load_trades(market: Optional[str] = None) -> List[Dict]:
     if not os.path.isfile(TRADES):
         return []
     out = []
@@ -94,14 +108,18 @@ def load_trades() -> List[Dict]:
                     continue
     except Exception:
         pass
+    if market:
+        m = str(market).upper()
+        out = [t for t in out if str(t.get("market") or "CN").upper() == m]
     return out
 
 
 def init_account(capital: float, market: str = "CN") -> Dict:
-    acc = {"market": str(market).upper(), "cash": float(capital),
+    m = str(market).upper()
+    acc = {"market": m, "cash": float(capital),
            "initial_capital": float(capital), "positions": {},
            "created_at": _now(), "updated_at": _now()}
-    _atomic(ACCOUNT, acc)
+    _atomic(_account_path(m), acc)
     return acc
 
 
@@ -137,7 +155,7 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     按 picks 调仓。返回 {orders, filled, skipped, account}。
     """
     from . import account_config as AC
-    from . import costs as CO
+    from . import fees as FEES
 
     market = str(market).upper()
     cfg = AC.load(market)
@@ -168,7 +186,16 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     pos: Dict[str, Dict] = dict(acc.get("positions") or {})
     cash = float(acc.get("cash") or 0)
 
-    half_cost = cost_bps / 1e4 / 2.0
+    # fees 模块算每笔明细（佣金有最低收费、印花税仅卖出、各市场不同）。
+    # 不用扁平 bps —— 买卖不对称，用平均值会系统性低估卖出成本。
+    def _fee(side, amount, qty, price):
+        try:
+            return FEES.trade_fees(market, side, amount, qty=qty, price=price)
+        except Exception:
+            v = amount * cost_bps / 1e4 / 2.0
+            return {'items': [], 'total': v, 'bps': cost_bps / 2,
+                    'source': 'fallback'}
+
     orders, filled, skipped = [], [], []
 
     # ---- 1) 卖出：掉出 top-k 的（T+1：今天建的仓不卖）----
@@ -187,14 +214,22 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
             pos.pop(code, None)
             continue
         gross = qty * px
-        net = gross * (1 - half_cost)
+        fee = _fee("sell", gross, qty, px)
+        fee_amt = float(fee.get("total") or 0)
+        net = gross - fee_amt
         orders.append({"code": code, "side": "sell", "qty": qty,
                        "price": round(px, 4), "amount": round(gross, 2),
+                       "fee": round(fee_amt, 4),
+                       "fee_items": fee.get("items") or [],
+                       "fee_bps": fee.get("bps"),
                        "net": round(net, 2), "reason": "掉出 top-k"})
         if not dry_run:
             cash += net
-            _append({"date": as_of, "code": code, "side": "sell", "price": px,
-                     "qty": qty, "amount": round(gross, 2), "cost": round(gross * half_cost, 2),
+            _append({"date": as_of, "market": market, "code": code, "side": "sell",
+                     "price": px, "qty": qty, "amount": round(gross, 2),
+                     "cost": round(fee_amt, 4),
+                     "fee_items": fee.get("items") or [],
+                     "fee_bps": fee.get("bps"),
                      "reason": "rebalance_out", "source": "auto", "at": _now()})
             pos.pop(code, None)
         filled.append(code)
@@ -218,25 +253,37 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
                                 "price": round(px, 2), "lot": lot})
                 continue
             gross = qty * px
-            net = gross * (1 + half_cost)
+            fee = _fee("buy", gross, qty, px)
+            fee_amt = float(fee.get("total") or 0)
+            net = gross + fee_amt
             if net > cash:
-                qty = int(cash // (px * lot * (1 + half_cost))) * lot
+                est = fee_amt / max(gross, 1.0)
+                qty = int(cash // (px * lot * (1 + est))) * lot
                 if qty < lot:
-                    skipped.append({"code": code, "why": "现金不足"})
+                    skipped.append({"code": code, "why": "现金不足（含费用）"})
                     continue
                 gross = qty * px
-                net = gross * (1 + half_cost)
+                fee = _fee("buy", gross, qty, px)
+                fee_amt = float(fee.get("total") or 0)
+                net = gross + fee_amt
             orders.append({"code": code, "side": "buy", "qty": qty,
                            "price": round(px, 4), "amount": round(gross, 2),
+                           "fee": round(fee_amt, 4),
+                           "fee_items": fee.get("items") or [],
+                           "fee_bps": fee.get("bps"),
                            "net": round(net, 2),
                            "score": round(score_of.get(code, 0), 5),
                            "reason": "新进入 top-k"})
             if not dry_run:
                 cash -= net
                 pos[code] = {"qty": qty, "cost": px, "opened_at": _now(),
-                             "score": score_of.get(code, 0)}
-                _append({"date": as_of, "code": code, "side": "buy", "price": px,
-                         "qty": qty, "amount": round(gross, 2), "cost": round(gross * half_cost, 2),
+                             "score": score_of.get(code, 0),
+                             "fee_paid": round(fee_amt, 4)}
+                _append({"date": as_of, "market": market, "code": code, "side": "buy",
+                         "price": px, "qty": qty, "amount": round(gross, 2),
+                         "cost": round(fee_amt, 4),
+                         "fee_items": fee.get("items") or [],
+                         "fee_bps": fee.get("bps"),
                          "reason": "rebalance_in", "source": "auto", "at": _now()})
             filled.append(code)
 
@@ -257,7 +304,7 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     acc["total_return"] = round(acc["equity"] / init - 1.0, 6) if init else None
 
     if not dry_run:
-        _atomic(ACCOUNT, acc)
+        _atomic(_account_path(market), acc)
 
     if verbose:
         print(f"[paper_auto] {as_of} {market}: "
@@ -270,16 +317,105 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
             "account": acc, "dry_run": dry_run}
 
 
-def summary() -> Dict:
-    acc = load_account()
+def summary(market: str = "CN") -> Dict:
+    """单市场摘要。三个市场各自独立的本金、成本、币种、成交。"""
+    m = str(market or "CN").upper()
+    acc = load_account(m)
     if not acc:
-        return {"ok": False, "reason": "not_initialized",
-                "hint": "先跑 python -m qcore.paper_auto --init 1000000"}
-    trades = load_trades()
-    return {"ok": True, "account": acc,
+        return {"ok": False, "reason": "not_initialized", "market": m,
+                "hint": f"先跑 python -m qcore.paper_auto --init --market={m}"}
+    trades = load_trades(m)
+    return {"ok": True, "market": m, "account": acc,
             "n_trades": len(trades),
-            "recent_trades": trades[-12:],
+            "recent_trades": trades[-20:],
             "note": "模拟盘自动成交，与手工录入的 live_trades 完全分开"}
+
+
+def summary_all() -> Dict:
+    """三个市场一起看。各自独立的本金、成本、币种、成交。"""
+    return {"ok": True,
+            "markets": {m: summary(m) for m in ("CN", "US", "HK")},
+            "note": "按市场独立；未初始化的市场会返回 not_initialized"}
+
+
+def by_period(market: str = "CN", bucket: str = "day") -> Dict:
+    """按时间段汇总成交。bucket: day | week | month"""
+    trades = load_trades(market)
+    if not trades:
+        return {"ok": True, "market": str(market).upper(), "bucket": bucket,
+                "buckets": [], "n_trades": 0}
+
+    def _key(d) -> str:
+        s0 = str(d or "")[:10]
+        if bucket == "month":
+            return s0[:7]
+        if bucket == "week":
+            try:
+                dt = datetime.strptime(s0, "%Y-%m-%d")
+                iso = dt.isocalendar()
+                return "%d-W%02d" % (iso[0], iso[1])
+            except Exception:
+                return s0
+        return s0
+
+    agg = {}
+    for t in trades:
+        k = _key(t.get("date"))
+        a = agg.setdefault(k, {"n": 0, "buys": 0, "sells": 0,
+                               "buy_amount": 0.0, "sell_amount": 0.0, "fee": 0.0})
+        a["n"] += 1
+        a["fee"] += float(t.get("cost") or 0)
+        if t.get("side") == "buy":
+            a["buys"] += 1
+            a["buy_amount"] += float(t.get("amount") or 0)
+        else:
+            a["sells"] += 1
+            a["sell_amount"] += float(t.get("amount") or 0)
+
+    rows = []
+    for k in sorted(agg, reverse=True):
+        a = agg[k]
+        rows.append({"period": k, "n": a["n"], "buys": a["buys"], "sells": a["sells"],
+                     "buy_amount": round(a["buy_amount"], 2),
+                     "sell_amount": round(a["sell_amount"], 2),
+                     "fee": round(a["fee"], 2)})
+    return {"ok": True, "market": str(market).upper(), "bucket": bucket,
+            "n_trades": len(trades), "n_buckets": len(rows), "buckets": rows}
+
+
+def fee_summary(market: str = "CN") -> Dict:
+    """成交费用按项目汇总 —— 佣金/印花税/过户费各花了多少。"""
+    trades = load_trades(market)
+    if not trades:
+        return {"ok": True, "market": str(market).upper(), "items": [],
+                "total": 0, "n_trades": 0}
+    agg = {}
+    for t in trades:
+        items = t.get("fee_items") or []
+        if items:
+            for it in items:
+                k = str(it.get("item") or "其他")
+                agg[k] = agg.get(k, 0.0) + float(it.get("amount") or 0)
+        elif t.get("cost"):
+            agg["其他（扁平成本）"] = agg.get("其他（扁平成本）", 0.0) + float(t["cost"])
+    total = sum(agg.values())
+    return {"ok": True, "market": str(market).upper(), "n_trades": len(trades),
+            "items": [{"item": k, "amount": round(v, 2),
+                       "share": round(v / total, 4) if total else None}
+                      for k, v in sorted(agg.items(), key=lambda x: -x[1])],
+            "total": round(total, 2),
+            "avg_bps": round(total / max(sum(float(t.get("amount") or 0)
+                                             for t in trades), 1) * 1e4, 2)}
+
+
+def by_horizon(market: str = "CN") -> Dict:
+    """
+    按交易周期汇总 —— 但成交本身不带周期，得靠 picks 的 horizon 反查。
+    取不到就明说取不到，不编。
+    """
+    return {"ok": True, "market": str(market).upper(), "rows": [],
+            "note": ("当前成交记录不带 horizon 字段（同一个账户可以混用多周期信号）。"
+                     "要看分周期表现请用 /api/horizons 的台账，那里每个周期独立记账。")}
 
 
 if __name__ == "__main__":

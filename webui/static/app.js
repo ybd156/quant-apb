@@ -1152,6 +1152,8 @@
 
     const m = (modelRes.ok && modelRes.data) ? modelRes.data : null;
     const picks = (picksRes.ok && picksRes.data) ? picksRes.data : null;
+    const _hzInfo = (hzList.find((x) => Number(x.horizon) === H)) || {};
+    const _hzNoModel = !_hzInfo.model_exists;
     const imp = (impRes.ok && impRes.data) ? impRes.data : null;
 
     if (!m) {
@@ -1270,11 +1272,15 @@
     });
 
     // ---- 周期切换 + 各周期战绩 ----
-    const hzTabs = hzList.map((x) => {
+    // 只显示该市场支持的周期。T+0 在 A 股不存在（T+1 制度），
+    // 之前把它也列出来，点进去就是「缺少 picks_h0.json」，很困惑。
+    const hzUsable = hzList.filter((x) => x.market_supported !== false);
+    const hzTabs = hzUsable.map((x) => {
       const on = Number(x.horizon) === H;
       return '<button type="button" class="seg' + (on ? ' is-active' : '') +
         (x.model_exists ? '' : ' is-dim') + '" data-hz="' + x.horizon + '">' +
-        esc(x.label || ('h' + x.horizon)) + '</button>';
+        esc(x.label || ('h' + x.horizon)) +
+        (x.model_exists ? '' : ' <span style="opacity:.6">·</span>') + '</button>';
     }).join('');
 
     const perfRows = hzList.map((x) => {
@@ -1314,7 +1320,14 @@
     return '<div style="margin-bottom:14px">' + horizonCard + '</div>' +
       '<div style="margin-bottom:14px">' + heroCard + '</div>' +
       '<div style="margin-bottom:14px">' + btCard + '</div>' +
-      '<div style="margin-bottom:14px">' + picksCard + '</div>' +
+      '<div style="margin-bottom:14px">' +
+        (_hzNoModel
+          ? banner({ tone: 'warn', icon: 'alert',
+              title: (esc(_hzInfo.label || ('h' + H))) + ' 这个周期还没训练',
+              text: '上面「持有周期」表里该行显示「未训」。训练完并跑一次预测后才有推荐。',
+              meta: '命令：python -m qcore.live_model --train --horizon=' + H +
+                    ' 然后 --predict --horizon=' + H })
+          : picksCard) + '</div>' +
       impCard;
   }
 
@@ -2423,7 +2436,81 @@
           'alert')
       });
 
+    // ---- 自动交易账户（paper_auto）----
+    const AU = (autoRes && autoRes.ok && autoRes.data) ? autoRes.data : {};
+    const PD = (periodRes && periodRes.ok && periodRes.data) ? periodRes.data : {};
+    const PG = PD.period || {};
+    const FS = PD.fees || {};
+    const A = AU.account || {};
+    const auTrades = AU.recent_trades || [];
+    const hasAuto = !!A.equity;
+
+    const autoCard = card({
+      title: '自动交易账户', sub: '按模型推荐自动下单（不是回测，是真在记账）',
+      tools: '<div class="segmented" id="pa-bucket">' +
+        [['day', '按日'], ['week', '按周'], ['month', '按月']].map(([v, l]) =>
+          '<button type="button" class="seg' + ((S.paBucket || 'day') === v ? ' is-active' : '') +
+          '" data-b="' + v + '">' + l + '</button>').join('') +
+        '</div><button type="button" class="btn ghost sm" id="pa-rebal" style="margin-left:8px">' +
+        ICON('play') + '按推荐调仓</button>',
+      body: hasAuto
+        ? '<div class="quote-grid" style="grid-template-columns:repeat(auto-fit,minmax(104px,1fr));margin-bottom:14px">' +
+            [['净值', fmtMoney(A.equity)], ['现金', fmtMoney(A.cash)],
+             ['持仓', (A.n_positions || 0) + ' 只'],
+             ['累计收益', (A.total_return == null ? '—'
+               : (A.total_return > 0 ? '+' : '') + (A.total_return * 100).toFixed(2) + '%')],
+             ['成交笔数', AU.n_trades || 0],
+             ['估值日', A.as_of || '—']]
+              .map(([k, v]) => '<div class="qg-item"><span class="qg-k">' + k +
+                '</span><span class="qg-v">' + esc(String(v)) + '</span></div>').join('') +
+          '</div>' +
+          (auTrades.length
+            ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+              '<th>日期</th><th>方向</th><th>代码</th><th>数量</th><th>价格</th><th>金额</th><th>原因</th>' +
+              '</tr></thead><tbody>' + auTrades.slice().reverse().map((t) =>
+                '<tr><td class="mono">' + esc(String(t.date || '').slice(5)) + '</td>' +
+                '<td class="' + (t.side === 'buy' ? 'is-up' : 'is-down') + '">' +
+                  (t.side === 'buy' ? '买入' : '卖出') + '</td>' +
+                '<td class="mono"><a class="link-btn" data-goto="' + esc(t.code) + '">' +
+                  esc(t.code) + '</a></td>' +
+                '<td class="num">' + esc(t.qty) + '</td>' +
+                '<td class="num">' + (Number(t.price) || 0).toFixed(2) + '</td>' +
+                '<td class="num">' + fmtMoney(t.amount) + '</td>' +
+                '<td class="muted">' + esc(t.reason || '—') + '</td></tr>').join('') +
+              '</tbody></table></div>'
+            : emptyBox('还没有成交', '点右上角「按当前推荐调仓」就会按 picks 建仓')) +
+          (PG.buckets && PG.buckets.length
+            ? '<div style="margin-top:16px"><div class="muted" style="margin-bottom:8px">' +
+              '分时段汇总（' + ({ day: '日', week: '周', month: '月' }[PG.bucket] || '日') + '）</div>' +
+              '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+              '<th>时段</th><th>笔数</th><th>买</th><th>卖</th><th>买入额</th><th>卖出额</th><th>费用</th>' +
+              '</tr></thead><tbody>' + PG.buckets.slice(0, 12).map((b) =>
+                '<tr><td class="mono">' + esc(b.period) + '</td>' +
+                '<td class="num">' + b.n + '</td>' +
+                '<td class="num is-up">' + b.buys + '</td>' +
+                '<td class="num is-down">' + b.sells + '</td>' +
+                '<td class="num">' + fmtMoney(b.buy_amount) + '</td>' +
+                '<td class="num">' + fmtMoney(b.sell_amount) + '</td>' +
+                '<td class="num">' + b.fee.toFixed(2) + '</td></tr>').join('') +
+              '</tbody></table></div></div>'
+            : '') +
+          (FS.items && FS.items.length
+            ? '<div style="margin-top:16px"><div class="muted" style="margin-bottom:8px">' +
+              '费用构成（合计 ' + (FS.total || 0).toFixed(2) + '，' +
+              (FS.avg_bps == null ? '—' : FS.avg_bps + ' bps') + '）</div>' +
+              '<div class="bars">' + FS.items.map((it) =>
+                '<div class="bar-row"><span class="bar-label">' + esc(it.item) +
+                '</span><span class="bar-track"><span class="bar-fill" style="width:' +
+                Math.max(2, (it.share || 0) * 100).toFixed(1) + '%"></span></span>' +
+                '<span class="bar-val">' + it.amount.toFixed(2) + '</span></div>').join('') +
+              '</div></div>'
+            : '')
+        : emptyBox('自动交易账户未初始化',
+            '先跑一次 <code>python -m qcore.paper_auto --init --capital=1000000</code>')
+    });
+
     return '<div style="margin-bottom:12px">' + marketTabsHtml(summary, mkt) + '</div>' +
+      '<div style="margin-bottom:14px">' + autoCard + '</div>' +
       '<div style="margin-bottom:14px">' + acctCard + '</div>' +
       body + forms;
   }
@@ -2832,6 +2919,10 @@
       const au = await apiCached('/api/auth', 3000);
       S.auth = (au && au.ok && au.data) ? au.data : {};
     } catch (e) { S.auth = {}; }
+    try {
+      const fe = await apiCached('/api/fees', 30000);
+      S.fees = (fe && fe.ok && fe.data) ? fe.data : {};
+    } catch (e) { S.fees = {}; }
     const [verRes, healthRes, updRes] = await Promise.all([
       apiCached('/api/version', 0), apiCached('/api/health', 0), apiCached('/api/update', 0)
     ]);
@@ -2934,6 +3025,38 @@
       '<label class="chip-check"><input type="checkbox" class="tk-h" value="' + h + '"' +
       (h === 1 || h === 5 ? ' checked' : '') + '> h' + h + '</label>').join('');
 
+    // ---- 交易费用（分市场，可编辑）----
+    const FE = S.fees || {};
+    const feeRows = (FE.compare || []).map((r) => {
+      const f = (FE.fees || {})[r.market] || {};
+      return '<tr><td>' + esc(r.name || r.market) + '</td>' +
+        '<td class="muted">' + esc(r.currency || '') + '</td>' +
+        '<td class="num">' + (f.commission_bps == null ? '—' : f.commission_bps) + '</td>' +
+        '<td class="num">' + (f.stamp_duty_bps == null ? '—' : f.stamp_duty_bps) +
+          (f.stamp_side === 'sell' ? '<span class="muted"> 卖出</span>' :
+           f.stamp_side === 'both' ? '<span class="muted"> 双边</span>' : '') + '</td>' +
+        '<td class="num">' + (f.transfer_bps == null ? '—' : f.transfer_bps) + '</td>' +
+        '<td class="num">' + (f.exchange_bps == null ? '—' : f.exchange_bps) + '</td>' +
+        '<td class="num">' + (f.regulator_bps == null ? '—' : f.regulator_bps) + '</td>' +
+        '<td class="num ' + ((r.round_trip_bps || 0) > 20 ? 'is-down' : '') + '">' +
+          (r.round_trip_bps == null ? '—' : r.round_trip_bps) + '</td></tr>';
+    }).join('');
+
+    const feeCard = card({
+      title: '交易费用', sub: '按市场拆分 · 佣金可改成你自己的费率',
+      tools: '<button type="button" class="btn ghost sm" id="fee-edit">' +
+        ICON('settings') + '改佣金</button>',
+      body: (feeRows
+        ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+          '<th>市场</th><th>币种</th><th>佣金</th><th>印花税</th>' +
+          '<th>过户</th><th>经手</th><th>证管</th><th>往返bps</th>' +
+          '</tr></thead><tbody>' + feeRows + '</tbody></table></div>'
+        : emptyBox('费用表未就绪', '')) +
+        '<p class="muted" style="margin-top:10px">' +
+          '单位 bps（万分之一）。佣金因人而异（万1.5~万3），**必须改成你自己的**；' +
+          '印花税 A股仅卖出、港股双边。交易所费率可点下方来源核对。</p>'
+    });
+
     // ---- 登录状态 ----
     const AU = S.auth || {};
     const authCard = AU.enabled ? card({
@@ -3024,6 +3147,7 @@
 
     return '<div class="grid two" style="margin-bottom:14px">' + infoCard + filesCard + '</div>' +
       '<div style="margin-bottom:14px">' + updateCard(u) + '</div>' +
+      '<div style="margin-bottom:14px">' + feeCard + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + authCard + autoCard + '</div>' +
       '<div style="margin-bottom:14px">' + tokenCard + '</div>' +
       '<div style="margin-bottom:14px">' + trainCard + '</div>' +
@@ -3151,6 +3275,35 @@
   /* --------------------------- 页内事件绑定 --------------------------- */
 
   function bindPageEvents(id) {
+    if (id === 'paper') {
+      $$('#pa-bucket .seg').forEach((b) => b.addEventListener('click', () => {
+        S.paBucket = b.getAttribute('data-b');
+        navigate('paper', false);
+      }));
+      const rb = $('#pa-rebal');
+      if (rb) rb.addEventListener('click', async () => {
+        if (!window.confirm('按当前推荐调仓？会真实写入模拟盘成交记录。')) return;
+        rb.disabled = true;
+        const r = await api('/api/paper/rebalance', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ market: S.paperMarket || 'CN' })
+        });
+        rb.disabled = false;
+        if (r && r.ok) {
+          const o = (r.data && r.data.orders) || [];
+          const sk = (r.data && r.data.skipped) || [];
+          toast('已调仓：' + o.length + ' 笔' + (sk.length ? '，跳过 ' + sk.length + ' 只' : ''), 'ok');
+          rerender();
+        } else {
+          toast('调仓失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+        }
+      });
+      $$('[data-goto]').forEach((a) => a.addEventListener('click', () => {
+        S.chartCode = a.getAttribute('data-goto');
+        navigate('chart', false);
+      }));
+      return;
+    }
     if (id === 'hotspot') {
       const r = $('#hs-refresh');
       if (r) r.addEventListener('click', async () => {
@@ -3373,7 +3526,39 @@
       if (doUpd) doUpd.addEventListener('click', openUpdateModal);
       $$('#set-theme .seg').forEach((b) => b.addEventListener('click', () => setTheme(b.getAttribute('data-t'))));
 
-      // ---- 登录状态 ----
+      // ---- 交易费用（分市场，可编辑）----
+    const FE = S.fees || {};
+    const feeRows = (FE.compare || []).map((r) => {
+      const f = (FE.fees || {})[r.market] || {};
+      return '<tr><td>' + esc(r.name || r.market) + '</td>' +
+        '<td class="muted">' + esc(r.currency || '') + '</td>' +
+        '<td class="num">' + (f.commission_bps == null ? '—' : f.commission_bps) + '</td>' +
+        '<td class="num">' + (f.stamp_duty_bps == null ? '—' : f.stamp_duty_bps) +
+          (f.stamp_side === 'sell' ? '<span class="muted"> 卖出</span>' :
+           f.stamp_side === 'both' ? '<span class="muted"> 双边</span>' : '') + '</td>' +
+        '<td class="num">' + (f.transfer_bps == null ? '—' : f.transfer_bps) + '</td>' +
+        '<td class="num">' + (f.exchange_bps == null ? '—' : f.exchange_bps) + '</td>' +
+        '<td class="num">' + (f.regulator_bps == null ? '—' : f.regulator_bps) + '</td>' +
+        '<td class="num ' + ((r.round_trip_bps || 0) > 20 ? 'is-down' : '') + '">' +
+          (r.round_trip_bps == null ? '—' : r.round_trip_bps) + '</td></tr>';
+    }).join('');
+
+    const feeCard = card({
+      title: '交易费用', sub: '按市场拆分 · 佣金可改成你自己的费率',
+      tools: '<button type="button" class="btn ghost sm" id="fee-edit">' +
+        ICON('settings') + '改佣金</button>',
+      body: (feeRows
+        ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+          '<th>市场</th><th>币种</th><th>佣金</th><th>印花税</th>' +
+          '<th>过户</th><th>经手</th><th>证管</th><th>往返bps</th>' +
+          '</tr></thead><tbody>' + feeRows + '</tbody></table></div>'
+        : emptyBox('费用表未就绪', '')) +
+        '<p class="muted" style="margin-top:10px">' +
+          '单位 bps（万分之一）。佣金因人而异（万1.5~万3），**必须改成你自己的**；' +
+          '印花税 A股仅卖出、港股双边。交易所费率可点下方来源核对。</p>'
+    });
+
+    // ---- 登录状态 ----
     const AU = S.auth || {};
     const authCard = AU.enabled ? card({
       title: '登录状态', sub: '会话 ' + (AU.session_days || 7) + ' 天，滑动续期',

@@ -50,24 +50,41 @@ function Step($m) { Write-Host "  [..] $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn2($m){ Write-Host "  [!!] $m" -ForegroundColor Yellow }
 
-function Get-Remote($url, $out, $what) {
+function Get-Remote($urls, $out, $what, $minBytes = 1000) {
+    # $urls may be a single string or an array (multi-mirror fallback).
+    # python.org is often 1-2 MB/s from China; huaweicloud hits 3.5+ MB/s,
+    # so the China mirrors are tried first.
+    if ($urls -is [string]) { $urls = @($urls) }
     Step "Downloading $what ..."
     $tmp = "$out.part"
-    if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
     $done = $false
-    for ($i = 1; $i -le 3; $i++) {
-        try {
-            Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 180
-            if ((Get-Item $tmp).Length -gt 1000) { $done = $true; break }
-        } catch {
-            Warn2 ("attempt {0} failed: {1}" -f $i, $_.Exception.Message)
-            Start-Sleep -Seconds (2 * $i)
+    foreach ($u in $urls) {
+        if ($done) { break }
+        $host_ = ([Uri]$u).Host
+        for ($i = 1; $i -le 2; $i++) {
+            if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            try {
+                Invoke-WebRequest -Uri $u -OutFile $tmp -UseBasicParsing -TimeoutSec 180
+                $sz = (Get-Item $tmp).Length
+                if ($sz -gt $minBytes) {
+                    $sw.Stop()
+                    $mb = [math]::Round($sz / 1MB, 1)
+                    $sp = [math]::Round($sz / 1MB / [math]::Max($sw.Elapsed.TotalSeconds, 0.1), 1)
+                    Ok "$what from $host_ ($mb MB, $sp MB/s)"
+                    $done = $true
+                    break
+                }
+                Warn2 "$host_ returned only $sz bytes"
+            } catch {
+                $sw.Stop()
+                Warn2 ("{0} attempt {1} failed: {2}" -f $host_, $i, $_.Exception.Message)
+                Start-Sleep -Seconds $i
+            }
         }
     }
-    if (-not $done) { throw "Failed to download $what after 3 attempts. Check your network." }
+    if (-not $done) { throw "Failed to download $what from all mirrors. Check your network." }
     Move-Item -Force $tmp $out
-    $mb = [math]::Round((Get-Item $out).Length / 1MB, 1)
-    Ok "$what downloaded ($mb MB)"
 }
 
 # ---------------------------------------------------------------- already ready?
@@ -94,7 +111,13 @@ if (-not (Test-Path $PyExe)) {
     New-Item -ItemType Directory -Force -Path $PyDir | Out-Null
     $zip = Join-Path $Runtime "python-$PyVer-embed-amd64.zip"
     if (-not (Test-Path $zip)) {
-        Get-Remote "https://www.python.org/ftp/python/$PyVer/python-$PyVer-embed-amd64.zip" $zip "Python $PyVer embeddable"
+        $f = "python-$PyVer-embed-amd64.zip"
+        Get-Remote @(
+            "https://mirrors.huaweicloud.com/python/$PyVer/$f",
+            "https://registry.npmmirror.com/-/binary/python/$PyVer/$f",
+            "https://mirrors.aliyun.com/python-release/windows/$f",
+            "https://www.python.org/ftp/python/$PyVer/$f"
+        ) $zip "Python $PyVer embeddable" 5000000
     }
     Step "Extracting to runtime\python ..."
     Expand-Archive -Path $zip -DestinationPath $PyDir -Force
@@ -121,7 +144,10 @@ $pipRc = Invoke-Py -PyArgs @('-m','pip','--version') -Quiet
 if ($pipRc -ne 0) {
     $getpip = Join-Path $Runtime 'get-pip.py'
     if (-not (Test-Path $getpip)) {
-        Get-Remote 'https://bootstrap.pypa.io/get-pip.py' $getpip 'pip installer'
+        Get-Remote @(
+            'https://mirrors.aliyun.com/pypi/get-pip.py',
+            'https://bootstrap.pypa.io/get-pip.py'
+        ) $getpip 'pip installer' 100000
     }
     Step "Installing pip ..."
     $rc = Invoke-Py -PyArgs @($getpip,'--no-warn-script-location','--disable-pip-version-check')
