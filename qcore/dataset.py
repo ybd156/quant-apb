@@ -83,7 +83,8 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
                   extra_horizons: Optional[List[int]] = None,
                   exec_lag: int = 1, str_dtype: str = "uint8", n_univ: int = 100,
                   chunk: int = 25, cutoff: Optional[str] = None,
-                  verbose: bool = True, loader=None, pad: bool = True) -> Panel3D:
+                  verbose: bool = True, loader=None, pad: bool = True,
+                  market: str = "CN") -> Panel3D:
     from .signals import compute_signals, signal_zoo
 
     zoo = signal_zoo()
@@ -189,6 +190,7 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
         index_close=ix["close"].to_numpy(dtype=np.float32),
         str_dtype=str_dtype,
         meta={"start": start, "horizon": horizon, "exec_lag": exec_lag,
+              "market": str(market).upper(),
               "n_signals": S, "n_stocks": N, "n_days": T, "n_univ": n_univ,
               "date_from": str(pd.Timestamp(dates[0]).date()),
               "date_to": str(pd.Timestamp(dates[-1]).date())},

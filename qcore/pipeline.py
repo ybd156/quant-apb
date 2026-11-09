@@ -76,12 +76,29 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
              report_path: Optional[str] = None, market: str = "CN",
              do_context: int = 8) -> Dict:
     t0 = time.time()
-    pool = get_pool(top_n=pool_n)
+    market = str(market).upper()
+    if market not in ("CN", "US", "HK"):
+        market = "CN"
+
+    # 按市场选池与加载器。不同市场的复权口径、涨跌停、停牌规则都不同，
+    # 不能拿 A 股代码去喂美股加载器。
+    loader, pad = None, True
+    if market == "CN":
+        pool = get_pool(top_n=pool_n)
+    elif market == "US":
+        from .us_data import get_pool_us, load_us_kline
+        pool = get_pool_us(top_n=pool_n)
+        loader, pad = load_us_kline, False
+    else:  # HK
+        from .us_data import get_pool_hk, load_hk_kline
+        pool = get_pool_hk(top_n=pool_n)
+        loader, pad = load_hk_kline, False
+
     codes = pool["code"].tolist()
-    print(f"[1/7] data: {len(codes)} stocks", flush=True)
+    print(f"[1/7] data [{market}]: {len(codes)} stocks", flush=True)
 
     p3d = build_dataset(codes, start=start, horizon=horizon, extra_horizons=[1, 20],
-                        verbose=False)
+                        verbose=False, loader=loader, pad=pad, market=market)
     T, N, S = p3d.shape
     print(f"      dataset: T={T} N={N} S={S} ({p3d.nbytes()/1e6:.0f} MB)", flush=True)
 
@@ -248,7 +265,8 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     risk_rep = {"signal_level": div_sig, "portfolio_level": div_port,
                 "n_positions": pw.get("n_positions"),
                 "note": "信号层只削峰（alpha 仍由学习器决定）；组合层逆波动 + 单票/行业上限"}
-    paths = store.export_ui_bundle(res, p3d, family_of=fam, paper=paper_ui)
+    paths = store.export_ui_bundle(res, p3d, family_of=fam, paper=paper_ui,
+                                   market=_market)
 
     perf = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -337,8 +355,10 @@ def main(argv=None) -> int:
     ap.add_argument("--start", default="2013-01-01")
     ap.add_argument("--horizon", type=int, default=5)
     ap.add_argument("--report", default=os.path.join(REPORT_DIR, "apb_report.md"))
+    ap.add_argument("--market", default="CN", choices=["CN", "US", "HK"],
+                    help="市场：CN=A股，US=美股，HK=港股。各自独立成本与账户。")
     a = ap.parse_args(argv)
-    out = run_full(a.pool, a.start, a.horizon, a.report)
+    out = run_full(a.pool, a.start, a.horizon, a.report, market=a.market)
     print(json.dumps({k: v for k, v in out.items() if k not in ("metrics", "backtest")},
                      ensure_ascii=False, default=_json_default)[:2000])
     return 0

@@ -1,11 +1,14 @@
 {
  "universe": "csi300",
  "n_stocks": 300,
- "n_factors": 300,
+ "n_factors": 158,
  "n_trees": 250,
  "train_end": "2019-12-31",
- "train_n": 1,
+ "train_n": null,
  "source": "migrate",
- "saved_at": "2026-11-09T08:32:55+08:00",
- "version": "20261109-083255-migrate"
+ "saved_at": "2026-11-09T10:21:18+08:00",
+ "version": "20261109-083255-migrate",
+ "meta_repaired_at": "2026-11-09T10:21:18+08:00",
+ "meta_repaired_note": "n_factors 300 -> 158（模型自身 _n_features 为准）",
+ "horizon": 1
 }

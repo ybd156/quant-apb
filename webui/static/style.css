@@ -1008,3 +1008,26 @@ select { cursor: pointer; }
   .mkt-tab { padding: 7px 11px; font-size: 12.5px; gap: 5px; }
   .mkt-tab .mt-cap { font-size: 11.5px; }
 }
+
+/* ==========================================================================
+   信号页改造：Alpha158 因子条形图 + 旧信号折叠归档
+   ========================================================================== */
+.bars { display: flex; flex-direction: column; gap: 7px; padding: 4px 2px; }
+.bar-row { display: grid; grid-template-columns: 110px 1fr 62px; align-items: center; gap: 10px; }
+.bar-label { font-size: 12.5px; color: var(--text-2, #9aa4b2); font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-track { height: 9px; border-radius: 5px; background: rgba(120, 140, 180, .16); overflow: hidden; }
+.bar-fill { display: block; height: 100%; border-radius: 5px;
+  background: linear-gradient(90deg, #4a7dff, #6aa6ff); }
+.bar-val { font-size: 12.5px; text-align: right; color: var(--text-1, #d5dae3);
+  font-variant-numeric: tabular-nums; }
+
+/* 旧信号归档：默认收起 */
+.legacy-archive { border: 1px solid rgba(120, 140, 180, .18); border-radius: 10px;
+  padding: 12px 16px; background: rgba(120, 140, 180, .04); }
+.legacy-archive > summary { cursor: pointer; font-size: 13px; color: var(--text-2, #9aa4b2);
+  list-style: none; user-select: none; }
+.legacy-archive > summary::-webkit-details-marker { display: none; }
+.legacy-archive > summary::before { content: '▸ '; color: var(--text-3, #6b7684); }
+.legacy-archive[open] > summary::before { content: '▾ '; }
+.legacy-archive > summary:hover { color: var(--text-1, #d5dae3); }

@@ -1581,8 +1581,35 @@
   /* =============================== 信号 ================================ */
 
   async function pageSignals() {
+    // 这一页现在以「Alpha158 因子重要性」为主 —— 那是真正在用的模型（IC +0.0260）。
+    // 旧的 73 个手写信号实测 IC −0.0185（系统性做反），降级为折叠归档区，
+    // 因为把死数据摆在主位会误导人。
+    const fi = await apiCached('/api/factors/importance');
+    const fRows = ((fi && fi.ok && fi.data && fi.data.rows) || [])
+      .filter((r) => r && typeof r === 'object')
+      .slice()
+      .sort((a, b) => toNum(b.importance) - toNum(a.importance));
+    const topF = fRows.slice(0, 20);
+    const maxImp = topF.length ? toNum(topF[0].importance) : 1;
+
+    const factorCard = topF.length ? card({
+      title: 'Alpha158 因子重要性', sub: '来自当前部署的 GBDT 模型 · 共 ' + fRows.length + ' 个因子',
+      body: '<div class="bars">' + topF.map((r) => {
+        const v = toNum(r.importance) || 0;
+        const w = maxImp ? Math.max(2, (v / maxImp) * 100) : 2;
+        return '<div class="bar-row">' +
+          '<span class="bar-label">' + esc(r.factor || '') + '</span>' +
+          '<span class="bar-track"><span class="bar-fill" style="width:' + w.toFixed(1) + '%"></span></span>' +
+          '<span class="bar-val">' + (v * 100).toFixed(2) + '%</span></div>';
+      }).join('') + '</div>',
+      foot: '这是模型真正在用的因子。重要性 = GBDT 分裂增益占比，不代表单因子收益。'
+    }) : '';
+
     const res = await apiCached('/api/signals?top=200');
-    if (!res.ok || !res.data) { setSub('未就绪'); return notReadyBox(res); }
+    if (!res.ok || !res.data) {
+      setSub('Alpha158 ' + fRows.length + ' 个因子');
+      return '<div style="margin-bottom:14px">' + factorCard + '</div>' + notReadyBox(res);
+    }
 
     let rows = (res.data.top || []).concat(res.data.bottom || []);
     const seen = new Set();
@@ -1594,7 +1621,7 @@
     });
 
     const families = Array.from(new Set(rows.map((r) => r.family).filter(Boolean))).sort();
-    setSub('共 ' + (res.data.total || rows.length) + ' 个信号 · ' + families.length + ' 个族');
+    setSub('Alpha158 ' + fRows.length + ' 个因子（有效模型）· 归档信号 ' + (res.data.total || rows.length) + ' 个');
 
     const fam = S.filter.family;
     const q = (S.filter.q || '').trim().toLowerCase();
@@ -1683,9 +1710,15 @@
       meta: '73 个信号 · 相关性调整后有效独立信号约 12 个'
     });
 
-    return '<div style="margin-bottom:14px">' + legacyBanner + '</div>' +
+    // 旧信号整体折叠：默认收起，想看再展开
+    const legacyBlock = '<details class="legacy-archive">' +
+      '<summary>归档：旧版 73 个手写信号（实测 IC −0.0185，已停用）</summary>' +
+      '<div style="margin:14px 0">' + legacyBanner + '</div>' +
       '<div style="margin-bottom:14px">' + barsCard + '</div>' +
-      (detail ? '<div style="margin-bottom:14px">' + detail + '</div>' : '') + tableCard;
+      (detail ? '<div style="margin-bottom:14px">' + detail + '</div>' : '') +
+      tableCard + '</details>';
+
+    return '<div style="margin-bottom:14px">' + factorCard + '</div>' + legacyBlock;
   }
 
   /* ============================== 预测台账 ============================= */

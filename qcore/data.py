@@ -76,11 +76,20 @@ def index_secid(code: str) -> str:
 
 
 # ---------------------------------------------------------------- kline
+# klt: 101=日 102=周 103=月 104=季 105=半年 106=年
+KLT = {"daily": 101, "weekly": 102, "monthly": 103,
+       "quarterly": 104, "halfyear": 105, "yearly": 106}
+
+
 def fetch_kline(code: str, adjust: int = ADJUST, beg: str = "19900101",
-                end: str = "20500101") -> pd.DataFrame:
+                end: str = "20500101", klt: int = 101) -> pd.DataFrame:
+    """
+    adjust: 0=不复权（真实价，和券商软件一致）1=前复权（减法，仅展示用）2=后复权（算因子用）
+    klt   : 101=日 102=周 103=月 104=季 105=半年 106=年
+    """
     url = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
            f"?secid={secid(code)}&fields1=f1,f2,f3,f4,f5,f6&fields2={KLINE_FIELDS}"
-           f"&klt=101&fqt={adjust}&beg={beg}&end={end}&lmt=100000")
+           f"&klt={int(klt)}&fqt={int(adjust)}&beg={beg}&end={end}&lmt=100000")
     d = _get_json(url)
     data = d.get("data") or {}
     klines = data.get("klines") or []

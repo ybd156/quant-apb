@@ -185,10 +185,14 @@ def _build_time() -> str | None:
 
 
 def _age_days(as_of) -> float | None:
-    """数据新鲜度（天）= 今天 - as_of。
+    """
+    数据新鲜度 —— 按**交易日**算，不是自然日。
 
-    这是**文件元数据**层面的新鲜度，用于顶栏连接指示灯，不是任何指标，
-    也不参与展示给用户的分析口径（UI 不做计算的铁律针对的是指标）。
+    为什么必须这样：11-06 是周五，11-09 是周一，自然日差 3 天，
+    但只隔 **1 个交易日**。按自然日算会误报「陈旧 3 天」，
+    让人以为数据出问题了，其实完全正常（模型本来就用 T-1 收盘价）。
+
+    返回：距今多少个**交易日**（含节假日判断）。取不到日历则退化为自然日。
     """
     if not as_of:
         return None
@@ -196,7 +200,19 @@ def _age_days(as_of) -> float | None:
         stamp = _dt.date.fromisoformat(str(as_of)[:10])
     except ValueError:
         return None
-    return round((_dt.date.today() - stamp).days, 1)
+    today = _dt.date.today()
+    if stamp >= today:
+        return 0.0
+    try:
+        from qcore import calendar_cn as CAL
+        n, cur = 0, stamp
+        while cur < today and n < 400:
+            cur = cur + _dt.timedelta(days=1)
+            if CAL.is_trading_day_bool(cur):
+                n += 1
+        return float(n)
+    except Exception:
+        return round((today - stamp).days, 1)
 
 
 def _read_jsonl(path: Path):
@@ -466,6 +482,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/horizons":
+            return self._api_horizons(query)
         if path == "/api/event/learning":
             return self._api_event_learning(query)
         if path == "/api/news/live":
@@ -476,6 +494,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_calendar(query)
         if path == "/api/lot":
             return self._api_lot(query)
+        if path == "/api/model/local":
+            return self._api_model_local()
         if path == "/api/model/health":
             return self._api_model_health()
         if path == "/api/model/versions":
@@ -944,6 +964,56 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("session_failed", 200, detail=str(e)[:160])
 
+    def _api_horizons(self, query):
+        """
+        多周期：列出各 horizon 的模型状态 + 成本分析。
+        query: horizon=N 时附带该周期的 picks。
+        """
+        try:
+            from qcore import horizons as HZ
+            from qcore import live_model as LM
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        market = str(((query or {}).get("market") or ["CN"])[0]).upper()
+        rows = []
+        for h in HZ.all_horizons():
+            mp, _ = LM._paths(h)
+            exists = _os.path.exists(mp) if "_os" in dir() else __import__("os").path.exists(mp)
+            meta = {}
+            if exists:
+                try:
+                    _, meta = LM.load_model(h)
+                except Exception:
+                    meta = {}
+            rows.append({
+                "horizon": h, "label": HZ.label_for(h),
+                "note": (HZ.HORIZONS.get(h) or {}).get("note"),
+                "supported_markets": (HZ.HORIZONS.get(h) or {}).get("markets"),
+                "market_supported": HZ.supports(h, market),
+                "model_exists": exists,
+                "trained_at": meta.get("trained_at"),
+                "n_trees": meta.get("n_trees"),
+                "cost_drag_annual": round(HZ.annual_cost_drag(max(h, 1), market) * 100, 2),
+            })
+        # 该市场支持哪些周期、扣成本后能不能做
+        table = HZ.table({h: 0.03 for h in HZ.all_horizons()}, market)
+        want = ((query or {}).get("horizon") or [None])[0]
+        out = {"market": market, "default": HZ.DEFAULT_HORIZON,
+               "horizons": rows, "cost_table_at_ic_003": table,
+               "note": ("成本随周期剧烈变化：h=1 年换手 250 次，A 股光成本就 38.6%/年；"
+                        "h=15 只有 2.6%。成本表用 IC=0.03 假设做对照，不是收益预测。")}
+        if want:
+            try:
+                hh = int(want)
+                fn = "picks.json" if hh == 1 else f"picks_h{hh}.json"
+                d, err = _read_json(fn)
+                out["picks"] = (d if not err else None)
+                out["picks_file"] = fn
+                out["picks_error"] = err
+            except Exception as e:  # noqa: BLE001
+                out["picks_error"] = str(e)[:80]
+        return self._ok(out)
+
     def _api_event_learning(self, query):
         """
         事件学习：预测方向 vs 实际反应。query: run=1 跑一轮（登记+对账+校准）。
@@ -1054,6 +1124,64 @@ class ApiHandler(BaseHTTPRequestHandler):
         n = len(scores) or 1
         w = {c: 1.0 / n for c in scores}
         return self._ok(L.plan(cap, w, prices, mkt))
+
+    def _api_model_local(self):
+        """本机各 horizon 的模型状态（训练可以在别的机器做，导入进来）。"""
+        try:
+            from qcore import model_transfer as MT
+            return self._ok(MT.list_local())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("local_failed", 200, detail=str(e)[:160])
+
+    def _post_model_import(self):
+        """
+        导入别处训练的模型。body: {"data": "<zip 的 base64>", "horizon": 5, "dry_run": false}
+        校验不过不安装，线上模型保持不变。
+        """
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        if not isinstance(body, dict):
+            return self._fail("bad_param", 400, hint="需要 JSON 对象")
+        data = body.get("data") or body.get("base64") or body.get("zip")
+        if not data:
+            return self._fail("bad_param", 400, hint="需要 data（zip 的 base64）")
+        h = body.get("horizon")
+        try:
+            from qcore import model_transfer as MT
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        try:
+            r = MT.import_bundle(str(data), horizon=(int(h) if h else None),
+                                 dry_run=bool(body.get("dry_run")))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_failed", 200, detail=str(e)[:160])
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "validation_failed"), 200,
+                              detail=r.get("detail"), checks=r.get("checks"),
+                              hint="校验未通过，未安装；线上模型保持不变")
+        return self._ok(r)
+
+    def _post_model_export(self):
+        """导出某个 horizon 的模型为 zip（base64 返回）。body: {"horizon": 5}"""
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        h = (body or {}).get("horizon", 1) if isinstance(body, dict) else 1
+        try:
+            from qcore import model_transfer as MT
+            r = MT.export_bundle(int(h))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("export_failed", 200, detail=str(e)[:160])
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "export_failed"), 200, path=r.get("path"))
+        try:
+            import base64 as _b64
+            with open(r["path"], "rb") as f:
+                r["data"] = _b64.b64encode(f.read()).decode("ascii")
+        except Exception:
+            pass
+        return self._ok(r)
 
     def _api_model_health(self):
         """模型失效判据：healthy / watch / degraded / failed。"""
@@ -1170,6 +1298,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/model/import":
+            return self._post_model_import()
+        if path == "/api/model/export":
+            return self._post_model_export()
         if path == "/api/model/rollback":
             return self._post_model_rollback()
         if path == "/api/import":

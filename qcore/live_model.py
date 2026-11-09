@@ -46,6 +46,15 @@ import pandas as pd
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(ROOT, "data", "model")
 STATE = os.path.join(ROOT, "data", "state")
+def _paths(h: int = 1):
+    """每个 horizon 一套模型文件，互不覆盖。"""
+    if int(h) == 1:
+        return (os.path.join(MODEL_DIR, "gbdt.pkl"),
+                os.path.join(MODEL_DIR, "meta.json"))
+    return (os.path.join(MODEL_DIR, f"gbdt_h{int(h)}.pkl"),
+            os.path.join(MODEL_DIR, f"meta_h{int(h)}.json"))
+
+
 MODEL_PATH = os.path.join(MODEL_DIR, "gbdt.pkl")
 META_PATH = os.path.join(MODEL_DIR, "meta.json")
 
@@ -53,33 +62,36 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 
 
 # ------------------------------------------------------------------ 模型存取
-def save_model(model, meta: Dict) -> str:
+def save_model(model, meta: Dict, horizon: int = 1) -> str:
     os.makedirs(MODEL_DIR, exist_ok=True)
-    with open(MODEL_PATH, "wb") as f:
+    mp, metap = _paths(horizon)
+    with open(mp, "wb") as f:
         pickle.dump(model, f, protocol=4)
     meta = dict(meta)
+    meta["horizon"] = int(horizon)
     meta["saved_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
-    with open(META_PATH, "w", encoding="utf-8") as f:
+    with open(metap, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=1)
-    return MODEL_PATH
+    return mp
 
 
-def load_model():
-    if not os.path.isfile(MODEL_PATH):
+def load_model(horizon: int = 1):
+    mp, metap = _paths(horizon)
+    if not os.path.isfile(mp):
         return None, {}
-    with open(MODEL_PATH, "rb") as f:
+    with open(mp, "rb") as f:
         m = pickle.load(f)
     meta = {}
     try:
-        with open(META_PATH, encoding="utf-8") as f:
+        with open(metap, encoding="utf-8") as f:
             meta = json.load(f)
     except Exception:
         pass
     return m, meta
 
 
-def model_age_days() -> Optional[float]:
-    _, meta = load_model()
+def model_age_days(horizon: int = 1) -> Optional[float]:
+    _, meta = load_model(horizon)
     s = meta.get("saved_at")
     if not s:
         return None
@@ -91,8 +103,21 @@ def model_age_days() -> Optional[float]:
 
 # ------------------------------------------------------------------ 训练
 def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
-          train_end: Optional[str] = None, verbose: bool = True) -> Dict:
-    """训练并保存模型。train_end 默认为「今天往前 30 天」，留出验证缓冲。"""
+          train_end: Optional[str] = None, horizon: int = 1,
+          verbose: bool = True) -> Dict:
+    """
+    训练并保存模型。train_end 默认为「今天往前 30 天」，留出验证缓冲。
+
+    horizon 决定标签口径（见 qcore/horizons.py）：
+      h=0  日内 close[t]/open[t]-1（仅 T+0 市场）
+      h>=1 close[t+1+h]/close[t+1]-1（T 日信号，T+1 收盘成交）
+    每个 horizon 存独立的模型文件，互不覆盖。
+    """
+    from qcore import horizons as HZ
+    horizon = int(horizon)
+    if horizon not in HZ.HORIZONS:
+        return {"ok": False, "reason": f"unsupported_horizon: {horizon}",
+                "supported": HZ.all_horizons()}
     import importlib.util
     here = os.path.join(ROOT, "scripts")
 
@@ -111,8 +136,9 @@ def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
 
     codes = QD.universe_codes(universe, start=train_end)
     if verbose:
-        print(f"  {universe}: {len(codes)} 只，训练截至 {train_end}", flush=True)
-    d = bench.build_features(codes, start="2008-01-01", horizon=1,
+        print(f"  {universe}: {len(codes)} 只，训练截至 {train_end}，"
+              f"horizon={horizon}（{HZ.label_for(horizon)}）", flush=True)
+    d = bench.build_features(codes, start="2008-01-01", horizon=horizon,
                              max_stocks=stocks, verbose=verbose)
     if not d.get("ok"):
         return {"ok": False, "reason": "build_features failed"}
@@ -139,9 +165,11 @@ def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
     meta = {"universe": universe, "n_stocks": len(d["codes"]),
             "n_factors": int(X.shape[2]), "n_trees": int(trees),
             "train_end": train_end, "train_n": int(Xtr.shape[0]),
+            "horizon": int(horizon),
             "train_seconds": round(dt, 1),
             "trained_at": datetime.now().astimezone().isoformat(timespec="seconds")}
-    save_model(model, meta)
+    # horizon 必须传进去，否则 h=5 的模型会覆盖 h=1 的 gbdt.pkl
+    save_model(model, meta, horizon=horizon)
     if verbose:
         print(f"  训练完成 {dt:.0f}s，已保存", flush=True)
     return {"ok": True, **meta}
@@ -149,8 +177,11 @@ def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
 
 # ------------------------------------------------------------------ 预测
 def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
-            verbose: bool = True) -> Dict:
-    """用已保存的模型给最新一天打分，写 picks.json。"""
+            horizon: int = 1, verbose: bool = True) -> Dict:
+    """
+    用已保存的模型给最新一天打分。
+    horizon=1 写 picks.json（向后兼容）；其余写 picks_h{h}.json。
+    """
     import importlib.util
     here = os.path.join(ROOT, "scripts")
     spec = importlib.util.spec_from_file_location("bench", os.path.join(here, "benchmark_alpha158.py"))
@@ -160,9 +191,11 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
     from qcore import qlib_data as QD
     from qcore import names as NAMES
 
-    model, meta = load_model()
+    horizon = int(horizon)
+    model, meta = load_model(horizon)
     if model is None:
-        return {"ok": False, "reason": "model_not_trained"}
+        return {"ok": False, "reason": "model_not_trained", "horizon": horizon,
+                "hint": f"先训练该周期：python -m qcore.live_model --train --horizon={horizon}"}
 
     codes = QD.universe_codes(universe, start=(datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"))
     if not codes:
@@ -171,7 +204,7 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
     # 之前用 400 个自然日 ≈ 270 个交易日，全部被过滤掉 → features_failed。
     _start = (datetime.now() - timedelta(days=900)).strftime("%Y-%m-%d")
     d = bench.build_features(codes, start=_start,
-                             horizon=1, max_stocks=stocks, verbose=False)
+                             horizon=horizon, max_stocks=stocks, verbose=False)
     if not d.get("ok"):
         return {"ok": False, "reason": "features_failed"}
     X, dates, cl = d["X"], d["dates"], d["codes"]
@@ -179,6 +212,23 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
 
     last = len(dates) - 1
     row = Xn[last]
+
+    # 蒸馏/精简模型只用了部分特征 —— meta.feature_idx 记录是哪几个。
+    # 不按它裁剪，模型会因为列数不匹配直接报错（或更糟：静默喂错列）。
+    _fidx = (meta or {}).get("feature_idx")
+    n_factors_meta = (meta or {}).get("n_factors")
+    if _fidx and len(_fidx) != row.shape[1]:
+        _idx = np.asarray(_fidx, dtype=int)
+        if _idx.max() >= row.shape[1]:
+            return {"ok": False, "reason": "feature_idx_out_of_range",
+                    "model_features": int(_idx.max()), "built_features": int(row.shape[1]),
+                    "hint": "模型是用不同的因子集训练的，需重新训练或换模型"}
+        row = row[:, _idx]
+    elif n_factors_meta and int(n_factors_meta) != row.shape[1]:
+        return {"ok": False, "reason": "feature_count_mismatch",
+                "model_features": int(n_factors_meta), "built_features": int(row.shape[1]),
+                "hint": "模型特征数与当前代码产出的因子数不一致（可能换了因子集版本）"}
+
     ok = np.isfinite(row).all(axis=1)
     if ok.sum() < 20:
         return {"ok": False, "reason": "insufficient_valid_features"}
@@ -226,18 +276,24 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
     except Exception as e:  # noqa: BLE001
         ev_info = {"error": f"{type(e).__name__}: {str(e)[:80]}"}
 
+    from qcore import horizons as HZ
     payload = {"as_of": str(dates[last].date()), "rows": rows, "n": len(rows),
-               "top_k": top_k, "model_age_days": round(model_age_days() or 0, 1),
+               "top_k": top_k, "horizon": horizon,
+               "horizon_label": HZ.label_for(horizon),
+               "model_age_days": round(model_age_days(horizon) or 0, 1),
                "event_adjust": ev_info,
                "note": "实时打分（模型未重训时用最近一次保存的模型）；"
                        "weight 已含事件调整，weight_before_event 是调整前"}
     os.makedirs(STATE, exist_ok=True)
-    tmp = os.path.join(STATE, "picks.json.tmp")
+    # horizon=1 写 picks.json（保持向后兼容），其余写 picks_h{h}.json
+    fname = "picks.json" if horizon == 1 else f"picks_h{horizon}.json"
+    tmp = os.path.join(STATE, fname + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, os.path.join(STATE, "picks.json"))
+    os.replace(tmp, os.path.join(STATE, fname))
     if verbose:
-        print(f"  预测完成 {payload['as_of']}，{len(rows)} 只", flush=True)
+        print(f"  预测完成 {payload['as_of']}，{len(rows)} 只，"
+              f"horizon={horizon}（{HZ.label_for(horizon)}）-> {fname}", flush=True)
     return {"ok": True, **payload}
 
 
@@ -291,10 +347,14 @@ def loop(interval_s: int = 3600, max_age_days: float = 7.0,
 
 if __name__ == "__main__":
     import sys
+    _H = 1
+    for _a in sys.argv:
+        if _a.startswith("--horizon="):
+            _H = int(_a.split("=", 1)[1])
     if "--train" in sys.argv:
-        print(json.dumps(train(), ensure_ascii=False, indent=1))
+        print(json.dumps(train(horizon=_H), ensure_ascii=False, indent=1))
     elif "--predict" in sys.argv:
-        print(json.dumps({k: v for k, v in predict().items() if k != "rows"},
+        print(json.dumps({k: v for k, v in predict(horizon=_H).items() if k != "rows"},
                          ensure_ascii=False, indent=1))
     elif "--loop" in sys.argv:
         loop()

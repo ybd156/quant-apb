@@ -124,8 +124,14 @@ def load_weighter(path: Optional[str] = None):
 
 # ---------------------------------------------------------------- UI 产物
 def export_ui_bundle(res: dict, p3d, family_of: Optional[Dict[str, str]] = None,
-                     paper: Optional[dict] = None, state_dir: str = STATE_DIR) -> Dict[str, str]:
-    """把引擎结果切成 UI 需要的 6 个 JSON。所有数值在这里定稿，UI 只负责展示。"""
+                     paper: Optional[dict] = None, state_dir: str = STATE_DIR,
+                     market: str = "CN") -> Dict[str, str]:
+    """
+    把引擎结果切成 UI 需要的 6 个 JSON。所有数值在这里定稿，UI 只负责展示。
+
+    market != "CN" 时，模拟盘写到 paper_us.json / paper_hk.json，
+    **不覆盖** A 股的 paper.json —— 三个市场各自独立，成本口径完全不同。
+    """
     import numpy as np
     import pandas as pd
 
@@ -188,7 +194,9 @@ def export_ui_bundle(res: dict, p3d, family_of: Optional[Dict[str, str]] = None,
         "ledger": write_json("ledger", ledger, state_dir),
     }
     if paper is not None:
-        paths["paper"] = write_json("paper", paper, state_dir)
+        _m = str(market).upper()
+        _name = "paper" if _m == "CN" else f"paper_{_m.lower()}"
+        paths["paper"] = write_json(_name, paper, state_dir)
     return paths
 
 

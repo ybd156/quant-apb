@@ -1,0 +1,12 @@
+{
+ "universe": "csi300",
+ "n_stocks": 299,
+ "n_factors": 158,
+ "n_trees": 250,
+ "train_end": "2026-10-10",
+ "train_n": 996208,
+ "horizon": 5,
+ "train_seconds": 608.5,
+ "trained_at": "2026-11-09T10:13:13+08:00",
+ "saved_at": "2026-11-09T10:13:13+08:00"
+}
