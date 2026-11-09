@@ -138,7 +138,99 @@ def load_stock(code: str, fields: Iterable[str] = FIELDS,
     df = df.dropna(subset=["open", "high", "low", "close"])
     df = df[(df["close"] > 0) & (df["volume"] > 0)]
     df = df.drop_duplicates("date").sort_values("date").reset_index(drop=True)
+
+    # ---- 追加 overlay（收盘后自行抓的当日 K 线）----
+    # 上游数据包每天只发布一次，实测晚上 19:47 本地还停在上一交易日。
+    # qcore.daily_append 从东财抓当日数据，以「相对前收的比值」存盘，
+    # 这里乘到最后一根收盘价上，保证收益序列连续。
+    try:
+        df = _apply_overlay(code, df)
+    except Exception:
+        pass
+
+    if start is not None:
+        df = df[df["date"] >= pd.Timestamp(start)]
+    if end is not None:
+        df = df[df["date"] <= pd.Timestamp(end)]
     return df if len(df) else None
+
+
+_OVERLAY_CACHE: Dict[str, object] = {}
+
+
+def _overlays() -> list:
+    """所有 overlay 文件（按日期升序）。带 60 秒缓存。"""
+    import time as _t
+    key = "list"
+    hit = _OVERLAY_CACHE.get(key)
+    now = _t.time()
+    if hit and (now - hit[0]) < 60:
+        return hit[1]
+    out = []
+    try:
+        from . import daily_append as DA
+        for d in DA.list_overlays():
+            o = DA.load_overlay(d)
+            if o and o.get("bars"):
+                out.append(o)
+    except Exception:
+        out = []
+    _OVERLAY_CACHE[key] = (now, out)
+    return out
+
+
+def _apply_overlay(code: str, df: pd.DataFrame) -> pd.DataFrame:
+    """
+    把 overlay 里的当日比值追加到 df 末尾。
+
+    比值定义（相对前一日收盘）：
+        oo=open/prev_close  oh=high/prev_close
+        ol=low/prev_close   oc=close/prev_close
+    追加行的价格 = 本地最后一根 close × 对应比值。
+    """
+    ovs = _overlays()
+    if not ovs or df is None or len(df) == 0:
+        return df
+    c = str(code).lower()
+    last_date = pd.Timestamp(df["date"].iloc[-1])
+    last_close = float(df["close"].iloc[-1])
+    if last_close <= 0:
+        return df
+
+    rows = []
+    for o in ovs:
+        try:
+            d = pd.Timestamp(o.get("date"))
+        except Exception:
+            continue
+        if d <= last_date:
+            continue
+        b = (o.get("bars") or {}).get(c)
+        if not b:
+            continue
+        prev_close = last_close if not rows else float(rows[-1]["close"])
+        try:
+            rows.append({
+                "date": d,
+                "open": prev_close * float(b["oo"]),
+                "high": prev_close * float(b["oh"]),
+                "low": prev_close * float(b["ol"]),
+                "close": prev_close * float(b["oc"]),
+                "volume": float(b.get("volume") or 0),
+                "amount": float(b.get("amount") or 0),
+            })
+        except Exception:
+            continue
+    if not rows:
+        return df
+    add = pd.DataFrame(rows)
+    add["vwap"] = (add["high"] + add["low"] + add["close"]) / 3.0
+    add["factor"] = 1.0
+    for col in df.columns:
+        if col not in add.columns:
+            add[col] = df[col].iloc[-1]
+    add = add[df.columns]
+    return pd.concat([df, add], ignore_index=True)
 
 
 def build_panel(codes: Iterable[str], start: str = "2008-01-01",

@@ -188,7 +188,11 @@ def _mirror_urls() -> list:
                 ns = ""
     except Exception:
         pass
-    if ns:
+    # APB_DATA_NO_SELF=1：跳过 NAS 自己这个源。
+    # NAS 上跑定时同步时必须这样 —— 否则它从自己的 /api/data/qlib 下载，
+    # 那个端点打包的就是本地这份旧数据，同步完还是旧的（自己喂自己）。
+    _no_self = os.environ.get("APB_DATA_NO_SELF", "").strip() in ("1", "true", "yes")
+    if ns and not _no_self:
         # 请求精简包：全量 546MB 走公网要 19 分钟，实测 0.47MB/s。
         # csi300 的 300 只票压缩后 44MB，1.5 分钟能下完（实测）。
         # 股票池可通过 APB_UNIVERSE / APB_MAX_STOCKS 覆盖。

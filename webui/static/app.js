@@ -1066,6 +1066,37 @@
     return M[k] || k || (r.detail ? String(r.detail).slice(0, 120) : '未知错误');
   }
 
+  /**
+   * 数据日期显示成「2026-11-06 周五」并提示落后几个交易日。
+   *
+   * 用户看到「估值日 2026-11-06」会以为卡住了 —— 但今天是 11-09（周一），
+   * 11-07/08 是周末，11-06 就是最新交易日。把星期和落后天数写出来，
+   * 一眼就能判断是「正常」还是「数据没同步」。
+   */
+  function dataAsOf(d) {
+    if (!d) return '—';
+    const s0 = String(d).slice(0, 10);
+    const dt = new Date(s0 + 'T00:00:00');
+    if (isNaN(dt.getTime())) return s0;
+    const wd = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][dt.getDay()];
+    // 落后几个工作日（粗略：只数周一~周五）
+    const now = new Date();
+    let back = 0;
+    const cur = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const tgt = new Date(dt.getTime());
+    while (tgt < cur) {
+      tgt.setDate(tgt.getDate() + 1);
+      const w = tgt.getDay();
+      if (w !== 0 && w !== 6) back += 1;
+    }
+    let note = '';
+    if (back <= 0) note = '（今天）';
+    else if (back === 1) note = '（落后 1 个交易日）';
+    else if (back > 3) note = '（落后 ' + back + ' 个交易日，检查同步）';
+    else note = '（落后 ' + back + ' 个交易日）';
+    return s0 + ' ' + wd + note;
+  }
+
   /** 交易原因中文化：rebalance_in -> 新进入 top-k */
   function reasonText(r) {
     const M = {
@@ -2933,7 +2964,7 @@
              ['累计收益', (A.total_return == null ? '—'
                : (A.total_return > 0 ? '+' : '') + (A.total_return * 100).toFixed(2) + '%')],
              ['成交笔数', (AU.account && AU.account.n_trades) || 0],
-             ['估值日', A.as_of || '—']]
+             ['数据截至', dataAsOf(A.as_of)]]
               .map(([k, v]) => '<div class="qg-item"><span class="qg-k">' + k +
                 '</span><span class="qg-v">' + esc(String(v)) + '</span></div>').join('') +
           '</div>'

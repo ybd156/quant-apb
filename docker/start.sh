@@ -26,6 +26,8 @@ ENABLE_LIVE="${APB_LIVE:-1}"
 LIVE_MAX_AGE="${APB_LIVE_MAX_AGE_DAYS:-7}"
 # NAS 上训练默认关闭（训练机负责）；需要兜底时设 APB_RETRAIN=1
 ENABLE_RETRAIN="${APB_RETRAIN:-0}"
+ENABLE_DATA_SYNC="${APB_DATA_SYNC:-1}"
+ENABLE_DAILY_BAR="${APB_DAILY_BAR:-1}"
 ENABLE_HEALTH="${APB_HEALTH:-1}"
 HEALTH_INTERVAL="${APB_HEALTH_INTERVAL:-21600}"
 ENABLE_ALERT="${APB_ALERT:-1}"
@@ -353,6 +355,65 @@ except Exception as e:
 " 2>&1 | tail -2 || true
 ) &
 PIDS="$PIDS $!"
+
+# 5.15) 每日行情同步（否则数据永远停在装机那天）
+#   之前完全没有这个任务 —— 实测 NAS 数据停在 2026-11-06，
+#   而远端已经到 11-08，预测/台账/模拟盘全在用旧数据。
+#   APB_DATA_NO_SELF=1：不从自己的 /api/data/qlib 下（那是本地旧数据的打包），
+#   直接走 GitHub。
+if [ "$ENABLE_DATA_SYNC" != "0" ]; then
+    (
+        sleep 420
+        while true; do
+            python -c "
+from datetime import datetime
+now = datetime.now()
+hm = now.hour * 60 + now.minute
+# 每天 08:00-09:00 之间同步一次（开盘前拿到前一日数据）
+if now.weekday() >= 5:
+    print('[data] 周末跳过')
+elif not (8*60 <= hm <= 9*60):
+    print('[data] 非同步时段')
+else:
+    import os as _os
+    _os.environ["APB_DATA_NO_SELF"] = "1"
+    from qcore import data_sync as DS
+    r = DS.sync(verbose=True)
+    print('[data] ok=', r.get('ok'), 'local=', r.get('new_local_date') or r.get('local_date'),
+          'remote=', r.get('remote_tag'), r.get('reason') or '')
+" 2>&1 | tail -6 || true
+            sleep 1800
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
+# 5.16) 收盘后自行补齐当日 K 线
+#   上游数据包每天只发布一次（通常凌晨），实测晚上 19:47 本地还停在上一交易日。
+#   这里收盘后（15:05-17:00）自己从东财抓当日数据，以「相对前收的比值」
+#   写进 data/qlib/overlay/，qlib_data 读取时追加，保证收益序列连续。
+if [ "$ENABLE_DAILY_BAR" != "0" ]; then
+    (
+        sleep 480
+        while true; do
+            python -c "
+from datetime import datetime
+now = datetime.now()
+hm = now.hour * 60 + now.minute
+if now.weekday() >= 5:
+    print('[daily] 周末跳过')
+elif not (15*60+5 <= hm <= 17*60):
+    print('[daily] 非收盘时段，跳过')
+else:
+    from qcore import daily_append as DA
+    r = DA.append_day(verbose=True)
+    print('[daily] ok=', r.get('ok'), 'n=', r.get('n'), r.get('reason') or '')
+" 2>&1 | tail -5 || true
+            sleep 1800
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
 
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
