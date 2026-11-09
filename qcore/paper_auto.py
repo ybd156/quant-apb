@@ -193,9 +193,22 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
             with open(os.path.join(STATE, fn), encoding="utf-8") as f:
                 picks = json.load(f)
         except Exception:
+            # 区分两种缺失：没模型（要去训练机）vs 有模型没预测（在 NAS 跑一次 predict）
+            has_model = False
+            try:
+                from . import live_model as LM
+                has_model = LM.load_model(h)[0] is not None
+            except Exception:
+                pass
+            if not has_model:
+                return {"ok": False, "reason": "no_model", "horizon": h,
+                        "hint": f"h={h} 还没有模型。训练只在训练机做："
+                                f"在训练机跑 tools/train_one_click.py "
+                                f"--horizons={h}，训完会自动上传到这台 NAS"}
             return {"ok": False, "reason": "no_picks", "horizon": h,
-                    "hint": f"该周期还没有预测，先跑 "
-                            f"python -m qcore.live_model --predict --horizon={h}"}
+                    "hint": f"h={h} 有模型但还没生成预测，在 NAS 跑一次 "
+                            f"python -m qcore.live_model --predict --horizon={h} "
+                            f"（推理秒级，不需要训练机）"}
     rows = (picks or {}).get("rows") or []
     if not rows:
         return {"ok": False, "reason": "picks_empty", "horizon": h}
@@ -451,12 +464,16 @@ def rebalance_all(market: str = "CN", dry_run: bool = False,
             r = {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:60]}"}
         out.append({"horizon": h, "ok": bool(r.get("ok")),
                     "reason": r.get("reason") or r.get("note"),
+                    "hint": r.get("hint"),
                     "orders": len(r.get("orders") or []),
                     "skipped_all": bool(r.get("skipped_all"))})
     if verbose:
         done = [x for x in out if x["ok"] and not x["skipped_all"]]
-        print(f"[paper_auto] {market} 批量调仓：{len(done)} 个周期有动作，"
-              f"{len(out) - len(done)} 个跳过", flush=True)
+        no_model = [x for x in out if x.get("reason") == "no_model"]
+        no_picks = [x for x in out if x.get("reason") == "no_picks"]
+        print(f"[paper_auto] {market} 批量调仓：{len(done)} 个周期有动作；"
+              f"缺模型 {len(no_model)}（需训练机）；缺预测 {len(no_picks)}（NAS 可跑）",
+              flush=True)
     return {"ok": True, "market": str(market).upper(), "dry_run": dry_run,
             "results": out}
 

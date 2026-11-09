@@ -39,6 +39,40 @@ rm -rf "$KIT/data" 2>/dev/null || true
 # 便携运行时由 bootstrap.ps1 首次运行时生成，不进包
 rm -rf "$KIT/runtime" 2>/dev/null || true
 
+# ---------- 2.5 预下载依赖 wheel（关键：避免用户端联网装 numpy/pandas）----------
+# 国内装 numpy+pandas 常要 5-20 分钟，且可能失败。
+# 把 wheel 打进套件后，用户端是纯本地安装，几秒完成。
+# 版本锁死到和开发环境一致（numpy 2.3.5 / pandas 3.0.1），保证行为一致。
+WHEEL_CACHE="$ROOT/.wheel-cache"
+mkdir -p "$WHEEL_CACHE"
+if ! ls "$WHEEL_CACHE"/numpy-*.whl >/dev/null 2>&1; then
+  echo "[kit] downloading dependency wheels (one-time, cached in .wheel-cache) ..."
+  PYBIN=""
+  for cand in python3 python; do
+    command -v "$cand" >/dev/null 2>&1 && { PYBIN="$cand"; break; }
+  done
+  if [ -n "$PYBIN" ]; then
+    "$PYBIN" -m pip download --only-binary=:all: \
+      --python-version 3.12 --platform win_amd64 --implementation cp --abi cp312 \
+      --dest "$WHEEL_CACHE" \
+      -i https://pypi.tuna.tsinghua.edu.cn/simple \
+      "numpy==2.3.5" "pandas==3.0.1" >/dev/null 2>&1 || \
+    "$PYBIN" -m pip download --only-binary=:all: \
+      --python-version 3.12 --platform win_amd64 --implementation cp --abi cp312 \
+      --dest "$WHEEL_CACHE" "numpy==2.3.5" "pandas==3.0.1" >/dev/null 2>&1 || true
+  fi
+fi
+
+if ls "$WHEEL_CACHE"/*.whl >/dev/null 2>&1; then
+  mkdir -p "$KIT/wheels"
+  cp "$WHEEL_CACHE"/*.whl "$KIT/wheels/"
+  WHL_N=$(ls "$KIT/wheels"/*.whl | wc -l | tr -d ' ')
+  WHL_MB=$(du -sm "$KIT/wheels" | awk '{print $1}')
+  echo "[kit] bundled $WHL_N wheels (${WHL_MB} MB) -> offline install"
+else
+  echo "[kit] WARN: no wheels downloaded, users will need internet for numpy/pandas"
+fi
+
 # ---------- 3. 默认配置（含默认 NAS 域名）----------
 cat > "$KIT/apb_defaults.json" <<'JSON'
 {

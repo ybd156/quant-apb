@@ -191,7 +191,8 @@
   }
 
   function kpi(o) {
-    return '<div class="kpi tone-' + (o.tone || 'brand') + '">' +
+    return '<div class="kpi tone-' + (o.tone || 'brand') + '"' +
+      (o.title ? ' title="' + esc(o.title) + '"' : '') + '>' +
       '<span class="k">' + esc(o.k) + '</span>' +
       '<span class="v ' + (o.sm ? 'sm ' : '') + (o.cls || '') + '">' + esc(o.v) + '</span>' +
       (o.s ? '<span class="s">' + o.s + '</span>' : '') + '</div>';
@@ -539,6 +540,7 @@
     sort: { signals: { key: 'weight', dir: -1 } },
     filter: {
       family: 'all', q: '', result: 'all', from: '', to: '', days: 30,
+      page: 1, pageSize: 100,
       evType: 'all', evDir: 'all'
     },
     selSid: null,
@@ -1208,7 +1210,9 @@
       kpi({ k: '夏普', v: pending ? '—' : num(bt.sharpe, 2), tone: pending ? 'neutral' : 'brand' }),
       kpi({ k: '最大回撤', v: pending ? '—' : pct(bt.mdd), tone: pending ? 'neutral' : 'warn' }),
       kpi({ k: '平均换手', v: pending ? '—' : pct(bt.turnover), tone: pending ? 'neutral' : 'brand' }),
-      kpi({ k: '持有期', v: num(bt.hold_days, 0) + ' 日', sm: true, tone: 'neutral' }),
+      kpi({ k: '回测持有期', v: num(bt.hold_days, 0) + ' 日', sm: true,
+           tone: 'neutral',
+           title: '这是模型训练/回测时用的持有天数，不是上面选中的周期' }),
       kpi({ k: '持仓数', v: num(bt.top_k, 0) + ' 只', sm: true, tone: 'neutral' })
     ].join('');
     const btCard = card({
@@ -1224,7 +1228,8 @@
       sub: picks
         ? 'as_of ' + esc(picks.as_of || '—') + ' · 共 ' + esc(num(picks.n, 0)) + ' 只' +
           (picks.top_k ? ' · top_k ' + esc(num(picks.top_k, 0)) : '') +
-          (picks.hold_days ? ' · 持有 ' + esc(num(picks.hold_days, 0)) + ' 日' : '')
+          (picks.horizon ? ' · 周期 h' + esc(num(picks.horizon, 0)) +
+            (picks.horizon_label ? '（' + esc(picks.horizon_label) + '）' : '') : '')
         : '未就绪',
       cls: 'flush',
       tools: '<span class="tag ok">持有中 = 缓冲带内不动</span>',
@@ -1283,7 +1288,7 @@
         (x.model_exists ? '' : ' <span style="opacity:.6">·</span>') + '</button>';
     }).join('');
 
-    const perfRows = hzList.map((x) => {
+    const perfRows = hzUsable.map((x) => {
       const pf = x.perf || {};
       const n = pf.n || 0;
       const hr = pf.hit_rate;
@@ -2246,7 +2251,17 @@
       return true;
     });
 
-    setSub('最近 ' + S.filter.days + ' 个交易日 · 共 ' + all.length + ' 条 · 筛选后 ' + rows.length + ' 条');
+    const _dates = Array.from(new Set(all.map((r) => String(r.as_of || '').slice(0, 10))))
+      .filter(Boolean).sort();
+    const _span = _dates.length
+      ? _dates[0] + ' ~ ' + _dates[_dates.length - 1] + '（' + _dates.length + ' 个交易日）'
+      : '—';
+    const PS = Number(S.filter.pageSize || 100);
+    const total = rows.length;
+    const pages = Math.max(1, Math.ceil(total / PS));
+    const page = Math.min(Math.max(1, Number(S.filter.page || 1)), pages);
+    const pageRows = rows.slice((page - 1) * PS, page * PS);
+    setSub('共 ' + all.length + ' 条 · ' + _span + ' · 筛选后 ' + total + ' 条');
 
     return card({
       title: '预测台账', sub: '台账只追加、不回改；pending = h 日未到，尚未对账', cls: 'flush',
@@ -2262,7 +2277,7 @@
         '<label class="field"><span>起（as_of ≥）</span><input id="f-from" type="date" value="' + esc(S.filter.from) + '"></label>' +
         '<label class="field"><span>止（as_of ≤）</span><input id="f-to" type="date" value="' + esc(S.filter.to) + '"></label>' +
         '</div></div>' +
-        '<div style="padding:0 16px 16px">' + table({
+        '<div style="padding:0 16px 8px">' + table({
           cols: [
             { label: '决策日', key: 'as_of', mono: true },
             { label: '名称（代码）', key: 'code', render: (r) => codeCell(r.code) },
@@ -2273,10 +2288,24 @@
             { label: '收益', key: 'ret', num: true, render: (r) => '<span class="' + signClass(r.ret) + '">' + esc(signedPct(r.ret)) + '</span>' },
             { label: '结果', key: 'hit', render: verdictTag }
           ],
-          rows: rows.slice(0, 500),
+          rows: pageRows,
           empty: emptyBox('没有匹配的记录', '试试放宽日期范围或清空代码搜索。')
-        }) + (rows.length > 500 ? '<p class="muted" style="margin-top:8px">仅渲染最近 500 行（共 ' + rows.length + ' 行）。</p>' : '') +
-        '</div>'
+        }) + '</div>' +
+        '<div style="padding:0 16px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">' +
+          '<span class="muted">第 ' + page + ' / ' + pages + ' 页 · 共 ' + total + ' 条 · 每页 ' +
+            '<select id="f-psize" style="margin:0 4px">' +
+            [50, 100, 200, 500].map(function (n) {
+              return '<option value="' + n + '"' + (PS === n ? ' selected' : '') + '>' + n + '</option>';
+            }).join('') +
+            '</select></span>' +
+          '<div class="segmented" id="f-page">' +
+            '<button type="button" class="seg" data-pg="1">« 首页</button>' +
+            '<button type="button" class="seg" data-pg="' + Math.max(1, page - 1) + '">‹ 上页</button>' +
+            '<button type="button" class="seg" data-pg="' + Math.min(pages, page + 1) + '">下页 ›</button>' +
+            '<button type="button" class="seg" data-pg="' + pages + '">末页 »</button>' +
+          '</div>' +
+          '<span class="muted">命中 = 预测方向与实际一致（预测跌而实际跌也算命中），不是"涨了才算命中"</span>' +
+        '</div>' +'</div>'
     });
   }
 
@@ -3443,17 +3472,34 @@
 
     if (id === 'ledger') {
       const days = $('#f-days');
-      if (days) days.addEventListener('change', () => { S.filter.days = Number(days.value) || 30; navigate('ledger', false); });
+      if (days) days.addEventListener('change', () => {
+        S.filter.days = Number(days.value) || 30;
+        S.filter.page = 1;          // 换范围回第一页
+        navigate('ledger', false);
+      });
+      // ---- 分页 ----
+      $$('#f-page [data-pg]').forEach(function (b) {
+        b.addEventListener('click', function () {
+          S.filter.page = Number(b.getAttribute('data-pg')) || 1;
+          navigate('ledger', false);
+        });
+      });
+      const psize = $('#f-psize');
+      if (psize) psize.addEventListener('change', function () {
+        S.filter.pageSize = Number(psize.value) || 100;
+        S.filter.page = 1;
+        navigate('ledger', false);
+      });
       const code = $('#f-code');
       if (code) {
         let t = null;
         code.addEventListener('input', () => {
           clearTimeout(t);
-          t = setTimeout(() => { S.filter.q = code.value; navigate('ledger', false); }, 220);
+          t = setTimeout(() => { S.filter.q = code.value; S.filter.page = 1; navigate('ledger', false); }, 220);
         });
       }
       const from = $('#f-from');
-      if (from) from.addEventListener('change', () => { S.filter.from = from.value; navigate('ledger', false); });
+      if (from) from.addEventListener('change', () => { S.filter.from = from.value; S.filter.page = 1; navigate('ledger', false); });
       const to = $('#f-to');
       if (to) to.addEventListener('change', () => { S.filter.to = to.value; navigate('ledger', false); });
       $$('#f-result .seg').forEach((b) => b.addEventListener('click', () => {

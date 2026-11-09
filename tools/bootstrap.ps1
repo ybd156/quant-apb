@@ -158,27 +158,51 @@ if ($pipRc -ne 0) {
 # ---------------------------------------------------------------- 4. numpy / pandas
 $depRc = Invoke-Py -PyArgs @('-c','import numpy,pandas') -Quiet
 if ($depRc -ne 0) {
-    Step "Installing numpy / pandas (~30MB, first run only) ..."
-    $mirrors = @(
-        'https://pypi.tuna.tsinghua.edu.cn/simple',
-        'https://mirrors.aliyun.com/pypi/simple/',
-        ''
-    )
+    # Bundled wheels first: installing from local files takes a few seconds,
+    # while downloading numpy+pandas over a slow link can take many minutes.
+    $wheelDir = Join-Path $Root 'wheels'
+    $hasWheels = (Test-Path $wheelDir) -and
+                 ((Get-ChildItem -Path $wheelDir -Filter '*.whl' -ErrorAction SilentlyContinue).Count -gt 0)
+
     $okDep = $false
-    foreach ($m in $mirrors) {
+    if ($hasWheels) {
+        $n = (Get-ChildItem -Path $wheelDir -Filter '*.whl').Count
+        Step "Installing numpy / pandas from bundled wheels ($n files, no download)"
         $a = @('-m','pip','install','--quiet','--disable-pip-version-check',
-               '--no-warn-script-location','numpy','pandas')
-        if ($m) {
-            $a += @('-i', $m)
-            $a += @('--trusted-host', ([Uri]$m).Host)
-            Step "Trying mirror: $m"
-        } else {
-            Step "Trying official pypi.org"
-        }
+               '--no-warn-script-location','--no-index',
+               '--find-links', $wheelDir, 'numpy', 'pandas')
         $rc = Invoke-Py -PyArgs $a
         if ($rc -eq 0) {
             $chk = Invoke-Py -PyArgs @('-c','import numpy,pandas') -Quiet
-            if ($chk -eq 0) { $okDep = $true; break }
+            if ($chk -eq 0) { $okDep = $true }
+        }
+        if (-not $okDep) {
+            Warn2 "Bundled wheels did not work, falling back to online install"
+        }
+    }
+
+    if (-not $okDep) {
+        Step "Installing numpy / pandas from the internet (first run only) ..."
+        $mirrors = @(
+            'https://pypi.tuna.tsinghua.edu.cn/simple',
+            'https://mirrors.aliyun.com/pypi/simple/',
+            ''
+        )
+        foreach ($m in $mirrors) {
+            $a = @('-m','pip','install','--quiet','--disable-pip-version-check',
+                   '--no-warn-script-location','numpy','pandas')
+            if ($m) {
+                $a += @('-i', $m)
+                $a += @('--trusted-host', ([Uri]$m).Host)
+                Step "Trying mirror: $m"
+            } else {
+                Step "Trying official pypi.org"
+            }
+            $rc = Invoke-Py -PyArgs $a
+            if ($rc -eq 0) {
+                $chk = Invoke-Py -PyArgs @('-c','import numpy,pandas') -Quiet
+                if ($chk -eq 0) { $okDep = $true; break }
+            }
         }
     }
     if (-not $okDep) {

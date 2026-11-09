@@ -65,3 +65,6 @@ data/live/
 data/hotspot/
 data/market_history.jsonl
 data/state/
+
+# wheel 缓存（CI 会重新下载）
+.wheel-cache/

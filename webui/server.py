@@ -1746,6 +1746,47 @@ f.addEventListener('submit',async(e)=>{
         except Exception:
             pass
 
+    def _write_allowed(self):
+        """
+        写操作的统一鉴权。返回 None 放行；否则返回已写好的 403。
+
+        三层，任一层通过即可 —— 这是对用户最友好的顺序：
+          1. **登录会话有效**：用户已经用密码登进来了，再要一次 token 是多余的
+          2. X-Token / X-APB-Token 匹配：给脚本和训练机用
+          3. 没设 APB_TOKEN 且来源是内网：开箱即用
+
+        之前更新接口只认 X-Token，导致「已经登录了却提示 X-Token 不匹配」。
+        """
+        expected = os.environ.get("APB_TOKEN", "")
+
+        # 1) 登录会话
+        try:
+            from qcore import auth as AUTH
+            if AUTH.enabled():
+                sid = self._cookie("apb_session")
+                if sid and AUTH.verify_session(sid, touch=False):
+                    return None
+        except Exception:
+            pass
+
+        # 2) 机器 token
+        given = (self.headers.get("X-Token")
+                 or self.headers.get("X-APB-Token") or "")
+        if expected and given:
+            if hmac.compare_digest(given, expected):
+                return None
+            return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
+
+        # 3) 内网兜底
+        if not expected:
+            if self._is_internal():
+                return None
+            client = self._real_ip()
+            return self._fail("token_not_configured", 403,
+                              hint=f"未设 APB_TOKEN 时只允许内网操作（来源 {client}）")
+        return self._fail("unauthorized", 403,
+                          hint="需要登录，或带 X-Token（与 APB_TOKEN 一致）")
+
     def _is_internal(self) -> bool:
         """
         「是否内网请求」—— 写接口免 token 的唯一判断依据。
@@ -2242,18 +2283,10 @@ f.addEventListener('submit',async(e)=>{
         if not ALLOW_RUN:
             return self._fail("run_disabled", 403, hint="服务以 --no-run 启动")
 
-        # 与 /api/update/apply 一致：设了 token 就必须匹配，没设则只放行内网
-        expected = os.environ.get("APB_TOKEN", "")
-        given = self.headers.get("X-Token") or ""
-        if expected:
-            if not hmac.compare_digest(given, expected):
-                return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
-        else:
-            client = (self.client_address or ("", 0))[0]
-            if not self._is_internal():
-                return self._fail("token_not_configured", 403,
-                                  hint=f"未设 APB_TOKEN 时只允许内网触发（来源 {client}）")
-
+        # 与 /api/update/apply 一致：统一鉴权（登录会话 / X-Token / 内网）
+        denied = self._write_allowed()
+        if denied is not None:
+            return denied
         with _RUN_LOCK:
             if _RUN["state"] == "running":
                 return self._fail("busy", 409, hint="已有一次运行在进行中")
@@ -2268,20 +2301,9 @@ f.addEventListener('submit',async(e)=>{
         应用内一键更新：启动一个**辅助容器**执行自我替换（主容器不能自己停自己）。
         必须带 X-Token（与 APB_TOKEN 一致）。
         """
-        # 鉴权策略：
-        #   - 设了 APB_TOKEN  -> 必须带匹配的 X-Token（对外暴露时用）
-        #   - 没设 APB_TOKEN  -> 只允许内网来源（默认，开箱即用）
-        expected = os.environ.get("APB_TOKEN", "")
-        given = self.headers.get("X-Token") or ""
-        if expected:
-            if not hmac.compare_digest(given, expected):
-                return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
-        else:
-            client = (self.client_address or ("", 0))[0]
-            if not self._is_internal():
-                return self._fail("token_not_configured", 403,
-                                  hint=f"未设 APB_TOKEN 时只允许内网更新（来源 {client}）；"
-                                       "如需公网访问请设置 APB_TOKEN")
+        denied = self._write_allowed()
+        if denied is not None:
+            return denied
 
         try:
             from qcore import docker_api as D

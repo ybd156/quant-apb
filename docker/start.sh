@@ -103,22 +103,47 @@ print('[session]', r.get('session'), r.get('reason') or 'ok')
     ) &
     PIDS="$PIDS $!"
 
-    # 每周重训（模型超龄才跑，避免每天烧 10 分钟）
-    (
-        sleep 120
-        while true; do
-            python -c "
+    # 模型超龄只告警，**不在 NAS 上训练**。
+    # 训练是训练机的活（可以是有 GPU 的机器、或任意能跑 Python 的电脑），
+    # NAS 只做推理 —— 秒级完成，不给存储/CPU 增加负担。
+    # 训练机跑完会自动上传，NAS 收到即生效。
+    # 模型超龄自动重训。
+    #
+    # 训练机是主力（能上 GPU、不影响服务），但**不是一直开着**。
+    # NAS 兜底：训练机不在时自己保持模型新鲜。两边靠模型文件年龄协调，
+    # 训练机刚传完 NAS 就看到"新鲜"，不会重复劳动。
+    #
+    # 三条保护，避免抢服务资源：
+    #   1. 低优先级（nice）：API 需要 CPU 时训练让路
+    #   2. 只在非交易时段（22:00-08:00），盘中绝不训练
+    #   3. 超龄才跑（LIVE_MAX_AGE 天），不是每次都训
+    if [ "$ENABLE_RETRAIN" = "1" ]; then
+        (
+            sleep 180
+            while true; do
+                nice -n 19 python -c "
+from datetime import datetime
 from qcore import live_model as LM
-if LM.should_retrain(${LIVE_MAX_AGE}):
-    print('[retrain] 模型超龄，开始重训 ...')
-    print(LM.train(verbose=True))
+now = datetime.now()
+hm = now.hour * 60 + now.minute
+in_window = (hm >= 22 * 60) or (hm < 8 * 60)
+a = LM.model_age_days()
+if a is None:
+    print('[retrain] 还没有模型')
+elif not LM.should_retrain(${LIVE_MAX_AGE}):
+    print(f'[retrain] 模型新鲜（{a:.1f} 天），跳过')
+elif not in_window:
+    print(f'[retrain] 模型已 {a:.1f} 天，等 22:00 后再训（盘中不训）')
 else:
-    print('[retrain] 模型仍新鲜，跳过')
-" 2>&1 | tail -3 || true
-            sleep 21600
-        done
-    ) &
-    PIDS="$PIDS $!"
+    print(f'[retrain] 模型已 {a:.1f} 天，开始重训（低优先级）')
+    r = LM.train(verbose=True)
+    print('[retrain] 完成' if r.get('ok') else '[retrain] 失败')
+" 2>&1 | tail -4 || true
+                sleep 3600
+            done
+        ) &
+        PIDS="$PIDS $!"
+    fi
 fi
 
 # 5) 数据源探活
