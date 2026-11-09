@@ -122,7 +122,8 @@ def create(name: str, image: str, ports: Optional[dict] = None,
            network_mode: Optional[str] = None,
            extra_hosts: Optional[List[str]] = None,
            cap_add: Optional[List[str]] = None,
-           devices: Optional[List[dict]] = None) -> Dict:
+           devices: Optional[List[dict]] = None,
+           user: Optional[str] = None) -> Dict:
     """
     创建容器。
 
@@ -155,6 +156,11 @@ def create(name: str, image: str, ports: Optional[dict] = None,
         "Env": env or [],
         "HostConfig": hc,
     }
+    # 以指定用户运行。辅助更新容器必须用 root —— 它要访问 docker.sock，
+    # 而 socket 是 root:994 且 660，非 root 用户即使有 GroupAdd 也可能因
+    # fnOS 重建容器丢失组权限而失败（实测踩过）。
+    if user:
+        body["User"] = str(user)
     # 覆盖入口：辅助容器需要跑 update_apply，而不是镜像默认的 start.sh
     if entrypoint is not None:
         body["Entrypoint"] = entrypoint

@@ -2795,11 +2795,22 @@ f.addEventListener('submit',async(e)=>{
         old = D.find_container(helper)
         if old:
             D.remove(old["Id"])
+        # 辅助容器以 root 运行：它只需要访问 docker.sock 做拉取/重建，
+        # 而 socket 权限是 root:994 660。若依赖 GroupAdd，fnOS 重建主容器
+        # 丢掉组权限后就再也更新不了（实测死循环）。
+        _grp = []
+        try:
+            _info = D.inspect(target)
+            _grp = ((_info.get("HostConfig") or {}).get("GroupAdd") or [])
+        except Exception:
+            _grp = []
         created = D.create(
             helper, image,
             env=[f"APB_TARGET_NAME={target}", f"APB_IMAGE={repo}", f"APB_TAG={latest}"],
             binds=["/var/run/docker.sock:/var/run/docker.sock"],
             restart="no",
+            user="0",
+            group_add=_grp or None,
             entrypoint=["python", "-m", "qcore.update_apply"])
         if not created.get("ok"):
             return self._fail("helper_create_failed", 500, error=created.get("error"))

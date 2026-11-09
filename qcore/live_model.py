@@ -199,12 +199,23 @@ def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
 
 
 # ------------------------------------------------------------------ 预测
-def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
-            horizon: int = 1, verbose: bool = True) -> Dict:
+def predict(top_k: Optional[int] = None, universe: str = "csi300",
+            stocks: int = 300, horizon: int = 1, verbose: bool = True) -> Dict:
     """
     用已保存的模型给最新一天打分。
     horizon=1 写 picks.json（向后兼容）；其余写 picks_h{h}.json。
+
+    top_k 默认按周期取（见 paper_auto.HORIZON_TOP_K）：
+        T+1 -> 2 只，T+3 -> 3，1周 -> 5，2周 -> 8，15天 -> 10
+    短线换手极快、成本占比高，列 30 只既没意义也做不过来。
     """
+    if top_k is None:
+        try:
+            from . import paper_auto as _PA
+            top_k = _PA.default_top_k(horizon)
+        except Exception:
+            top_k = {1: 2, 3: 3, 5: 5, 10: 8, 15: 10}.get(int(horizon), 5)
+    top_k = int(top_k)
     import importlib.util
     here = os.path.join(ROOT, "scripts")
     spec = importlib.util.spec_from_file_location("bench", os.path.join(here, "benchmark_alpha158.py"))
@@ -276,14 +287,22 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
     for k, v in (NAMES.load() or {}).items():
         nm[str(k)] = v.get("name") if isinstance(v, dict) else str(v)
 
-    rows = []
-    for rank, j in enumerate(order, 1):
+    def _mk(j, rank, total):
         code = cl[j]
         bare = code[2:] if code[:2] in ("sh", "sz", "bj") else code
-        rows.append({"rank": rank, "code": bare, "qlib_code": code,
-                     "name": nm.get(bare) or nm.get(bare.zfill(6)) or "",
-                     "score": round(float(score[j]), 6),
-                     "weight": round(1.0 / len(order), 4)})
+        return {"rank": rank, "code": bare, "qlib_code": code,
+                "name": nm.get(bare) or nm.get(bare.zfill(6)) or "",
+                "score": round(float(score[j]), 6),
+                "weight": round(1.0 / max(total, 1), 4)}
+
+    rows = [_mk(j, rank, len(order)) for rank, j in enumerate(order, 1)]
+
+    # 台账对账需要足够多的样本才能算「前 1/3 是否跑赢全体」。
+    # 短线只展示 2 只，但评估仍用更多候选 —— 否则每天只有 2 个样本，
+    # 分位无从谈起，学习闭环就废了。
+    EVAL_TOP = max(len(rows), 30)
+    order_all = np.argsort(-np.where(np.isfinite(score), score, -np.inf))[:EVAL_TOP]
+    rows_all = [_mk(j, rank, len(order_all)) for rank, j in enumerate(order_all, 1)]
 
     # ---- 事件调整：用近期事件 + 历史命中率调权重（拿不到就跳过，不影响主流程）----
     ev_info = None
@@ -331,6 +350,7 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
     except Exception:
         _hlab = f"h{horizon}"
     payload = {"as_of": str(dates[last].date()), "rows": rows, "n": len(rows),
+               "rows_all": rows_all, "n_all": len(rows_all),
                "market": _mkt, "horizon": int(horizon),
                "horizon_label": _hlab,
                "top_k": top_k, "horizon": horizon,

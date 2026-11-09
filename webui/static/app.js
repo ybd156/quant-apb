@@ -1968,12 +1968,12 @@
 
     /* --- 涨停 / 成交额 --- */
     const limitCard = card({
-      title: '涨停家数', sub: 'limit_up',
+      title: '涨停家数 · A股', sub: 'limit_up · 沪深（含连板）',
       body: '<div class="big-num">' + esc(num(d.limit_up, 0)) + '<span class="unit">家</span></div>' +
         '<p class="muted" style="margin-top:6px">当日封板家数（含连板）</p>'
     });
     const amountCard = card({
-      title: '两市成交额', sub: 'amount_yi · 亿元',
+      title: '两市成交额 · A股', sub: 'amount_yi · 沪深合计（亿元）',
       body: '<div class="big-num">' + esc(num(d.amount_yi, 1)) + '<span class="unit">亿元</span></div>' +
         '<p class="muted" style="margin-top:6px">沪深两市合计</p>'
     });
@@ -1984,7 +1984,7 @@
     const flat = toNum(b.flat);
     const hasBreadth = up !== null || down !== null || flat !== null;
     const breadthCard = card({
-      title: '市场宽度', sub: 'breadth · 上涨 / 平盘 / 下跌 家数占比',
+      title: '市场宽度', sub: 'A股 · breadth · 上涨 / 平盘 / 下跌 家数占比',
       body: hasBreadth
         ? '<div class="breadth-bar">' +
           '<i class="b-up" style="flex:' + (up || 0) + ' 1 0" title="上涨 ' + (up || 0) + ' 家"></i>' +
@@ -2976,8 +2976,7 @@
               '<tr><td class="mono">' + esc(String(t.date || '').slice(5)) + '</td>' +
               '<td class="' + (t.side === 'buy' ? 'is-up' : 'is-down') + '">' +
                 (t.side === 'buy' ? '买入' : '卖出') + '</td>' +
-              '<td class="mono"><a class="link-btn" data-goto="' + esc(t.code) + '">' +
-                esc(t.code) + '</a></td>' +
+              '<td>' + codeCell(t.code) + '</td>' +
               '<td class="num">' + esc(t.qty) + '</td>' +
               '<td class="num">' + (Number(t.price) || 0).toFixed(2) + '</td>' +
               '<td class="num">' + fmtMoney(t.amount) + '</td>' +
@@ -4128,42 +4127,64 @@
           rerender();
         } else toast('调仓失败：' + errText(r), 'err');
       });
+      // 「清空重设」——用页面内弹窗，不用 window.prompt。
+      // 实测：prompt 被浏览器拦截时返回 null，处理器直接 return，
+      // 用户点了完全没反应（后端其实是好的）。
       const rsb = $('#pa-reset');
-      if (rsb) rsb.addEventListener('click', async () => {
+      if (rsb) rsb.addEventListener('click', () => {
         const mktNow = S.paperMarket || 'CN';
         const hzNow = S.paHorizon || 1;
-        // 不能用局部变量 A —— 这里在 bindPageEvents 作用域，A 不存在（会 ReferenceError）
         const _acc = S.paperAcct || {};
-        const curNav = (_acc.equity != null) ? _acc.equity : (_acc.initial_capital || 0);
-        const inp = window.prompt(
-          '清空 ' + mktNow + ' / h' + hzNow + ' 的模拟盘，用新金额重新开始。\n\n' +
-          '当前净值：' + fmtMoney(curNav) + '\n' +
-          '会删除该账户的全部成交记录（其他市场/周期不受影响）。\n' +
-          '默认自动备份到 data/paper/backup/\n\n' +
-          '输入新的本金（留空则沿用原值）：',
-          String(Math.round(Number(curNav) || 1000000)));
-        if (inp === null) return;
-        const cap = inp.trim() === '' ? null : Number(inp.replace(/[, ]/g, ''));
-        if (cap !== null && (!isFinite(cap) || cap <= 0)) {
-          toast('金额无效', 'err'); return;
-        }
-        if (!window.confirm('确认清空 ' + mktNow + ' / h' + hzNow + ' 并' +
-            (cap === null ? '沿用原本金' : '用 ' + cap.toLocaleString() + ' 重新开始') + '？')) return;
-        rsb.disabled = true;
-        const r = await api('/api/paper/reset', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ market: mktNow, horizon: hzNow, capital: cap })
+        const curNav = (_acc.equity != null) ? _acc.equity
+                     : (_acc.initial_capital || 0);
+        const hzLabel = ({ 1: 'T+1 短线', 3: 'T+3 中短线', 5: '1 周 中线',
+                           10: '2 周', 15: '15 天 中长线' })[hzNow] || ('h' + hzNow);
+        openModal({
+          title: '清空重设 · ' + mktNow + ' / ' + hzLabel,
+          body:
+            '<p>当前净值 <b>' + esc(fmtMoney(curNav)) + '</b>，' +
+            '持仓 <b>' + esc(String(_acc.n_positions || 0)) + '</b> 只。</p>' +
+            '<p class="muted" style="margin-top:6px">' +
+            '会删除该账户的全部成交记录（其他市场/周期不受影响），' +
+            '并备份到 <code>data/paper/backup/</code>。</p>' +
+            '<label class="field" style="margin-top:14px"><span>新的本金</span>' +
+            '<input type="number" id="rs-cap" step="1000" value="' +
+            esc(String(Math.round(Number(curNav) || 5000))) + '"></label>' +
+            '<p class="form-msg" id="rs-msg"></p>',
+          foot: '<button class="btn ghost" type="button" data-close="1">取消</button>' +
+                '<button class="btn primary" type="button" id="rs-go">' +
+                ICON('check') + '确认清空</button>'
         });
-        rsb.disabled = false;
-        if (r && r.ok) {
-          const d = r.data || {};
-          toast('已清空 ' + mktNow + ' h' + hzNow + '：删除 ' +
-                (d.cleared_trades || 0) + ' 条成交，本金 ' +
-                Number(d.capital || 0).toLocaleString(), 'ok');
-          rerender();
-        } else {
-          toast('清空失败：' + errText(r), 'err');
-        }
+        const go = $('#rs-go');
+        const msg = $('#rs-msg');
+        if (!go) return;
+        go.addEventListener('click', async () => {
+          const raw = String(($('#rs-cap') || {}).value || '').trim();
+          const cap = raw === '' ? null : Number(raw);
+          if (cap !== null && (!isFinite(cap) || cap <= 0)) {
+            if (msg) { msg.className = 'form-msg err'; msg.textContent = '金额无效'; }
+            return;
+          }
+          go.disabled = true;
+          if (msg) { msg.className = 'form-msg'; msg.textContent = '处理中…'; }
+          const r = await api('/api/paper/reset', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ market: mktNow, horizon: hzNow, capital: cap })
+          });
+          go.disabled = false;
+          if (r && r.ok) {
+            const d = r.data || {};
+            closeModal();
+            toast('已清空 ' + mktNow + ' ' + hzLabel + '：删除 ' +
+                  (d.cleared_trades || 0) + ' 条成交，本金 ' +
+                  Number(d.capital || 0).toLocaleString(), 'ok');
+            rerender();
+          } else {
+            const t = errText(r);
+            if (msg) { msg.className = 'form-msg err'; msg.textContent = String(t).slice(0, 120); }
+            toast('清空失败：' + t, 'err');
+          }
+        });
       });
       const rb = $('#pa-rebal');
       if (rb) rb.addEventListener('click', async () => {
