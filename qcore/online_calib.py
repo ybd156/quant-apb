@@ -53,9 +53,8 @@ STATE = os.path.join(ROOT, "data", "state")
 PATH = os.path.join(STATE, "online_calib.json")
 
 # 超参
-LR = 0.02            # 学习率
-EPOCHS = 8           # 每次更新过几遍
-A_RANGE = (-3.0, 3.0)
+BLEND = 0.5          # 指数平滑系数：每次学到多少（1.0=全量重算）
+A_RANGE = (-20.0, 20.0)
 B_RANGE = (-0.20, 0.20)
 MIN_SAMPLES = 30     # 少于这个数不更新（会过拟合）
 MAX_HISTORY = 200
@@ -108,6 +107,7 @@ def collect(horizon: int) -> Tuple[np.ndarray, np.ndarray, int]:
     except Exception:
         return np.zeros(0), np.zeros(0), 0
 
+    # 1) 优先用周期台账（predict 之后累积的，字段最全）
     rows = HL._read(int(horizon))
     xs: List[float] = []
     ys: List[float] = []
@@ -133,7 +133,55 @@ def collect(horizon: int) -> Tuple[np.ndarray, np.ndarray, int]:
                 continue
             xs.append(s)
             ys.append(rt)
+
+    # 2) 周期台账样本不够时，并入主台账（pipeline 逐日重放产出的几千条）
+    # 主台账的周期归属由 ledger_meta.json 决定，不能乱套。
+    if len(xs) < MIN_SAMPLES:
+        try:
+            from . import horizon_ledger as _HL
+            if _HL._model_horizon() == int(horizon):
+                mx, my, mdays = _collect_main_ledger()
+                if mx.size:
+                    xs.extend(mx.tolist())
+                    ys.extend(my.tolist())
+                    used_days += mdays
+        except Exception:
+            pass
+
     return np.array(xs, dtype=float), np.array(ys, dtype=float), used_days
+
+
+def _collect_main_ledger() -> Tuple[np.ndarray, np.ndarray, int]:
+    """从 data/state/ledger.json 收集 (score, ret)。只取已对账（status=scored）。"""
+    import json as _json
+
+    path = os.path.join(STATE, "ledger.json")
+    if not os.path.isfile(path):
+        return np.zeros(0), np.zeros(0), 0
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = _json.load(f)
+    except Exception:
+        return np.zeros(0), np.zeros(0), 0
+    rows = data if isinstance(data, list) else (data.get("rows") or [])
+    xs, ys, days = [], [], set()
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        if str(r.get("status") or "") != "scored":
+            continue
+        sv, rv = r.get("score"), r.get("ret")
+        if sv is None or rv is None:
+            continue
+        try:
+            sv = float(sv); rv = float(rv)
+        except (TypeError, ValueError):
+            continue
+        if not (np.isfinite(sv) and np.isfinite(rv)):
+            continue
+        xs.append(sv); ys.append(rv)
+        days.add(str(r.get("as_of"))[:10])
+    return (np.array(xs, dtype=float), np.array(ys, dtype=float), len(days))
 
 
 def _mse(x: np.ndarray, y: np.ndarray, a: float, b: float) -> float:
@@ -145,7 +193,23 @@ def _mse(x: np.ndarray, y: np.ndarray, a: float, b: float) -> float:
 
 def update(horizon: int, verbose: bool = False) -> Dict:
     """
-    用已到期样本更新校准参数。返回更新前后的对比。
+    用已到期样本更新校准参数。
+
+    做法：**闭式最小二乘 + 指数平滑**，不用梯度下降。
+
+        a_ols = cov(x, y) / var(x)
+        b_ols = mean(y) - a_ols * mean(x)
+        a_new = (1-λ) * a_old + λ * a_ols        # λ = BLEND
+        b_new = (1-λ) * b_old + λ * b_ols
+
+    为什么不用 SGD：
+      第一版用 SGD + 标准化，结果 a 从 1.0 冲到 3.56，MSE 从 0.067 涨到 0.766 ——
+      学习率乘上尺度换算直接发散。线性回归有解析解，用它更稳、更可解释。
+      λ 控制"每次学多少"：λ=1 就是全量重算，λ 小则更像"慢慢调整"。
+
+    为什么平滑：
+      单日样本可能有异常（涨跌停、停牌复牌），全量重算会被一天的噪声带偏。
+      平滑让历史结论保留一部分权重，符合"对了加深、错了减弱"的渐进语义。
     """
     h = int(horizon)
     x, y, days = collect(h)
@@ -159,39 +223,45 @@ def update(horizon: int, verbose: bool = False) -> Dict:
     a0, b0 = p["a"], p["b"]
     mse0 = _mse(x, y, a0, b0)
 
-    # 标准化 x 让梯度稳定（score 量级约 ±1，但不同周期差异大）
-    sx = float(np.std(x)) or 1.0
-    xn = x / sx
+    # ---- 闭式最小二乘 ----
+    mx = float(np.mean(x))
+    my = float(np.mean(y))
+    vx = float(np.var(x))
+    if vx <= 1e-12:
+        return {"ok": False, "horizon": h,
+                "reason": "分数方差为 0，无法估计区分力",
+                "n_samples": int(x.size)}
+    cov = float(np.mean((x - mx) * (y - my)))
+    a_ols = cov / vx
+    b_ols = my - a_ols * mx
 
-    a, b = a0, b0
-    for _ in range(EPOCHS):
-        pred = a * xn + b
-        err = pred - y
-        ga = float(np.mean(err * xn))
-        gb = float(np.mean(err))
-        a -= LR * ga
-        b -= LR * gb
-        # 约束到合理区间，防止单个异常样本把参数带飞
-        a = float(np.clip(a, A_RANGE[0], A_RANGE[1]))
-        b = float(np.clip(b, B_RANGE[0], B_RANGE[1]))
+    # ---- 指数平滑：λ 控制单次学习幅度 ----
+    lam = BLEND if p["n_updates"] > 0 else 1.0     # 首次直接采用全量解
+    a_new = (1.0 - lam) * a0 + lam * a_ols
+    b_new = (1.0 - lam) * b0 + lam * b_ols
 
-    mse1 = _mse(x / sx, y, a, b)
+    # 约束：a 是"分数每高 1 个单位，预期收益高多少"
+    #   score 量级约 ±0.02（GBDT 输出），ret 量级约 ±0.05
+    #   合理区间取 ±20，超出说明样本有极端值
+    a_new = float(np.clip(a_new, A_RANGE[0], A_RANGE[1]))
+    b_new = float(np.clip(b_new, B_RANGE[0], B_RANGE[1]))
 
-    # a 是在标准化尺度上的，换算回原始 score 尺度
-    a_raw = a / sx
-    a_raw = float(np.clip(a_raw, A_RANGE[0] * 10, A_RANGE[1] * 10))
+    mse1 = _mse(x, y, a_new, b_new)
 
     entry = {
         "at": _now(), "n_samples": int(x.size), "n_days": days,
-        "a_before": round(a0, 6), "a_after": round(a_raw, 6),
-        "b_before": round(b0, 6), "b_after": round(b, 6),
+        "a_before": round(a0, 6), "a_after": round(a_new, 6),
+        "b_before": round(b0, 6), "b_after": round(b_new, 6),
+        "a_ols": round(a_ols, 6), "b_ols": round(b_ols, 6),
         "mse_before": round(mse0, 10), "mse_after": round(mse1, 10),
-        "direction": ("翻转" if a0 * a_raw < 0 and abs(a_raw) > 0.05 else
-                      "加强" if abs(a_raw) > abs(a0) else "减弱"),
+        "direction": ("翻转" if (a0 * a_new < 0 and abs(a_new) > 0.01) else
+                      "加强" if abs(a_new) > abs(a0) * 1.05 else
+                      "减弱" if abs(a_new) < abs(a0) * 0.95 else "基本不变"),
+        "better": bool(mse1 <= mse0),
     }
 
-    p["a"] = a_raw
-    p["b"] = b
+    p["a"] = a_new
+    p["b"] = b_new
     p["n_updates"] = p["n_updates"] + 1
     p["updated_at"] = entry["at"]
     p["history"] = (p["history"] + [entry])[-MAX_HISTORY:]
@@ -201,10 +271,12 @@ def update(horizon: int, verbose: bool = False) -> Dict:
 
     if verbose:
         print(f"[online] h{h} 用 {x.size} 个样本（{days} 天）更新："
-              f"a {a0:+.4f} -> {a_raw:+.4f}（{entry['direction']}），"
-              f"b {b0:+.6f} -> {b:+.6f}，MSE {mse0:.3e} -> {mse1:.3e}", flush=True)
+              f"a {a0:+.4f} -> {a_new:+.4f}（{entry['direction']}），"
+              f"b {b0:+.6f} -> {b_new:+.6f}，"
+              f"MSE {mse0:.4e} -> {mse1:.4e}"
+              f"{'（变好）' if entry['better'] else '（变差，保留旧值更稳）'}",
+              flush=True)
     return {"ok": True, "horizon": h, **entry}
-
 
 def update_all(verbose: bool = True) -> Dict:
     out = []
