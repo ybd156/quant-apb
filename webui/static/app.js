@@ -2039,9 +2039,12 @@
     }
 
     const rows = (res.data.rows || []).filter((r) => r && typeof r === 'object');
+    const live = (res.data.live || []).filter((r) => r && typeof r === 'object');
+    const liveMeta = res.data.live_meta || {};
     const types = Array.from(new Set(rows.map((r) => r.type).filter(Boolean)));
     const years = Array.from(new Set(rows.map((r) => String(r.date || '').slice(0, 4)).filter(Boolean))).sort();
-    setSub('共 ' + rows.length + ' 条 · ' + types.length + ' 类 · ' +
+    setSub('人工 ' + rows.length + ' 条' + (live.length ? ' + 实时 ' + live.length + ' 条' : '') +
+      ' · ' + types.length + ' 类 · ' +
       (years.length ? years[0] + '–' + years[years.length - 1] : '—'));
 
     const tf = S.filter.evType;
@@ -2069,6 +2072,28 @@
     const impact = Array.isArray(res.data.impact) ? res.data.impact
       : (res.data.impact && Array.isArray(res.data.impact.rows)) ? res.data.impact.rows : [];
 
+    // 实时快讯（规则分类，reliability 0.5）—— 与人工整理的历史日历分开呈现
+    const liveCard = live.length ? card({
+      title: '实时快讯', cls: 'flush',
+      sub: (liveMeta.generated_at ? '更新于 ' + String(liveMeta.generated_at).slice(11, 19) + ' · ' : '') +
+        '共 ' + live.length + ' 条 · 规则分类，未经人工核实',
+      body: '<div style="padding:0 16px 16px;max-height:420px;overflow:auto">' +
+        live.map((r) => {
+          const d = toNum(r.direction);
+          const tag = d > 0 ? '利好' : d < 0 ? '利空' : '中性';
+          const cls = d > 0 ? 'is-up' : d < 0 ? 'is-down' : '';
+          return '<div class="tl-item">' +
+            '<div class="tl-head"><span class="muted">' + esc(String(r.time || '').slice(5, 16)) + '</span>' +
+            ' <span class="tag">' + esc(EVENT_TYPES[r.type] || r.type || '其他') + '</span>' +
+            ' <span class="tag ' + cls + '">' + tag + '</span>' +
+            (r.level === 'strong' ? ' <span class="tag">强</span>' : '') + '</div>' +
+            '<div class="tl-title">' + esc(r.title || '') + '</div>' +
+            ((r.sectors || []).length ? '<div class="tl-sectors">' +
+              r.sectors.map((s) => '<span class="chip">' + esc(s) + '</span>').join('') + '</div>' : '') +
+            '</div>';
+        }).join('') + '</div>'
+    }) : '';
+
     const impactCard = card({
       title: '影响因子表', sub: 'events.impact_factor 输出',
       body: impact.length ? table({
@@ -2081,7 +2106,8 @@
         '需要 events.json 里带 <code>impact</code> 数组（type / sector / horizon / mean_car / t / n）。')
     });
 
-    return '<div style="margin-bottom:14px">' + tl + '</div>' + impactCard;
+    return (liveCard ? '<div style="margin-bottom:14px">' + liveCard + '</div>' : '') +
+      '<div style="margin-bottom:14px">' + tl + '</div>' + impactCard;
   }
 
   /* ============================== 风险体检 ============================= */

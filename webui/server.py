@@ -854,6 +854,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         payload = {"rows": rows[:limit], "n": len(rows), "source": source}
         if impact:
             payload["impact"] = [r for r in impact if isinstance(r, dict)]
+        # 实时快讯（qcore.news_live 写入的 live 段）：与人工整理的日历分开返回，
+        # 前端要能区分"人工整理（reliability 1.0）"和"规则分类快讯（0.5）"
+        if isinstance(data, dict):
+            live = data.get("live")
+            if isinstance(live, list) and live:
+                lv = [r for r in live if isinstance(r, dict)]
+                lv.sort(key=lambda r: str(r.get("time") or ""), reverse=True)
+                payload["live"] = lv[:limit]
+                payload["live_n"] = len(lv)
+                payload["live_meta"] = data.get("live_meta")
         return self._ok(payload)
 
     def _api_health(self):
