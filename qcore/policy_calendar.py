@@ -522,6 +522,21 @@ def to_state_json(path: str | None = None, impact=None) -> str:
                .isoformat(timespec="seconds"),
                "n": len(rows), "source": "qcore.policy_calendar",
                "events": rows, "rows": rows}
+
+    # ---- 保留其他模块写进同一文件的内容 ----
+    # news_live.merge_into_events() 会写 live / live_meta，
+    # 这里如果直接覆盖，实时事件就全丢了（实测踩过：重算 impact 后
+    # events.json 里 live 段消失，页面上 2026 年又变回空白）。
+    try:
+        if _os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                old = _json.load(f)
+            for k in ("live", "live_meta"):
+                if isinstance(old, dict) and old.get(k):
+                    payload[k] = old[k]
+    except Exception:
+        pass
+
     if impact is not None:
         payload["impact"] = impact
         try:

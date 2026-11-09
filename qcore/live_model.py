@@ -277,7 +277,16 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
         ev_info = {"error": f"{type(e).__name__}: {str(e)[:80]}"}
 
     from qcore import horizons as HZ
+    # market 必须写进 picks —— 否则模拟盘无法校验「这份预测是哪个市场的」，
+    # 实测导致美股账户拿 A 股 picks 下单
+    _mkt = "CN"
+    try:
+        from . import qlib_data as _QD
+        _mkt = str(getattr(_QD, "MARKET", "CN") or "CN").upper()
+    except Exception:
+        _mkt = "CN"
     payload = {"as_of": str(dates[last].date()), "rows": rows, "n": len(rows),
+               "market": _mkt,
                "top_k": top_k, "horizon": horizon,
                "horizon_label": HZ.label_for(horizon),
                "model_age_days": round(model_age_days(horizon) or 0, 1),

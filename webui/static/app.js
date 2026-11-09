@@ -2264,6 +2264,35 @@
     const pageRows = rows.slice((page - 1) * PS, page * PS);
     setSub('共 ' + all.length + ' 条 · ' + _span + ' · 筛选后 ' + total + ' 条');
 
+    // 日期分布条：每个交易日的条数，点一下筛选那天。
+    // 之前默认按日期降序 + 每页 100 行，最新一天正好占满第一页，
+    // 看起来像「只有 10-29 这一天」—— 加了这条用户能一眼看到 30 个交易日。
+    const _perDay = {};
+    all.forEach((r) => {
+      const d = String(r.as_of || '').slice(0, 10);
+      if (d) _perDay[d] = (_perDay[d] || 0) + 1;
+    });
+    const _dayKeys = Object.keys(_perDay).sort().reverse();
+    const _maxN = Math.max.apply(null, _dayKeys.map((k) => _perDay[k]).concat([1]));
+    const dayBar = _dayKeys.length > 1 ? (
+      '<div style="padding:0 16px 10px;display:flex;gap:3px;flex-wrap:wrap;align-items:flex-end">' +
+      _dayKeys.map((k) => {
+        const n = _perDay[k];
+        const h = Math.max(10, Math.round((n / _maxN) * 30));
+        const on = S.filter.from === k && S.filter.to === k;
+        return '<div class="day-bar' + (on ? ' is-on' : '') + '" data-day="' + k +
+          '" title="' + k + ' · ' + n + ' 条（点击只看这天）" ' +
+          'style="width:13px;height:' + h + 'px"></div>';
+      }).join('') +
+      '</div>' +
+      '<div style="padding:0 16px 10px;display:flex;gap:10px;align-items:center">' +
+        '<span class="muted">' + _dayKeys.length + ' 个交易日 · 柱子=当日条数</span>' +
+        (S.filter.from && S.filter.from === S.filter.to
+          ? '<button type="button" class="link-btn" id="f-clear-day">清除日期筛选</button>' : '') +
+      '</div>'
+    ) : '';
+
+
     return card({
       title: '预测台账', sub: '台账只追加、不回改；pending = h 日未到，尚未对账', cls: 'flush',
       tools: '<label class="field inline"><span>最近</span><select id="f-days">' +
@@ -2273,7 +2302,8 @@
         [['all', '全部'], ['hit', '命中'], ['miss', '未中'], ['pending', '待定']].map(([v, l]) =>
           '<button type="button" class="seg' + (rf === v ? ' is-active' : '') + '" data-f="' + v + '">' + l + '</button>').join('') +
         '</div>',
-      body: '<div style="padding:0 16px 4px"><div class="form" style="gap:10px;margin-bottom:12px">' +
+      body: dayBar +
+        '<div style="padding:0 16px 4px"><div class="form" style="gap:10px;margin-bottom:12px">' +
         '<label class="field"><span>代码搜索</span><input id="f-code" type="search" placeholder="600519 / 688981" value="' + esc(S.filter.q) + '"></label>' +
         '<label class="field"><span>起（as_of ≥）</span><input id="f-from" type="date" value="' + esc(S.filter.from) + '"></label>' +
         '<label class="field"><span>止（as_of ≤）</span><input id="f-to" type="date" value="' + esc(S.filter.to) + '"></label>' +
@@ -3511,6 +3541,23 @@
           S.filter.page = Number(b.getAttribute('data-pg')) || 1;
           navigate('ledger', false);
         });
+      });
+      $$('.day-bar[data-day]').forEach(function (el) {
+        el.addEventListener('click', function () {
+          const d = el.getAttribute('data-day');
+          if (S.filter.from === d && S.filter.to === d) {
+            S.filter.from = ''; S.filter.to = '';
+          } else {
+            S.filter.from = d; S.filter.to = d;
+          }
+          S.filter.page = 1;
+          navigate('ledger', false);
+        });
+      });
+      const clearDay = $('#f-clear-day');
+      if (clearDay) clearDay.addEventListener('click', function () {
+        S.filter.from = ''; S.filter.to = ''; S.filter.page = 1;
+        navigate('ledger', false);
       });
       const psize = $('#f-psize');
       if (psize) psize.addEventListener('change', function () {

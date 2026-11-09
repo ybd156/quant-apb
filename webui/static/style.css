@@ -1076,3 +1076,9 @@ select { cursor: pointer; }
 .segmented .seg.is-dim { opacity: .45; }
 .tbl tr.row-on { background: rgba(74,125,255,.08); }
 .tbl tr.row-on td:first-child { box-shadow: inset 2px 0 0 #4a7dff; }
+
+/* 台账日期分布条 */
+.day-bar { background: rgba(74,125,255,.35); border-radius: 2px 2px 0 0; cursor: pointer;
+  transition: background .12s; }
+.day-bar:hover { background: rgba(74,125,255,.7); }
+.day-bar.is-on { background: #4a7dff; }

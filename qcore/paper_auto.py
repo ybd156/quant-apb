@@ -214,6 +214,26 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
         return {"ok": False, "reason": "picks_empty", "horizon": h}
     as_of = str(picks.get("as_of") or "")[:10]
 
+    # ---- 市场校验（重要）----
+    # picks 文件里带 market 就必须匹配。
+    # 实测踩过：美股账户读到 A 股 picks_h5.json，用 500 美元买了
+    # 601229（上海银行）2 股 —— 跨市场串仓，对账全废。
+    _pm = str((picks or {}).get("market") or "").upper()
+    if _pm and _pm != market:
+        return {"ok": False, "reason": "market_mismatch",
+                "horizon": h, "picks_market": _pm, "account_market": market,
+                "hint": f"{fn if picks is None else 'picks'} 属于 {_pm} 市场，"
+                        f"不能给 {market} 账户下单。"
+                        f"该市场需要自己的预测（先训练该市场的模型）"}
+    # picks 里没写 market 时，用代码形态反查：
+    # 全是 6 位纯数字 -> A股；带 .HK -> 港股；纯字母 -> 美股
+    if not _pm and rows:
+        _c0 = str(rows[0].get("code") or "")
+        if _c0.isdigit() and market != "CN":
+            return {"ok": False, "reason": "picks_market_mismatch",
+                    "horizon": h, "picks_market": "CN", "account_market": market,
+                    "hint": f"picks 里是 A 股代码（{_c0}），不能给 {market} 账户下单"}
+
     acc = load_account(market, h)
     if not acc:
         acc = init_account(float(cfg.get("initial_capital") or 1_000_000), market, h)
