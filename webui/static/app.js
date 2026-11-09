@@ -670,8 +670,19 @@
     return !!latest && !!current && cmpVersion(latest, current) > 0;
   }
 
+  /**
+   * 检查版本。
+   *
+   * force=true 时带 ?force=1 —— 服务端会**立刻**去 GitHub 查一次，
+   * 而不是读 6 小时前的缓存。
+   *
+   * 实测踩过：v0.23.1 的 Release 15:32 就建好了，但定时任务 15:26 跑过，
+   * 缓存里还是 0.23.0，用户反复点检查都看不到更新。「检查更新」不真的
+   * 检查，是最让人火大的假功能。
+   */
   async function loadUpdate(force) {
-    const res = await apiCached('/api/update', force ? 0 : 5000);
+    const url = force ? '/api/update?force=1' : '/api/update';
+    const res = await apiCached(url, force ? 0 : 5000);
     S.update = (res.ok && res.data) ? res.data : null;
     renderUpdateBadge();
     return S.update;

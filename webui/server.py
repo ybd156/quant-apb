@@ -562,7 +562,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/update/progress":
             return self._api_update_progress()
         if path == "/api/update":
-            return self._api_update()
+            return self._api_update(query)
         if path == "/api/model":
             return self._api_model()
         if path == "/api/picks":
@@ -803,22 +803,71 @@ class ApiHandler(BaseHTTPRequestHandler):
                              "note": "点「确认更新」后这里会显示实时进度"})
         return self._ok(d)
 
-    def _api_update(self):
-        """版本检查 —— 只比对本地 VERSION 与 update.json 记录的远端版本。"""
+    def _api_update(self, query=None):
+        """
+        版本检查。
+
+        默认读 update.json（由定时任务每 6 小时刷新）。
+        `?force=1` 时**立刻**去 GitHub 查一次 —— 用户点「检查更新」就该真的查。
+
+        实测踩过：v0.23.1 的 Release 15:32 就建好了，但定时任务 15:26 已经跑过，
+        缓存里 latest 还写着 0.23.0，用户反复点检查都看不到更新。
+        「检查更新」不真的检查，是最让人火大的假功能。
+        """
+        from urllib.parse import parse_qs, urlparse as _up
+        q = query or {}
+        if not q:
+            try:
+                q = parse_qs(_up(self.path or "").query or "")
+            except Exception:
+                q = {}
+        force = str((q.get("force") or ["0"])[0]) in ("1", "true", "yes")
+
         cur = _read_version()
-        info, _err = _read_json("update.json")
-        info = info if isinstance(info, dict) else {}
-        latest = info.get("latest_version") if isinstance(info, dict) else None
+
+        if force:
+            try:
+                from qcore import update_check as UC
+                r = UC.check(write=True)
+                latest = r.get("latest_version")
+                checked = r.get("checked_at")
+                behind = bool(r.get("behind_remote"))
+            except Exception as e:  # noqa: BLE001
+                return self._fail("update_check_failed", 200,
+                                  detail=str(e)[:160],
+                                  hint="检查 GitHub 失败，检查网络或代理（qcore.net.status()）")
+        else:
+            info, _err = _read_json("update.json")
+            info = info if isinstance(info, dict) else {}
+            latest = info.get("latest_version")
+            checked = info.get("checked_at")
+            behind = bool(info.get("behind_remote"))
+
         has_update = False
         try:
             from qcore.update_check import compare_versions
             has_update = bool(latest and cur and compare_versions(latest, cur) > 0)
+            if latest and cur and compare_versions(latest, cur) < 0:
+                behind = True
         except Exception:
             has_update = bool(latest and cur and latest != cur)
+
+        note = ""
+        if has_update:
+            note = f"有新版本 v{latest}，当前 v{cur}"
+        elif behind:
+            note = (f"当前版本 v{cur} 比发布版 v{latest} 更新"
+                    f"（本地构建或开发版，无需更新）")
+        elif latest:
+            note = f"已是最新版本 v{cur}"
+
         return self._ok({
             "current": cur, "latest": latest,
             "has_update": has_update,
-            "checked_at": (info or {}).get("checked_at"),
+            "behind_remote": behind,
+            "checked_at": checked,
+            "forced": force,
+            "note": note,
             "command": "docker compose pull && docker compose up -d",
         })
 

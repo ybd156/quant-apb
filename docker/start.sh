@@ -8,7 +8,7 @@
 # 四类后台任务（按频率从高到低）：
 #   1. 秒级快照   qcore.tick        —— 交易时段轮询，落盘 data/tick/
 #   2. 行情情绪   qcore.market_live —— 60 秒，写 market.json
-#   3. 版本检查   qcore.update_check—— 6 小时，写 update.json
+#   3. 版本检查   qcore.update_check—— 1 小时，写 update.json（用户点检查时另有 force 实时查）
 #   4. 收盘演算   qcore.live_model  —— 每日 15:10 打分+盯市；每周重训
 #   5. 数据源探活 qcore.health      —— 6 小时，写 source_health.json
 #   6. 告警检查   qcore.alert       —— 30 分钟，写 alerts.jsonl
@@ -18,7 +18,7 @@ HOST="${APB_HOST:-0.0.0.0}"
 PORT="${APB_PORT:-8765}"
 MARKET_INTERVAL="${APB_MARKET_INTERVAL:-60}"
 ENABLE_MARKET="${APB_MARKET:-1}"
-UPDATE_INTERVAL="${APB_UPDATE_INTERVAL:-21600}"
+UPDATE_INTERVAL="${APB_UPDATE_INTERVAL:-3600}"
 ENABLE_UPDATE_CHECK="${APB_UPDATE_CHECK:-1}"
 ENABLE_TICK="${APB_TICK:-1}"
 TICK_INTERVAL="${APB_TICK_INTERVAL:-3}"
