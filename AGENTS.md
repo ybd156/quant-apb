@@ -197,6 +197,98 @@ regime 混合    γ = γ_max·n/(n+γ_n0);  z = (1-γ)z_g + γz_r
 | 8 | 港股双边 0.1% 印花税 | 5 日调仓年化拖累 13.5% | `costs.annual_cost_drag` |
 | 9 | 信号同质性 | "73 个专家"实际只有 33 个独立方向 | `risk.effective_n_corr` |
 | 10 | NaN 写进 JSON | 浏览器 `JSON.parse` 整页崩 | `store.write_json` 已全局转 null |
+| 11 | **共享状态无归属标识** | 美股账户用 A 股 picks 下单，买 1-3 股 A 股代码 | picks 必须带 `market`；`paper_auto.rebalance` 校验 |
+| 12 | **多写入方覆盖同一文件** | 重算 impact 后 `live` 段消失，页面 2026 年变空白 | 写入前读-改-写，保留他方字段（`to_state_json` 已修） |
+| 13 | **多实例共用文件名** | 训练 h=5 覆盖 h=1 的 `gbdt.pkl` | 文件名带实例标识：`gbdt_h5.pkl` / `paper_auto_cn_h5.json` |
+| 14 | **脚本生成时转义字母** | `\t`/`\b` 变成控制字符，`can't find '__main__'` | 生成 bat/ps1 后断言：纯 ASCII + CRLF + 无 0x00-0x08 |
+| 15 | **嵌套 JSON 只遍历顶层** | 数据源表显示 `as_of`/`sources` 而不是真实源 | UI 必须下钻到实际数据层 |
+| 16 | **静默截断列表** | 31 个交易日只显示 1 天 | 不分页就明示总量；`slice(0,N)` 必须配提示 |
+| 17 | **样本量不足就当结论** | 2 笔交易给出 +66bps，"最优阈值" | 任何"最优X"必须同时报样本数；< 30 标观察 |
+| 18 | **只改写入方或只改读取方** | 接口改了但 UI 还读旧字段 | 共享字段必须两边同时改，见 §7.5 |
+
+---
+
+## 7.5 共享状态契约（本版血的教训）
+
+**本版 90% 的 bug 不是算法错，是接线错。** 算法部分有测试保护，
+模块之间的约定没有 —— 只能靠这张表。
+
+### 规则一：共享数据必须带归属标识
+
+```
+picks_hN.json     必须带 market 字段
+paper_auto 账户   文件名带 market + horizon：paper_auto_{mkt}_h{h}.json
+模型文件          带 horizon：gbdt_h{h}.pkl
+成交记录          每条带 market + horizon
+```
+
+**接收方必须校验**，不能假设"给我的就是对的"：
+
+```python
+# paper_auto.rebalance 里的实际代码
+_pm = str((picks or {}).get("market") or "").upper()
+if _pm and _pm != market:
+    return {"ok": False, "reason": "market_mismatch", ...}
+# 没写 market 时用代码形态反查
+if not _pm and rows[0]["code"].isdigit() and market != "CN":
+    return {"ok": False, "reason": "picks_market_mismatch", ...}
+```
+
+### 规则二：同一文件多写入方 → 读-改-写
+
+`data/state/events.json` 有两个写入方：
+
+| 写入方 | 写什么 |
+|---|---|
+| `policy_calendar.to_state_json()` | `events` / `rows` / `impact` |
+| `news_live.merge_into_events()` | `live` / `live_meta` |
+
+两边都必须**先读旧文件再写**，不能整体覆盖：
+
+```python
+# to_state_json 里的实际代码
+if _os.path.isfile(path):
+    old = _json.load(f)
+for k in ("live", "live_meta"):
+    if old.get(k):
+        payload[k] = old[k]
+```
+
+### 规则三：多实例的东西，文件名带实例标识
+
+| 对象 | 命名 |
+|---|---|
+| 模型 | `gbdt.pkl`(h1) / `gbdt_h5.pkl` |
+| 模拟盘账户 | `paper_auto.json`(CN/h1) / `paper_auto_cn_h5.json` / `paper_auto_us_h1.json` |
+| 预测 | `picks.json`(h1) / `picks_h5.json` |
+| 台账 | `data/pred_ledger/horizon_{h}.jsonl` |
+
+### 规则四：生成脚本后的三条断言
+
+```python
+raw = open('train.bat','rb').read()
+assert all(b < 0x80 for b in raw), "必须纯 ASCII"
+assert b'\r\n' in raw, "必须 CRLF"
+assert not any(b in raw for b in range(0x09)), "不能有控制字符"
+```
+
+`\t` 会变成 0x09、`\b` 变成 0x08 —— 这个坑已经踩了 3 次。
+
+### 规则五：UI 展示的字段，必须有代码写它
+
+`/api/events` 的 `impact` 字段 UI 读 5 次，但 `impact.compute()`
+只在完整 pipeline 里跑，NAS 上从没跑过 → 表格永远空。
+
+**新加 UI 字段时，同时确认「谁写它、谁读它、结构对不对」。**
+
+### 规则六：报告"最优 X"必须带样本数
+
+```python
+MIN_TRADES = 30   # 单组最少交易次数，低于此标 insufficient
+```
+
+实测教训：阈值扫描里 t=0.65 的单边做多只有 **2 笔**样本，
+给出 +66.89bps 的"最优"结论 —— 纯噪音。
 
 ---
 
