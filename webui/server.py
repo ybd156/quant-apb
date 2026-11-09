@@ -491,6 +491,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/hotspot":
+            return self._api_hotspot(query)
         if path == "/api/horizons":
             return self._api_horizons(query)
         if path == "/api/event/learning":
@@ -794,8 +796,22 @@ class ApiHandler(BaseHTTPRequestHandler):
         return self._ok(payload)
 
     def _api_picks(self, query):
-        """当前推荐持仓：picks.json，其次 model.json 的 picks 段。"""
+        """
+        当前推荐持仓。支持 ?horizon=N 取该周期的 picks_hN.json。
+        """
         limit = _clamp_int(query.get("limit"), 500, 1, 2000)
+        try:
+            _h = int(((query or {}).get("horizon") or [1])[0])
+        except (TypeError, ValueError):
+            _h = 1
+        if _h != 1:
+            fn = f"picks_h{_h}.json"
+            d, err = _read_json(fn)
+            if err:
+                return self._not_ready(fn,
+                                       f"该周期还没有预测。训练模型后跑一次 "
+                                       f"python -m qcore.live_model --predict --horizon={_h}")
+            return self._ok(d)
         data, name, err = _read_first(MODEL_FILES["picks"])
         rows, meta = None, {}
         if err is None:
@@ -990,6 +1006,26 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("session_failed", 200, detail=str(e)[:160])
 
+    def _api_hotspot(self, query):
+        """
+        当日风口：涨停梯队 / 跌停 / 板块强度 / 主力资金。
+        query: refresh=1 强制重抓（默认读缓存，5 分钟内不重复抓）
+        """
+        q = query or {}
+        force = str((q.get("refresh") or ["0"])[0]) in ("1", "true", "yes")
+        try:
+            from qcore import hotspot as HS
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        try:
+            if not force:
+                d = HS.load_snapshots(1)
+                if d and d[0].get("date"):
+                    return self._ok(d[0])
+            return self._ok(HS.analyze(verbose=False))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("hotspot_failed", 200, detail=str(e)[:160])
+
     def _api_horizons(self, query):
         """
         多周期：列出各 horizon 的模型状态 + 成本分析。
@@ -1021,6 +1057,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "n_trees": meta.get("n_trees"),
                 "cost_drag_annual": round(HZ.annual_cost_drag(max(h, 1), market) * 100, 2),
             })
+        # 各周期的真实战绩（台账对账出来的）
+        perf = {}
+        try:
+            from qcore import horizon_ledger as HL
+            for st in (HL.summary().get("horizons") or []):
+                perf[int(st["horizon"])] = st
+        except Exception:
+            pass
+        for row in rows:
+            st = perf.get(int(row["horizon"])) or {}
+            row["perf"] = {
+                "n": st.get("n", 0),
+                "hit_rate": st.get("hit_rate"),
+                "top_mean": st.get("top_mean"),
+                "excess_mean": st.get("excess_mean"),
+                "recent90_top": st.get("recent90_top"),
+                "pending": st.get("pending", 0),
+            }
+
         # 该市场支持哪些周期、扣成本后能不能做
         table = HZ.table({h: 0.03 for h in HZ.all_horizons()}, market)
         want = ((query or {}).get("horizon") or [None])[0]

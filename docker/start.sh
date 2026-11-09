@@ -165,6 +165,21 @@ r = EL.run(verbose=True)
     PIDS="$PIDS $!"
 fi
 
+# 5.7) 当日风口快照（交易时段每 30 分钟存一次，收盘后也存一份）
+if [ "$ENABLE_HOTSPOT" != "0" ]; then
+    (
+        sleep 90
+        while true; do
+            python -c "
+from qcore import hotspot as HS
+HS.snapshot(verbose=True)
+" 2>&1 | tail -3 || true
+            sleep 1800
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (

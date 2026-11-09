@@ -1071,3 +1071,8 @@ select { cursor: pointer; }
 .ma-chip { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2, #9aa4b2);
   font-variant-numeric: tabular-nums; }
 .ma-chip i { width: 8px; height: 2.5px; border-radius: 2px; display: inline-block; }
+
+/* 周期切换 */
+.segmented .seg.is-dim { opacity: .45; }
+.tbl tr.row-on { background: rgba(74,125,255,.08); }
+.tbl tr.row-on td:first-child { box-shadow: inset 2px 0 0 #4a7dff; }

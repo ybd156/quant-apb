@@ -557,6 +557,7 @@
     { id: 'overview', label: '总览', icon: 'overview', title: '总览', sub: '这台测量仪现在读数是多少' },
     { id: 'market', label: '市场', icon: 'market', title: '实时行情', sub: '指数 / 情绪温度 / 市场宽度' },
     { id: 'chart', label: '个股', icon: 'search', title: '个股行情', sub: 'K线 / 均线 / 成交量' },
+    { id: 'hotspot', label: '风口', icon: 'events', title: '当日风口', sub: '涨停梯队 / 板块强度 / 主力资金' },
     { id: 'watch', label: '自选', icon: 'star', title: '自选股', sub: '分组跟踪 · 加进来就打分' },
       { id: 'signals', label: '信号', icon: 'signals', title: '信号权重', sub: '每个「信号 × 参数」专家当前权重' },
     { id: 'model', label: '模型', icon: 'model', title: '模型', sub: 'Alpha158 + GBDT · 当前推荐持仓' },
@@ -1138,11 +1139,16 @@
   }
 
   async function pageModel() {
-    const [modelRes, picksRes, impRes] = await Promise.all([
+    // 周期选择：默认 T+1。切换会重新拉该周期的 picks。
+    const H = (S.modelHorizon == null) ? 1 : S.modelHorizon;
+    const [modelRes, picksRes, impRes, hzRes] = await Promise.all([
       apiCached('/api/model'),
-      apiCached('/api/picks?limit=500'),
-      apiCached('/api/factors/importance?top=200')
+      apiCached('/api/picks?limit=500' + (H !== 1 ? '&horizon=' + H : '')),
+      apiCached('/api/factors/importance?top=200'),
+      apiCached('/api/horizons', 8000)
     ]);
+    const hz = (hzRes && hzRes.ok && hzRes.data) ? hzRes.data : {};
+    const hzList = hz.horizons || [];
 
     const m = (modelRes.ok && modelRes.data) ? modelRes.data : null;
     const picks = (picksRes.ok && picksRes.data) ? picksRes.data : null;
@@ -1263,7 +1269,50 @@
         : notReadyBox(impRes, '因子重要性缺失')
     });
 
-    return '<div style="margin-bottom:14px">' + heroCard + '</div>' +
+    // ---- 周期切换 + 各周期战绩 ----
+    const hzTabs = hzList.map((x) => {
+      const on = Number(x.horizon) === H;
+      return '<button type="button" class="seg' + (on ? ' is-active' : '') +
+        (x.model_exists ? '' : ' is-dim') + '" data-hz="' + x.horizon + '">' +
+        esc(x.label || ('h' + x.horizon)) + '</button>';
+    }).join('');
+
+    const perfRows = hzList.map((x) => {
+      const pf = x.perf || {};
+      const n = pf.n || 0;
+      const hr = pf.hit_rate;
+      const ex = pf.excess_mean;
+      const tone = ex == null ? '' : (ex > 0 ? 'is-up' : 'is-down');
+      return '<tr' + (Number(x.horizon) === H ? ' class="row-on"' : '') + '>' +
+        '<td>' + esc(x.label || ('h' + x.horizon)) + '</td>' +
+        '<td>' + (x.model_exists ? '<span class="tag hit">已训</span>'
+                                 : '<span class="tag pending">未训</span>') + '</td>' +
+        '<td class="num">' + (n || '—') + '</td>' +
+        '<td class="num">' + (hr == null ? '—' : (hr * 100).toFixed(1) + '%') + '</td>' +
+        '<td class="num ' + tone + '">' + (ex == null ? '—' :
+          (ex > 0 ? '+' : '') + (ex * 100).toFixed(2) + '%') + '</td>' +
+        '<td class="num">' + (pf.pending || 0) + '</td>' +
+        '<td class="num muted">' + (x.cost_drag_annual == null ? '—' :
+          x.cost_drag_annual.toFixed(1) + '%') + '</td>' +
+        '</tr>';
+    }).join('');
+
+    const horizonCard = card({
+      title: '持有周期', sub: '每个周期一套独立模型、一本独立台账',
+      tools: '<div class="segmented" id="hz-tabs">' + hzTabs + '</div>',
+      body:
+        '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+          '<th>周期</th><th>模型</th><th>已对账</th><th>命中率</th>' +
+          '<th>超额</th><th>待对账</th><th>年成本</th>' +
+        '</tr></thead><tbody>' + perfRows + '</tbody></table></div>' +
+        '<p class="muted" style="margin-top:10px">' +
+          '命中率 = top 三分之一跑赢全体平均的期数占比；' +
+          '超额 = top 组平均收益 − 全体平均。样本 &lt; 10 时只能当观察。' +
+        '</p>'
+    });
+
+    return '<div style="margin-bottom:14px">' + horizonCard + '</div>' +
+      '<div style="margin-bottom:14px">' + heroCard + '</div>' +
       '<div style="margin-bottom:14px">' + btCard + '</div>' +
       '<div style="margin-bottom:14px">' + picksCard + '</div>' +
       impCard;
@@ -1741,6 +1790,135 @@
       tableCard + '</details>';
 
     return '<div style="margin-bottom:14px">' + factorCard + '</div>' + legacyBlock;
+  }
+
+  /* ============================== 当日风口 ============================= */
+
+  async function pageHotspot() {
+    const res = await apiCached('/api/hotspot', 20000);
+    if (!res.ok || !res.data) {
+      setSub('未就绪');
+      return notReadyBox(res, '当日风口数据缺失');
+    }
+    const d = res.data;
+    const s = d.sentiment || {};
+    const zt = d.limit_up || {};
+    const dt = d.limit_down || {};
+    const ind = d.industry || {};
+    const con = d.concept || {};
+    const fund = d.fund_flow || {};
+    setSub((d.date || '') + ' · 涨停 ' + (s.limit_up || 0) +
+      ' / 跌停 ' + (s.limit_down || 0) + ' · ' + (s.read || '—'));
+
+    // ---- 情绪读数 ----
+    const sentCard = card({
+      title: '情绪读数', sub: d.date || '',
+      tools: '<button type="button" class="btn ghost sm" id="hs-refresh">' +
+        ICON('refresh') + '重新抓取</button>',
+      body:
+        '<div class="quote-grid" style="grid-template-columns:repeat(auto-fit,minmax(110px,1fr))">' +
+          [['涨停', s.limit_up, s.limit_up >= 60 ? 'is-up' : ''],
+           ['跌停', s.limit_down, s.limit_down >= 20 ? 'is-down' : ''],
+           ['最高连板', s.max_board ? s.max_board + ' 板' : '—', ''],
+           ['涨跌停比', s.ratio, s.ratio >= 5 ? 'is-up' : s.ratio < 1 ? 'is-down' : ''],
+           ['读数', s.read, s.read === '强' ? 'is-up' : s.read === '弱' ? 'is-down' : '']]
+            .map(([k, v, tone]) => '<div class="qg-item"><span class="qg-k">' + k +
+              '</span><span class="qg-v ' + tone + '">' + (v == null ? '—' : v) +
+              '</span></div>').join('') +
+        '</div>'
+    });
+
+    // ---- 涨停梯队 ----
+    const ladder = d.ladder || [];
+    const ladderCard = ladder.length ? card({
+      title: '涨停梯队', sub: '按连板高度排列 · 最高 ' + (s.max_board || 0) + ' 板',
+      body: ladder.map((x) => {
+        const hot = x.boards >= 3;
+        return '<div style="display:flex;gap:12px;padding:8px 0;border-bottom:1px solid rgba(120,140,180,.10)">' +
+          '<div style="min-width:64px"><span class="tag ' + (hot ? 'is-up' : '') + '">' +
+            x.boards + ' 板</span></div>' +
+          '<div style="min-width:48px" class="muted">' + x.n + ' 家</div>' +
+          '<div style="flex:1">' + (x.names || []).map((n) =>
+            '<span class="chip">' + esc(n) + '</span>').join('') +
+            (x.n > (x.names || []).length ? '<span class="muted"> …</span>' : '') +
+          '</div></div>';
+      }).join('')
+    }) : '';
+
+    // ---- 主线板块 ----
+    const mainCard = (d.main_sectors || []).length ? card({
+      title: '主线板块', sub: '按涨停家数排 · 这才是资金真去的地方',
+      body: '<div class="bars">' + (d.main_sectors || []).map((m) => {
+        const max = Math.max.apply(null, (d.main_sectors || []).map((x) => x.limit_up_n).concat([1]));
+        const w = Math.max(4, (m.limit_up_n / max) * 100);
+        return '<div class="bar-row"><span class="bar-label">' + esc(m.industry) +
+          '</span><span class="bar-track"><span class="bar-fill" style="width:' +
+          w.toFixed(1) + '%"></span></span><span class="bar-val">' + m.limit_up_n +
+          ' 家</span></div>';
+      }).join('') + '</div>'
+    }) : '';
+
+    // ---- 板块涨幅榜 ----
+    const sectorTable = (rows, title, sub) => card({
+      title: title, sub: sub,
+      body: rows.length ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+        '<th>板块</th><th>涨幅</th><th>主力净流入</th><th>涨/跌</th><th>领涨股</th>' +
+        '</tr></thead><tbody>' + rows.slice(0, 12).map((r) => {
+          const tone = r.chg_pct > 0 ? 'is-up' : 'is-down';
+          const ftone = r.main_in_yi > 0 ? 'is-up' : 'is-down';
+          return '<tr><td>' + esc(r.name) + '</td>' +
+            '<td class="num ' + tone + '">' + (r.chg_pct > 0 ? '+' : '') + r.chg_pct + '%</td>' +
+            '<td class="num ' + ftone + '">' + (r.main_in_yi > 0 ? '+' : '') +
+              r.main_in_yi + ' 亿</td>' +
+            '<td class="num muted">' + r.up + '/' + r.down + '</td>' +
+            '<td class="muted">' + esc(r.leader || '—') + '</td></tr>';
+        }).join('') + '</tbody></table></div>'
+        : emptyBox('暂无数据', '')
+    });
+
+    const indCard = sectorTable((ind.rows || []), '行业板块涨幅',
+      '主力净流入 = 大单+超大单，比涨幅更能说明资金真实意图');
+    const conCard = sectorTable((con.rows || []), '概念板块涨幅', '题材热度');
+
+    // ---- 主力资金 ----
+    const fundRows = (fund.rows || []).slice(0, 15);
+    const fundCard = fundRows.length ? card({
+      title: '主力净流入排行', sub: '今日大单+超大单净买入',
+      body: '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+        '<th>代码</th><th>名称</th><th>涨幅</th><th>净流入</th><th>占比</th>' +
+        '</tr></thead><tbody>' + fundRows.map((r) => {
+          const tone = r.chg_pct > 0 ? 'is-up' : 'is-down';
+          return '<tr><td class="mono"><a class="link-btn" data-goto="' + esc(r.code) +
+            '">' + esc(r.code) + '</a></td>' +
+            '<td>' + esc(r.name) + '</td>' +
+            '<td class="num ' + tone + '">' + (r.chg_pct > 0 ? '+' : '') + r.chg_pct + '%</td>' +
+            '<td class="num ' + (r.main_in_yi > 0 ? 'is-up' : 'is-down') + '">' +
+              r.main_in_yi + ' 亿</td>' +
+            '<td class="num muted">' + r.main_pct + '%</td></tr>';
+        }).join('') + '</tbody></table></div>'
+    }) : '';
+
+    // ---- 跌停 ----
+    const dtRows = (dt.rows || []).slice(0, 10);
+    const dtCard = dtRows.length ? card({
+      title: '跌停', sub: '情绪的反面 · 共 ' + (dt.n || 0) + ' 家',
+      body: '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+        '<th>代码</th><th>名称</th><th>跌幅</th><th>封单</th><th>行业</th>' +
+        '</tr></thead><tbody>' + dtRows.map((r) =>
+          '<tr><td class="mono"><a class="link-btn" data-goto="' + esc(r.code) + '">' +
+          esc(r.code) + '</a></td><td>' + esc(r.name) + '</td>' +
+          '<td class="num is-down">' + r.chg_pct + '%</td>' +
+          '<td class="num">' + r.fund_yi + ' 亿</td>' +
+          '<td class="muted">' + esc(r.industry || '—') + '</td></tr>').join('') +
+        '</tbody></table></div>'
+    }) : '';
+
+    return '<div style="margin-bottom:14px">' + sentCard + '</div>' +
+      '<div class="grid two" style="margin-bottom:14px">' + mainCard + ladderCard + '</div>' +
+      '<div style="margin-bottom:14px">' + indCard + '</div>' +
+      '<div style="margin-bottom:14px">' + conCard + '</div>' +
+      '<div style="margin-bottom:14px">' + fundCard + '</div>' +
+      (dtCard ? '<div style="margin-bottom:14px">' + dtCard + '</div>' : '');
   }
 
   /* ============================== 自选股 ============================= */
@@ -2847,6 +3025,7 @@
   const RENDERERS = {
     overview: pageOverview,
     chart: pageChart,
+    hotspot: pageHotspot,
     watch: pageWatch,
     market: pageMarket,
     signals: pageSignals,
@@ -2918,6 +3097,28 @@
   /* --------------------------- 页内事件绑定 --------------------------- */
 
   function bindPageEvents(id) {
+    if (id === 'hotspot') {
+      const r = $('#hs-refresh');
+      if (r) r.addEventListener('click', async () => {
+        r.disabled = true;
+        const res = await api('/api/hotspot?refresh=1');
+        r.disabled = false;
+        if (res && res.ok) { toast('已重新抓取', 'ok'); rerender(); }
+        else toast('抓取失败', 'err');
+      });
+      $$('[data-goto]').forEach((a) => a.addEventListener('click', () => {
+        S.chartCode = a.getAttribute('data-goto');
+        navigate('chart', false);
+      }));
+      return;
+    }
+    if (id === 'model') {
+      $$('#hz-tabs .seg').forEach((b) => b.addEventListener('click', () => {
+        S.modelHorizon = Number(b.getAttribute('data-hz'));
+        navigate('model', false);
+      }));
+      return;
+    }
     if (id === 'chart') {
       const go = $('#ck-go');
       const inp = $('#ck-code');

@@ -294,6 +294,15 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
     if verbose:
         print(f"  预测完成 {payload['as_of']}，{len(rows)} 只，"
               f"horizon={horizon}（{HZ.label_for(horizon)}）-> {fname}", flush=True)
+
+    # 自动登记到该周期的台账 —— 这是自学习的入口。
+    # 登记失败不影响预测结果（台账是旁路，不能拖垮主流程）。
+    try:
+        from . import horizon_ledger as HL
+        reg = HL.record(horizon, payload, verbose=False)
+        payload["ledger"] = {k: reg.get(k) for k in ("ok", "exit_date", "n")}
+    except Exception as e:  # noqa: BLE001
+        payload["ledger"] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:60]}"}
     return {"ok": True, **payload}
 
 

@@ -23,6 +23,7 @@ mkdir -p "$KIT/tools" "$KIT/scripts"
 cp "$ROOT/tools/train_one_click.py" "$KIT/tools/"
 cp "$ROOT/tools/sync_agent.py" "$KIT/tools/"
 cp "$ROOT/tools/defaults.py" "$KIT/tools/"
+cp "$ROOT/tools/bootstrap.ps1" "$KIT/tools/"
 cp "$ROOT/scripts/benchmark_alpha158.py" "$KIT/scripts/"
 cp "$ROOT/requirements.txt" "$KIT/"
 cp "$ROOT/VERSION" "$KIT/"
@@ -35,6 +36,8 @@ find "$KIT" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || 
 find "$KIT" -name '*.pyc' -delete 2>/dev/null || true
 # 数据与模型不进包（数据 545MB，模型由训练产出）
 rm -rf "$KIT/data" 2>/dev/null || true
+# 便携运行时由 bootstrap.ps1 首次运行时生成，不进包
+rm -rf "$KIT/runtime" 2>/dev/null || true
 
 # ---------- 3. 默认配置（含默认 NAS 域名）----------
 cat > "$KIT/apb_defaults.json" <<'JSON'
