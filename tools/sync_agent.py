@@ -38,6 +38,7 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def _req(url: str, method: str = "GET", payload=None, token: str = "",
@@ -135,7 +136,9 @@ def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="APB 同步代理（跑在训练机上）")
-    ap.add_argument("--nas", required=True, help="NAS 地址，如 http://192.168.250.3:8765")
+    ap.add_argument("--nas", default="",
+                    help="NAS 地址；不填就用 apb_defaults.json 里的，再没有就用 "
+                         "https://apbcdn.683868.xyz")
     ap.add_argument("--token", default=os.environ.get("APB_TOKEN", ""),
                     help="访问 token（NAS 设了才需要）")
     ap.add_argument("--once", action="store_true", help="领一个任务就退出")
@@ -144,7 +147,11 @@ def main(argv=None) -> int:
     ap.add_argument("--horizons", default="", help="--push-only 时指定，如 1,5")
     a = ap.parse_args(argv)
 
-    nas = a.nas.rstrip("/")
+    try:
+        import defaults as _DEF
+    except Exception:
+        _DEF = None
+    nas = (a.nas or (_DEF.nas() if _DEF else "https://apbcdn.683868.xyz")).rstrip("/")
     token = a.token or ""
     worker = _worker_name()
 
@@ -157,7 +164,8 @@ def main(argv=None) -> int:
     print(f"已连接 {nas}  版本 {h.get('data', {}).get('version', '?')}")
 
     if a.push_only:
-        hs = [int(x) for x in a.horizons.split(",") if x.strip()] or [1, 5]
+        hs = ([int(x) for x in a.horizons.split(",") if x.strip()]
+              or (_DEF.horizons() if _DEF else [1, 5]))
         print(f"推送 horizons={hs} …")
         r = push_models(nas, hs, token)
         for p in r.get("pushed", []):

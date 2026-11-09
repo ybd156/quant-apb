@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# 打包「训练机套件」—— 拷到任意一台电脑，解压即可训练。
+#
+# 产物： apb-train-kit_<version>.zip
+#
+# 里面只有训练需要的东西（不含 Web UI、不含 fnOS 打包文件），
+# 目标是「解压 → 双击 → 训练 → 得到可上传的模型 zip」。
+set -euo pipefail
+
+VERSION="${1:-0.0.0}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUT="$ROOT/apb-train-kit_${VERSION}.zip"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+echo "[kit] version=$VERSION"
+KIT="$WORK/apb-train-kit"
+mkdir -p "$KIT"
+
+# ---------- 1. 训练需要的代码 ----------
+cp -a "$ROOT/qcore" "$KIT/"
+mkdir -p "$KIT/tools" "$KIT/scripts"
+cp "$ROOT/tools/train_one_click.py" "$KIT/tools/"
+cp "$ROOT/tools/sync_agent.py" "$KIT/tools/"
+cp "$ROOT/tools/defaults.py" "$KIT/tools/"
+cp "$ROOT/scripts/benchmark_alpha158.py" "$KIT/scripts/"
+cp "$ROOT/requirements.txt" "$KIT/"
+cp "$ROOT/VERSION" "$KIT/"
+cp "$ROOT/LICENSE" "$KIT/" 2>/dev/null || true
+cp "$ROOT/train.bat" "$ROOT/train.sh" "$KIT/"
+chmod +x "$KIT/train.sh" 2>/dev/null || true
+
+# ---------- 2. 清掉不需要的 ----------
+find "$KIT" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+find "$KIT" -name '*.pyc' -delete 2>/dev/null || true
+# 数据与模型不进包（数据 545MB，模型由训练产出）
+rm -rf "$KIT/data" 2>/dev/null || true
+
+# ---------- 3. 默认配置（含默认 NAS 域名）----------
+cat > "$KIT/apb_defaults.json" <<'JSON'
+{
+  "nas_url": "https://apbcdn.683868.xyz",
+  "note": "训练完把模型推到这个地址。改这里或命令行 --nas 覆盖。",
+  "default_horizons": [1, 3, 5, 10, 15],
+  "default_trees": 250,
+  "default_stocks": 300
+}
+JSON
+
+# ---------- 4. 说明文档 ----------
+cat > "$KIT/README-训练机.md" <<'MD'
+# APB 训练机套件
+
+解压后即可训练。**不需要装数据库、不需要 Docker、不需要联网训练**（只有下载数据时联网）。
+
+---
+
+## 三步开始
+
+### Windows
+
+双击 **`train.bat`**
+
+### Linux / macOS
+
+```bash
+bash train.sh
+```
+
+第一次运行会自动：
+1. 检查 Python / numpy / pandas（缺了会提示装）
+2. 下载行情数据（约 545MB，解压 3.7GB）
+3. 训练 5 个周期（T+1 / T+3 / 1周 / 2周 / 15天）
+4. 打包成 `dist/models/apb_models_<日期>.zip`
+
+---
+
+## 训练完怎么给 NAS
+
+**方法一：网页上传（最简单）**
+
+1. 打开 https://apbcdn.683868.xyz
+2. 进「设置 → 模型导入」
+3. 把 `dist/models/apb_models_*.zip` 拖进去
+
+**方法二：自动推送（一条命令）**
+
+```bash
+python tools/sync_agent.py --nas https://apbcdn.683868.xyz --push-only --horizons 1,5,15
+```
+
+**方法三：接 NAS 下发的任务（推荐常驻）**
+
+```bash
+python tools/sync_agent.py --nas https://apbcdn.683868.xyz --loop 60
+```
+
+然后在 NAS 网页「设置 → 训练任务」排任务，这台机器会自动领活、训练、上传。
+
+---
+
+## 常用参数
+
+```bash
+python tools/train_one_click.py --horizons 1,5      # 只训两个周期
+python tools/train_one_click.py --trees 150         # 慢机器降树数
+python tools/train_one_click.py --skip-data         # 数据已有，跳过检查
+python tools/train_one_click.py --dry-run           # 只检查环境
+```
+
+---
+
+## 硬件与耗时参考
+
+实测（2026-11）：
+
+| 设备 | 250 树一个周期 | 说明 |
+|---|---|---|
+| Intel N100（NAS） | **5.8 分钟** | GBDT 是内存受限，核显帮不上 |
+| AMD Ryzen 16 线程 | 10 分钟 | 当时还在跑别的任务 |
+| RTX 3060 | 直方图快 6.2× | 但整体受内存带宽限制 |
+
+**6 个周期大约 35-60 分钟**，夜里跑完全够。
+
+> 核显（Intel UHD）**不要用来加速**：实测带宽和 CPU 打平、算力只有 37%，
+> GBDT 直方图反而更慢。
+
+---
+
+## 目录结构
+
+```
+apb-train-kit/
+├─ train.bat / train.sh        一键启动
+├─ tools/
+│   ├─ train_one_click.py      训练主程序
+│   └─ sync_agent.py           自动领任务 + 上传
+├─ qcore/                      核心库（GBDT / Alpha158 / 数据同步）
+├─ scripts/benchmark_alpha158.py
+├─ apb_defaults.json           默认 NAS 地址（可改）
+└─ requirements.txt
+```
+
+---
+
+## 出问题看这里
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `找不到 python` | 没装或没进 PATH | 装 Python 3.10+，勾选 Add to PATH |
+| `缺少 numpy` | 依赖没装 | `pip install numpy pandas` |
+| 数据下载失败 | 网络/代理 | 脚本会自动切直连/代理；也可手动下 `qlib_bin.tar.gz` 放 `data/qlib/` |
+| 训练很慢 | 树太多 | `--trees 150` |
+| 上传 401/403 | token 不对 | `--token <NAS 的 APB_TOKEN>` |
+
+---
+
+生成版本：见同目录 `VERSION` 文件。
+MD
+
+# ---------- 5. 打 zip ----------
+cd "$WORK"
+if command -v zip >/dev/null 2>&1; then
+  zip -qr "$OUT" apb-train-kit
+else
+  # 没有 zip 就用 python（Windows 上是 python，Linux 上是 python3）
+  PYBIN=""
+  for cand in python3 python; do
+    command -v "$cand" >/dev/null 2>&1 && { PYBIN="$cand"; break; }
+  done
+  [ -n "$PYBIN" ] || { echo "[kit] ERROR 找不到 python，无法打 zip"; exit 1; }
+  "$PYBIN" -c "
+import os, shutil, sys
+out = sys.argv[1]
+base = out[:-4] if out.endswith('.zip') else out
+shutil.make_archive(base, 'zip', '.', 'apb-train-kit')
+" "$OUT"
+fi
+
+SIZE=$(wc -c < "$OUT" | tr -d ' ')
+echo "[kit] built $OUT (${SIZE} bytes)"
+echo "[kit] 内容："
+cd "$WORK" && find apb-train-kit -type f | sed 's/^/  /' | head -40

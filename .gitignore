@@ -46,3 +46,4 @@ tmp/
 
 # Qlib 社区数据（544MB 压缩 / 3.7GB 解压），不入库
 data/qlib/
+apb-train-kit_*.zip

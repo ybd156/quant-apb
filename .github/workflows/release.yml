@@ -117,10 +117,17 @@ jobs:
           ./scripts/build-fpk.sh "${{ needs.meta.outputs.version }}" arm
           ls -la *.fpk
 
+      - name: 构建训练机套件
+        run: |
+          chmod +x scripts/build-train-kit.sh
+          ./scripts/build-train-kit.sh "${{ needs.meta.outputs.version }}"
+          ls -la apb-train-kit_*.zip
+
       - name: 准备附件
         run: |
           mkdir -p dist
           mv *.fpk dist/
+          mv apb-train-kit_*.zip dist/
           cp docker-compose.yml dist/
           cp deploy/fnos/README.md dist/FNOS-INSTALL.md
           cat > dist/INSTALL.md <<'EOF'

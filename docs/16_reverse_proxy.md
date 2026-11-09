@@ -1,6 +1,10 @@
 # 反向代理与域名部署
 
-> 本文解决：把 APB 放到 `https://apb.example.com` 后面，并且**不把写接口暴露给全网**。
+> 本文解决：把 APB 放到 `https://apbcdn.683868.xyz` 后面，并且**不把写接口暴露给全网**。
+>
+> **本项目官方默认域名：`apbcdn.683868.xyz`**
+> 训练机套件（`apb-train-kit`）里的 `apb_defaults.json` 已预置这个地址，
+> 想换成自己的域名改那一行即可。
 
 ---
 
@@ -43,9 +47,9 @@ python -c "import secrets; print(secrets.token_hex(24))"
 docker run -d --name apb \
   -p 127.0.0.1:8765:8765 \
   -e APB_TOKEN='你生成的token' \
-  -e APB_ALLOWED_HOSTS='apb.example.com,192.168.250.3:8765' \
+  -e APB_ALLOWED_HOSTS='apbcdn.683868.xyz,192.168.250.3:8765' \
   -e APB_TRUSTED_PROXIES='127.0.0.1/32,172.17.0.0/16' \
-  -e APB_PUBLIC_URL='https://apb.example.com' \
+  -e APB_PUBLIC_URL='https://apbcdn.683868.xyz' \
   -v /usr/local/apps/@appdata/apb/data:/app/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   ghcr.io/ybd156/quant-apb:latest
@@ -61,10 +65,10 @@ docker run -d --name apb \
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name apb.example.com;
+    server_name apbcdn.683868.xyz;
 
-    ssl_certificate     /etc/letsencrypt/live/apb.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/apb.example.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/apbcdn.683868.xyz/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/apbcdn.683868.xyz/privkey.pem;
 
     # 模型导入是 base64 JSON，体积可能几十 MB
     client_max_body_size 64m;
@@ -98,7 +102,7 @@ server {
 # HTTP 跳 HTTPS
 server {
     listen 80;
-    server_name apb.example.com;
+    server_name apbcdn.683868.xyz;
     return 301 https://$host$request_uri;
 }
 ```
@@ -111,7 +115,7 @@ server {
 ## 3. Caddy 配置（更简单，自动 HTTPS）
 
 ```caddyfile
-apb.example.com {
+apbcdn.683868.xyz {
     encode gzip
 
     reverse_proxy 127.0.0.1:8765 {
@@ -141,7 +145,7 @@ Caddy 默认就会传 `X-Forwarded-For`，但 **`header_up Host {host}` 建议�
 打开 `设置` 页，或者直接调：
 
 ```bash
-curl -s https://apb.example.com/api/netguard | python -m json.tool
+curl -s https://apbcdn.683868.xyz/api/netguard | python -m json.tool
 ```
 
 关注这几个字段：
@@ -150,7 +154,7 @@ curl -s https://apb.example.com/api/netguard | python -m json.tool
 |---|---|---|
 | `your_ip` | 你的**公网** IP | 如果显示 `127.0.0.1` 或内网 IP，说明 XFF 没传对 |
 | `you_are_internal` | **false** | 如果为 `true`，说明反代被当成了内网 → **有安全风险** |
-| `host_header` | `apb.example.com` | 应该是域名，不是 `127.0.0.1:8765` |
+| `host_header` | `apbcdn.683868.xyz` | 应该是域名，不是 `127.0.0.1:8765` |
 | `ready_for_public` | **true** | 需要 token + hosts 都配了 |
 | `warnings` | 空数组 | 有内容就按提示改 |
 
@@ -158,13 +162,13 @@ curl -s https://apb.example.com/api/netguard | python -m json.tool
 
 ```bash
 # 不带 token 调写接口，应该返回 403
-curl -s -X POST https://apb.example.com/api/account/config \
+curl -s -X POST https://apbcdn.683868.xyz/api/account/config \
      -H 'Content-Type: application/json' \
      -d '{"initial_capital":1000000}'
 # 期望: {"ok":false,"error":"unauthorized"或"forbidden",...}
 
 # 带正确 token 才通
-curl -s -X POST https://apb.example.com/api/account/config \
+curl -s -X POST https://apbcdn.683868.xyz/api/account/config \
      -H 'Content-Type: application/json' \
      -H "X-Token: 你的token" \
      -d '{"initial_capital":1000000}'

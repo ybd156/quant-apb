@@ -47,8 +47,17 @@ from datetime import datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DEFAULT_HORIZONS = [1, 3, 5, 10, 15]
+try:
+    import defaults as _DEF
+except Exception:
+    _DEF = None
+
+DEFAULT_HORIZONS = (_DEF.horizons() if _DEF else [1, 3, 5, 10, 15])
+_DEF_TREES = (_DEF.get()["trees"] if _DEF else 250)
+_DEF_STOCKS = (_DEF.get()["stocks"] if _DEF else 300)
+_DEF_NAS = (_DEF.nas() if _DEF else "https://apbcdn.683868.xyz")
 DIST = os.path.join(ROOT, "dist", "models")
 
 
@@ -233,7 +242,7 @@ def _upload_instructions(files: list) -> str:
     lines += [
         "",
         "【方法一】网页上传（最简单）",
-        "  1. 打开 http://<你的NAS地址>:8765/#/settings",
+        "  1. 打开 " + _DEF_NAS + "/#/settings",
         "  2. 找到「模型导入」，把 zip 拖进去",
         "",
         "【方法二】命令行",
@@ -262,8 +271,10 @@ def main(argv=None) -> int:
         description="一键训练 APB 模型并打包（可在任意电脑运行）")
     ap.add_argument("--horizons", default=",".join(map(str, DEFAULT_HORIZONS)),
                     help="要训练的周期，逗号分隔（默认 1,3,5,10,15）")
-    ap.add_argument("--trees", type=int, default=250, help="树的数量（默认 250）")
-    ap.add_argument("--stocks", type=int, default=300, help="股票池大小（默认 300）")
+    ap.add_argument("--trees", type=int, default=_DEF_TREES,
+                    help=f"树的数量（默认 {_DEF_TREES}）")
+    ap.add_argument("--stocks", type=int, default=_DEF_STOCKS,
+                    help=f"股票池大小（默认 {_DEF_STOCKS}）")
     ap.add_argument("--gpu", action="store_true", help="尝试使用 GPU（需 cupy）")
     ap.add_argument("--skip-data", action="store_true", help="跳过数据下载检查")
     ap.add_argument("--dry-run", action="store_true", help="只检查环境，不训练")
