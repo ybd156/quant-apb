@@ -146,6 +146,146 @@ def _conclude(summ: Dict, ls_stat: Dict, inv: Dict) -> str:
     return "IC 与 0 不可区分 → 当前信号集无优势，应停手或换特征，而不是加大权重"
 
 
+def diagnose_learner(res: dict, res_eq: dict, p3d, h: int = 5,
+                     cmp: Optional[Dict] = None,
+                     sensitivity: bool = False) -> Dict:
+    """
+    学习器为什么无效 —— 逐条给出实测数字，而不是只说「无显著差异」。
+
+    ## 检查四项
+
+    1. **信号是否同质**：73 个专家实际只有几个独立方向？
+       如果有效独立数很低，学习器再怎么调权重也没用（都是同一批声音）。
+
+    2. **权重更新幅度**：每天权重变化多少？
+       如果变化幅度 < 1e-3，等于没在学习（学习率太小或被 ρ=0.995 抹平）。
+
+    3. **命中率对比**：学习器选的 top 组，命中率比等权高多少？
+       如果持平，说明排序能力没差异。
+
+    4. **参数敏感性**：换 κ（先验强度）和 ρ（记忆衰减）能不能翻转结论？
+       如果任何参数下都不显著，说明不是调参问题，是信号本身没信息。
+    """
+    out: Dict = {"ok": True, "checks": [], "reasons": [], "paths": []}
+
+    # ---- 1) 信号同质性 ----
+    try:
+        wh = res.get("weights_hist")
+        if wh is not None and len(wh) > 0:
+            w = np.asarray(wh, dtype=float)
+            w = w[np.isfinite(w).all(axis=1)]
+            if len(w) > 0:
+                hhi = float(np.mean((w ** 2).sum(axis=1)))
+                eff_n = 1.0 / hhi if hhi > 0 else 0.0
+                n_sig = int(w.shape[1])
+                pct = eff_n / max(n_sig, 1) * 100
+                out["checks"].append({
+                    "name": "信号同质性",
+                    "value": round(eff_n, 1),
+                    "detail": f"{n_sig} 个信号，有效独立数约 {eff_n:.1f}（{pct:.0f}%）",
+                })
+                if pct < 40:
+                    out["reasons"].append(
+                        f"信号高度同质：{n_sig} 个专家实际只有约 {eff_n:.0f} 个独立方向，"
+                        f"调权重等于在几个声音之间来回倒，信息量没增加")
+                    out["paths"].append(
+                        "先做因子去冗余（按相关性聚类，每类只留代表），"
+                        "再谈权重学习 —— 否则权重学习在冗余维度上是无效劳动")
+    except Exception as e:  # noqa: BLE001
+        out["checks"].append({"name": "信号同质性", "value": None,
+                             "detail": f"算不出来: {type(e).__name__}"})
+
+    # ---- 2) 权重更新幅度 ----
+    try:
+        wh = res.get("weights_hist")
+        if wh is not None and len(wh) > 2:
+            w = np.asarray(wh, dtype=float)
+            d = np.abs(np.diff(w, axis=0))
+            d = d[np.isfinite(d)]
+            mean_step = float(np.mean(d)) if d.size else 0.0
+            mean_w = float(np.mean(np.abs(w))) or 1.0
+            rel = mean_step / mean_w * 100
+            out["checks"].append({
+                "name": "权重更新幅度",
+                "value": round(mean_step, 6),
+                "detail": f"日均权重变化 {mean_step:.2e}，相对 {mean_w:.4f} 为 {rel:.2f}%",
+            })
+            if rel < 0.5:
+                out["reasons"].append(
+                    f"学习几乎没发生：日均权重只变动 {rel:.2f}%。"
+                    f"ρ=0.995 的记忆衰减把每次更新的信号抹掉了（半衰期 138 天）")
+                out["paths"].append(
+                    "降低 ρ（试 0.98~0.99），或提高 η，让单次预测错误能真的推动权重")
+    except Exception as e:  # noqa: BLE001
+        out["checks"].append({"name": "权重更新幅度", "value": None,
+                             "detail": f"算不出来: {type(e).__name__}"})
+
+    # ---- 3) 命中率对比 ----
+    try:
+        if cmp:
+            li, ei = cmp.get("learned_ic"), cmp.get("equal_ic")
+            if li is not None and ei is not None:
+                out["checks"].append({
+                    "name": "IC 对比（学习器 vs 等权）",
+                    "value": round(float(li) - float(ei), 6),
+                    "detail": f"学习器 IC {li:+.4f} / 等权 IC {ei:+.4f} / "
+                              f"差 {float(li)-float(ei):+.4f}",
+                })
+                if abs(float(li) - float(ei)) < 2e-3:
+                    out["reasons"].append(
+                        f"两者 IC 只差 {abs(float(li)-float(ei)):.4f} —— "
+                        f"学习器学到的排序和等权几乎一样，说明它没学到额外信息")
+    except Exception:
+        pass
+
+    # ---- 4) 参数敏感性（默认跳过：要跑 6 次完整回测，几分钟）----
+    if not sensitivity:
+        out["sensitivity_skipped"] = True
+        out["conclusion"] = ("；".join(out["reasons"][:3]) if out["reasons"]
+                             else "没找到明确原因，需要更多数据")
+        return out
+    try:
+        sens = []
+        for rho in (0.98, 0.995):
+            for kap in (2, 8, 20):
+                try:
+                    from .learner import WeightConfig, AdaptiveWeighter
+                    from .engine import run_walkforward
+                    cfg = WeightConfig(rho=rho, kappa=kap)
+                    wx = AdaptiveWeighter(p3d.DIR.shape[2], 4, cfg)
+                    rr = run_walkforward(p3d, weighter=wx)
+                    cc = compare_learned_vs_equal(rr, res_eq, p3d, h=h)
+                    sens.append({"rho": rho, "kappa": kap,
+                                 "diff_t": round(float(cc.get("diff_t") or 0), 2),
+                                 "diff_ic": round(float(cc.get("diff_ic") or 0), 5)})
+                except Exception:
+                    continue
+        if sens:
+            ts = [x["diff_t"] for x in sens]
+            out["checks"].append({
+                "name": "参数敏感性（ρ × κ 共 %d 组）" % len(sens),
+                "value": round(max(ts), 2),
+                "detail": "diff_t 范围 " + f"{min(ts):+.2f} ~ {max(ts):+.2f}",
+            })
+            out["sensitivity"] = sens
+            if max(ts) < 2.0:
+                out["reasons"].append(
+                    f"扫了 {len(sens)} 组参数（ρ∈{{0.98,0.995}} × κ∈{{2,8,20}}），"
+                    f"diff_t 最高只有 {max(ts):+.2f} —— 没有任何一档显著。"
+                    f"说明不是参数没调好，是信号本身不含可学的东西")
+                out["paths"].append(
+                    "调参这条路走到头了。要么换特征（当前 73 个信号在 5 日尺度上没有 alpha），"
+                    "要么换周期（分钟级实测有 63.6% 命中但幅度不够成本）")
+    except Exception:
+        pass
+
+    out["conclusion"] = (
+        "；".join(out["reasons"][:3]) if out["reasons"]
+        else "没找到明确原因，需要更多数据"
+    )
+    return out
+
+
 def compare_learned_vs_equal(res: dict, res_eq: dict, p3d, h: int = 5) -> Dict:
     """学习器 vs 等权集成：如果学不赢等权，学习器就是无效的。"""
     ret = p3d.RET[h]

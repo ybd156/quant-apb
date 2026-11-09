@@ -134,24 +134,26 @@ print('[session]', r.get('session'), r.get('reason') or 'ok')
         (
             sleep 180
             while true; do
-                nice -n 19 python -c "
+                # 自举：遍历所有周期，缺模型/超龄的都补上，训完立刻生成预测。
+            # 之前只训 h=1，h=3/10/15 永远「未训」，必须等人去训练机跑。
+            # 用户问「没模型就一定要停下来等吗」—— 不该。
+            nice -n 19 python -c "
 from datetime import datetime
-from qcore import live_model as LM
+from qcore import model_bootstrap as MB
 now = datetime.now()
 hm = now.hour * 60 + now.minute
 in_window = (hm >= 22 * 60) or (hm < 8 * 60)
-a = LM.model_age_days()
-if a is None:
-    print('[retrain] 还没有模型')
-elif not LM.should_retrain(${LIVE_MAX_AGE}):
-    print(f'[retrain] 模型新鲜（{a:.1f} 天），跳过')
+todo = [x for x in MB.status() if (not x['has_model']) or x['stale']]
+if not todo:
+    print('[bootstrap] 所有周期模型都齐且新鲜')
 elif not in_window:
-    print(f'[retrain] 模型已 {a:.1f} 天，等 22:00 后再训（盘中不训）')
+    miss = [x['horizon'] for x in todo]
+    print(f'[bootstrap] 待补 {miss}，等 22:00 后再训（盘中不训）')
 else:
-    print(f'[retrain] 模型已 {a:.1f} 天，开始重训（低优先级）')
-    r = LM.train(verbose=True)
-    print('[retrain] 完成' if r.get('ok') else '[retrain] 失败')
-" 2>&1 | tail -4 || true
+    print(f'[bootstrap] 开始补齐 {[x[chr(104)+chr(111)+chr(114)+chr(105)+chr(122)+chr(111)+chr(110)] for x in todo]}')
+    r = MB.bootstrap(only_missing=False)
+    print(f'[bootstrap] 完成 {r.get(chr(111)+chr(107)+chr(95)+chr(99)+chr(111)+chr(117)+chr(110)+chr(116))}/{len(todo)}')
+" 2>&1 | tail -6 || true
                 sleep 3600
             done
         ) &

@@ -41,6 +41,9 @@ COPY webui/ ./webui/
 # scripts/ 里 benchmark_alpha158.py 是 live_model 和 watch 的依赖
 # （build_features 从这里加载），漏了它自选/训练都会 FileNotFoundError
 COPY scripts/ ./scripts/
+# 不变量检查要用：tests/test_no_lookahead.py、audit/leak_scan.py
+COPY tests/ ./tests/
+COPY audit/ ./audit/
 COPY tools/ ./tools/
 COPY docker/start.sh ./start.sh
 COPY VERSION README.md LICENSE ./

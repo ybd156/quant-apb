@@ -229,10 +229,18 @@
       body = '<tr class="row-empty"><td colspan="' + cols.length + '">' +
         (opt.empty || emptyBox('暂无数据', '')) + '</td></tr>';
     } else {
-      body = rows.map((r) => '<tr>' + cols.map((c) => {
-        const v = c.render ? c.render(r) : esc(isNil(r[c.key]) ? '—' : r[c.key]);
-        return '<td class="' + (c.num ? 'num ' : '') + (c.mono ? 'mono' : '') + '">' + v + '</td>';
-      }).join('') + '</tr>').join('');
+      body = rows.map((r, idx) => {
+        // beforeRow：在这一行前面插入任意 HTML（用于「按天分组」的日期小标题）
+        const pre = (typeof opt.beforeRow === 'function')
+          ? (opt.beforeRow(r, idx, rows) || '') : '';
+        const trCls = (typeof opt.rowClass === 'function')
+          ? (opt.rowClass(r, idx) || '') : '';
+        return pre + '<tr' + (trCls ? ' class="' + trCls + '"' : '') + '>' +
+          cols.map((c) => {
+            const v = c.render ? c.render(r) : esc(isNil(r[c.key]) ? '—' : r[c.key]);
+            return '<td class="' + (c.num ? 'num ' : '') + (c.mono ? 'mono' : '') + '">' + v + '</td>';
+          }).join('') + '</tr>';
+      }).join('');
     }
     return '<div class="table-wrap"><table class="table"><thead>' + head +
       '</thead><tbody>' + body + '</tbody></table></div>';
@@ -541,7 +549,7 @@
     sort: { signals: { key: 'weight', dir: -1 } },
     filter: {
       family: 'all', q: '', result: 'all', from: '', to: '', days: 30,
-      page: 1, pageSize: 100,
+      page: 1, pageSize: 100, perDay: 20,
       evType: 'all', evDir: 'all'
     },
     selSid: null,
@@ -1027,6 +1035,36 @@
   /* ===================== 模拟账户配置（可编辑本金） =================== */
 
   const rawVal = (v) => (isNil(v) ? '' : String(v));
+
+  /**
+   * 把后端错误码翻译成人话。
+   *
+   * 后端返回 {error: "market_mismatch", hint: "..."}，
+   * 之前直接显示 error，用户看到「调仓失败: market_mismatch」——
+   * 完全不知道该怎么办。
+   *
+   * 优先级：hint（后端已写好的解释）> 映射表 > 原始码
+   */
+  function errText(r) {
+    if (!r) return '未知错误';
+    if (r.hint) return r.hint;
+    const M = {
+      market_mismatch: '这份预测属于另一个市场，不能给当前账户下单',
+      picks_market_mismatch: '这份预测的股票代码不属于当前市场',
+      no_picks: '这个周期还没有预测，需要先生成',
+      no_model: '这个周期还没有模型，需要先在训练机训练',
+      picks_empty: '预测列表是空的',
+      already_rebalanced_today: '今天已经调过仓了，不重复交易',
+      hold_period_not_elapsed: '持有期还没到，现在不该调仓',
+      not_initialized: '账户还没初始化',
+      bad_capital: '本金金额无效',
+      reset_failed: '清空失败',
+      unauthorized: '没有权限（需要登录或令牌）',
+      internal_error: '服务内部错误',
+    };
+    const k = String(r.error || '');
+    return M[k] || k || (r.detail ? String(r.detail).slice(0, 120) : '未知错误');
+  }
 
   /** 交易原因中文化：rebalance_in -> 新进入 top-k */
   function reasonText(r) {
@@ -1714,26 +1752,45 @@
       (toNum(d.elapsed_ms) !== null ? ' · 耗时 ' + num(d.elapsed_ms, 0) + 'ms' : '') +
       ' · 每 60 秒自动刷新');
 
-    /* --- 情绪温度 --- */
+    /* --- 情绪温度：三个市场分别算 --- */
+    // A 股用完整口径（涨跌家数+涨停+成交额分位），
+    // 港股/美股拿不到逐只家数，用主要指数涨跌做简化映射（界面会标注口径）。
+    const sb = d.sentiment_by_market || {};
+    const mkOrder = ['CN', 'HK', 'US'];
+    const mkNames = { CN: 'A股', HK: '港股', US: '美股' };
+
+    const tempRow = (mk) => {
+      const v = sb[mk] || {};
+      const ok = v.ok && v.temperature != null;
+      const tv = toNum(v.temperature);
+      const w = ok ? Math.max(2, Math.min(100, tv)) : 0;
+      return '<div style="padding:10px 0;border-bottom:1px solid var(--line,#26303f)">' +
+        '<div style="display:flex;justify-content:space-between;align-items:baseline">' +
+          '<span style="font-weight:600">' + esc(mkNames[mk] || mk) + '</span>' +
+          (ok
+            ? '<span><b class="big-num" style="font-size:22px">' + esc(num(tv, 1)) + '</b>' +
+              '<span class="unit" style="font-size:12px">/100</span> ' +
+              (v.level ? '<span class="tag info">' + esc(v.level) + '</span>' : '') + '</span>'
+            : '<span class="tag na">暂不计算</span>') +
+        '</div>' +
+        (ok
+          ? '<div class="temp-scale" style="margin-top:6px"><i style="width:' + w.toFixed(1) + '%"></i>' +
+            '<b style="left:25%"></b><b style="left:50%"></b><b style="left:75%"></b></div>'
+          : '') +
+        '<p class="muted" style="margin-top:5px;font-size:11px">' +
+          esc(v.basis || '') +
+          (!ok && v.reason ? ' · ' + esc(v.reason) : '') +
+        '</p>' +
+      '</div>';
+    };
+
     const tempCard = card({
-      title: '情绪温度', sub: 'sentiment.temperature · 0–100',
+      title: '情绪温度', sub: 'A股完整口径 · 港美股用指数简化',
       cls: tone.cls,
-      body:
-        '<div class="big-num">' + (tempOk ? esc(num(tempVal, 1)) : '—') +
-        (tempOk ? '<span class="unit">/100</span>' : '') + '</div>' +
-        '<div style="margin-top:4px">' +
-        (tempOk && sent.level ? '<span class="tag info">' + esc(sent.level) + '</span>' : '') +
-        (!tempOk ? '<span class="tag na">暂不计算</span>' : '') + '</div>' +
-        '<div class="temp-scale">' +
-        (tempOk ? '<i style="width:' + width.toFixed(1) + '%"></i>' : '') +
-        '<b style="left:25%"></b><b style="left:50%"></b><b style="left:75%"></b></div>' +
-        '<div class="temp-ticks"><span>0 冰点</span><span>25</span><span>50 中性</span><span>75</span><span>100 过热</span></div>' +
-        (!tempOk
-          ? '<p class="muted" style="margin-top:9px">' + esc(sent.reason || '历史样本不足，温度暂不可用') + '</p>'
-          : (sent.parts
-            ? '<p class="muted" style="margin-top:9px">分项（引擎原始值）：涨跌比 ' + num(sent.parts.up_ratio_pct, 2) +
-              ' · 涨停 ' + num(sent.parts.limit_up_pct, 2) + ' · 成交额 ' + num(sent.parts.amount_pct, 2) + '</p>'
-            : ''))
+      body: (Object.keys(sb).length
+        ? mkOrder.map(tempRow).join('')
+        : '<div class="big-num">' + (tempOk ? esc(num(tempVal, 1)) : '—') + '</div>' +
+          (!tempOk ? '<p class="muted">' + esc(sent.reason || '历史不足') + '</p>' : ''))
     });
 
     /* --- 涨停 / 成交额 --- */
@@ -2397,11 +2454,29 @@
     const _span = _dates.length
       ? _dates[0] + ' ~ ' + _dates[_dates.length - 1] + '（' + _dates.length + ' 个交易日）'
       : '—';
-    const PS = Number(S.filter.pageSize || 100);
+    // ---- 按「天」分页 ----
+    // 之前按行分页：默认按日期降序，最新一天正好 100 行占满第一页，
+    // 用户翻第一页永远只看到一个交易日 —— 加了分页和柱状图也没解决。
+    // 改成：每页固定 N 个交易日，每天最多 M 条。
+    const DAYS_PER_PAGE = 5;          // 每页几个交易日
+    const PER_DAY = Number(S.filter.perDay || 20);   // 每天最多几条
+
+    // 先按日期分组（rows 已按日期降序）
+    const byDay = [];
+    let curDay = null, bucket = null;
+    rows.forEach((r) => {
+      const d = String(r.as_of || '').slice(0, 10);
+      if (d !== curDay) { curDay = d; bucket = []; byDay.push([d, bucket]); }
+      if (bucket.length < PER_DAY) bucket.push(r);
+    });
+
     const total = rows.length;
-    const pages = Math.max(1, Math.ceil(total / PS));
+    const dayCount = byDay.length;
+    const pages = Math.max(1, Math.ceil(dayCount / DAYS_PER_PAGE));
     const page = Math.min(Math.max(1, Number(S.filter.page || 1)), pages);
-    const pageRows = rows.slice((page - 1) * PS, page * PS);
+    const slice = byDay.slice((page - 1) * DAYS_PER_PAGE, page * DAYS_PER_PAGE);
+    const pageRows = [].concat(...slice.map((x) => x[1]));
+    const shownDays = slice.map((x) => x[0]);
     setSub('共 ' + all.length + ' 条 · ' + _span + ' · 筛选后 ' + total + ' 条');
 
     // 日期分布条：每个交易日的条数，点一下筛选那天。
@@ -2460,15 +2535,29 @@
             { label: '结果', key: 'hit', render: verdictTag }
           ],
           rows: pageRows,
-          empty: emptyBox('没有匹配的记录', '试试放宽日期范围或清空代码搜索。')
+          rowClass: (r) => '',
+          empty: emptyBox('没有匹配的记录', '试试放宽日期范围或清空代码搜索。'),
+          // 在每天的第一行前面插入一条「日期小标题」
+          beforeRow: (r, idx, arr) => {
+            const d = String(r.as_of || '').slice(0, 10);
+            const prev = idx > 0 ? String(arr[idx - 1].as_of || '').slice(0, 10) : null;
+            if (d === prev) return '';
+            const n = byDay.find((x) => x[0] === d);
+            const cnt = n ? n[1].length : 0;
+            return '<tr class="day-sep"><td colspan="8">' + esc(d) +
+              '<span class="muted" style="margin-left:8px">' + cnt + ' 条（最多显示 ' +
+              PER_DAY + ' 条）</span></td></tr>';
+          }
         }) + '</div>' +
         '<div style="padding:0 16px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">' +
-          '<span class="muted">第 ' + page + ' / ' + pages + ' 页 · 共 ' + total + ' 条 · 每页 ' +
+          '<span class="muted">第 ' + page + ' / ' + pages + ' 页（每页 ' +
+            DAYS_PER_PAGE + ' 个交易日）· 共 ' + dayCount + ' 个交易日 / ' +
+            total + ' 条 · 每天最多 ' +
             '<select id="f-psize" style="margin:0 4px">' +
-            [50, 100, 200, 500].map(function (n) {
-              return '<option value="' + n + '"' + (PS === n ? ' selected' : '') + '>' + n + '</option>';
+            [10, 20, 50, 100].map(function (n) {
+              return '<option value="' + n + '"' + (PER_DAY === n ? ' selected' : '') + '>' + n + '</option>';
             }).join('') +
-            '</select></span>' +
+            '</select> 条</span>' +
           '<div class="segmented" id="f-page">' +
             '<button type="button" class="seg" data-pg="1">« 首页</button>' +
             '<button type="button" class="seg" data-pg="' + Math.max(1, page - 1) + '">‹ 上页</button>' +
@@ -3297,17 +3386,25 @@
 
     // ---- 交易费用（分市场，可编辑）----
     const FE = S.fees || {};
+    // 每个数值都是可直接编辑的输入框 —— 之前是静态文本，
+    // 界面上写着「佣金可改成你自己的费率」却根本点不了。
+    const feeInp = (mkt, field, v, step) =>
+      '<input class="fee-inp" type="number" step="' + (step || '0.001') + '"' +
+      ' data-mkt="' + esc(mkt) + '" data-field="' + field + '"' +
+      ' value="' + (v == null ? '' : v) + '" placeholder="—">';
+
     const feeRows = (FE.compare || []).map((r) => {
       const f = (FE.fees || {})[r.market] || {};
-      return '<tr><td>' + esc(r.name || r.market) + '</td>' +
+      const mkt = r.market;
+      return '<tr><td>' + esc(r.name || mkt) + '</td>' +
         '<td class="muted">' + esc(r.currency || '') + '</td>' +
-        '<td class="num">' + (f.commission_bps == null ? '—' : f.commission_bps) + '</td>' +
-        '<td class="num">' + (f.stamp_duty_bps == null ? '—' : f.stamp_duty_bps) +
-          (f.stamp_side === 'sell' ? '<span class="muted"> 卖出</span>' :
-           f.stamp_side === 'both' ? '<span class="muted"> 双边</span>' : '') + '</td>' +
-        '<td class="num">' + (f.transfer_bps == null ? '—' : f.transfer_bps) + '</td>' +
-        '<td class="num">' + (f.exchange_bps == null ? '—' : f.exchange_bps) + '</td>' +
-        '<td class="num">' + (f.regulator_bps == null ? '—' : f.regulator_bps) + '</td>' +
+        '<td class="num">' + feeInp(mkt, 'commission_bps', f.commission_bps, '0.1') + '</td>' +
+        '<td class="num">' + feeInp(mkt, 'stamp_duty_bps', f.stamp_duty_bps, '0.1') +
+          (f.stamp_side === 'sell' ? '<span class="muted" style="font-size:10px"> 卖</span>' :
+           f.stamp_side === 'both' ? '<span class="muted" style="font-size:10px"> 双</span>' : '') + '</td>' +
+        '<td class="num">' + feeInp(mkt, 'transfer_bps', f.transfer_bps) + '</td>' +
+        '<td class="num">' + feeInp(mkt, 'exchange_bps', f.exchange_bps) + '</td>' +
+        '<td class="num">' + feeInp(mkt, 'regulator_bps', f.regulator_bps) + '</td>' +
         '<td class="num ' + ((r.round_trip_bps || 0) > 20 ? 'is-down' : '') + '">' +
           (r.round_trip_bps == null ? '—' : r.round_trip_bps) + '</td></tr>';
     }).join('');
@@ -3740,7 +3837,7 @@
       });
       const psize = $('#f-psize');
       if (psize) psize.addEventListener('change', function () {
-        S.filter.pageSize = Number(psize.value) || 100;
+        S.filter.perDay = Number(psize.value) || 20;
         S.filter.page = 1;
         navigate('ledger', false);
       });
@@ -3796,7 +3893,7 @@
           toast('处理 ' + res.length + ' 个周期：' + acted + ' 个有动作' +
                 (noPicks ? '，' + noPicks + ' 个还没预测' : ''), 'ok');
           rerender();
-        } else toast('调仓失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+        } else toast('调仓失败：' + errText(r), 'err');
       });
       const rsb = $('#pa-reset');
       if (rsb) rsb.addEventListener('click', async () => {
@@ -3830,7 +3927,7 @@
                 Number(d.capital || 0).toLocaleString(), 'ok');
           rerender();
         } else {
-          toast('清空失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+          toast('清空失败：' + errText(r), 'err');
         }
       });
       const rb = $('#pa-rebal');
@@ -3849,7 +3946,7 @@
           toast('已调仓：' + o.length + ' 笔' + (sk.length ? '，跳过 ' + sk.length + ' 只' : ''), 'ok');
           rerender();
         } else {
-          toast('调仓失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+          toast('调仓失败：' + errText(r), 'err');
         }
       });
       $$('[data-goto]').forEach((a) => a.addEventListener('click', () => {
@@ -3902,6 +3999,27 @@
     }
 
     if (id === 'settings') {
+      // 费用表单元格直接编辑：改完失焦即保存
+      // 之前界面上写着「佣金可改成你自己的费率」，但单元格是静态文本点不了。
+      $$('.fee-inp').forEach(function (inp) {
+        inp.addEventListener('change', async function () {
+          const mkt = inp.getAttribute('data-mkt');
+          const field = inp.getAttribute('data-field');
+          const val = inp.value === '' ? null : Number(inp.value);
+          if (val !== null && (!isFinite(val) || val < 0)) {
+            toast('费率必须是非负数', 'err'); return;
+          }
+          const patch = {}; patch[field] = val;
+          inp.disabled = true;
+          const r = await api('/api/fees/save', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ market: mkt, patch: patch })
+          });
+          inp.disabled = false;
+          if (r && r.ok) { toast(mkt + ' 费率已保存', 'ok'); rerender(); }
+          else { toast('保存失败：' + errText(r), 'err'); }
+        });
+      });
       const tk = $('#set-token');
       if (tk) {
         tk.value = getToken();

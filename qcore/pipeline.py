@@ -135,6 +135,12 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
         edge[str(hh)] = AN.edge_report(res["scores"], p3d.RET[hh].T, res["dates"],
                                        h=hh, n_trials=S)
     eq_cmp = AN.compare_learned_vs_equal(res, res_eq, p3d, horizon)
+    # 学习器无效时给出具体原因（不是只说「无显著差异」）
+    try:
+        eq_cmp["diagnosis"] = AN.diagnose_learner(res, res_eq, p3d, h=horizon,
+                                                   cmp=eq_cmp, sensitivity=False)
+    except Exception as _e:  # noqa: BLE001
+        eq_cmp["diagnosis"] = {"ok": False, "reason": str(_e)[:80]}
 
     meta = MT.learn_meta(res["scores_TN"], p3d.RET[horizon], horizon, warmup=cfg.warmup)
     meta_cmp = MT.compare_raw_vs_meta(res["scores_TN"], p3d.RET[horizon], meta)

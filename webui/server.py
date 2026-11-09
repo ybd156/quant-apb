@@ -755,15 +755,9 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def _post_account_config(self):
         """更新模拟账户配置：只允许内网或带 X-Token。"""
-        expected = os.environ.get("APB_TOKEN", "")
-        given = self.headers.get("X-Token") or ""
-        if expected:
-            if not hmac.compare_digest(given, expected):
-                return self._fail("unauthorized", 403, hint="X-Token 不匹配")
-        else:
-            client = (self.client_address or ("", 0))[0]
-            if not self._is_internal():
-                return self._fail("forbidden", 403, hint="未设 APB_TOKEN 时只允许内网修改")
+        denied = self._write_allowed()
+        if denied is not None:
+            return denied
         body, err = self._read_body()
         if err:
             return self._fail(err, 400)
@@ -925,7 +919,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._fail(err if err != "not_ready" else (berr or "not_ready"),
                                   200, file=name)
         payload = {"rows": rows[:limit], "n": len(rows)}
-        for key in ("as_of", "top_k", "hold_days", "note", "generated_at"):
+        # 这个白名单必须和 picks.json 里写入的字段保持同步。
+        # 实测踩过：live_model 写了 market/horizon/horizon_label，
+        # 但白名单没放行 -> API 返回 None -> UI 显示「周期 —」。
+        # 这就是「只改写入方、没改读取方」，AGENTS.md §7.5 规则五。
+        for key in ("as_of", "top_k", "hold_days", "note", "generated_at",
+                    "market", "horizon", "horizon_label", "model_age_days",
+                    "event_adjust"):
             if isinstance(meta, dict) and key in meta:
                 payload[key] = meta[key]
         return self._ok(payload)

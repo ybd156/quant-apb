@@ -1088,3 +1088,14 @@ select { cursor: pointer; }
 #upd-fill { box-shadow: 0 0 8px rgba(74,125,255,.5); }
 .err-text { color: #ff6b6b; }
 .warn-text { color: #f0b429; }
+
+/* 台账日期分隔行 */
+.day-sep td { background: var(--surface-2, #151c2b); font-weight: 600;
+  font-size: 12px; padding: 6px 10px !important; border-top: 2px solid var(--line, #26303f); }
+
+/* 费用表可编辑单元格 */
+.fee-inp { width: 64px; background: transparent; border: 1px solid transparent;
+  border-radius: 4px; color: inherit; font: inherit; text-align: right; padding: 2px 4px; }
+.fee-inp:hover { border-color: var(--line, #2a3444); background: var(--surface-3, #1c2434); }
+.fee-inp:focus { outline: none; border-color: var(--brand, #4a7dff);
+  background: var(--surface-3, #1c2434); }

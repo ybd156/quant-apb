@@ -159,13 +159,19 @@ def sentiment_temperature(up_ratio: float, limit_up: int, amount_yi: float) -> D
     """
     hist = _load_history()
     if len(hist) < 20:
-        return {"ok": False, "reason": f"历史样本 {len(hist)} < 20，暂不计算温度",
+        need = 20 - len(hist)
+        return {"ok": False,
+                "reason": f"历史样本 {len(hist)} 个交易日，还差 {need} 天才能算分位",
+                "need_days": need, "have_days": len(hist),
                 "temperature": None}
     # 去重后仍无变化 -> 分位无意义（例如采集到的都是同一时刻的重复快照）
     _u = {round(float(h.get("up_ratio") or 0), 6) for h in hist}
     if len(_u) < 5:
         return {"ok": False,
-                "reason": f"历史值几乎无变化（{len(_u)} 个不同取值），分位不可用",
+                "reason": f"历史 {len(hist)} 条里有 {len(_u)} 个不同取值 —— "
+                          f"说明记录的是同一天的重复快照（已修复按天去重，"
+                          f"接下来每交易日会累积 1 条）",
+                "distinct": len(_u), "have_days": len(hist),
                 "temperature": None}
     p1 = _pct_rank([h.get("up_ratio") for h in hist], up_ratio)
     p2 = _pct_rank([h.get("limit_up") for h in hist], limit_up)
@@ -201,10 +207,50 @@ def _load_history() -> List[Dict]:
 
 
 def _append_history(rec: Dict) -> None:
+    """
+    按「天」去重追加。
+
+    ## 为什么要去重
+
+    采集是 60 秒一次，一天下来几百条**同一交易日的快照**。
+    情绪温度用「历史分位」，但这几百条的 up_ratio 几乎一模一样，
+    去重后只有 1-2 个不同取值 -> 分位算不出来 -> 永远显示「暂不计算」。
+
+    实测就是这个问题：历史里有 400 多条，但不同取值不到 5 个。
+
+    改成：同一天只保留**最新一条**（收盘附近的最有代表性）。
+    """
     try:
         os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
-        with open(HISTORY_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        day = str(rec.get("as_of") or "")[:10]
+        if not day:
+            return
+
+        # 读现有，替换同一天的
+        rows = []
+        if os.path.exists(HISTORY_PATH):
+            try:
+                with open(HISTORY_PATH, encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if str(d.get("as_of") or "")[:10] != day:
+                            rows.append(d)
+            except Exception:
+                rows = []
+        rows.append(rec)
+        rows = rows[-400:]        # 只留最近 400 个交易日
+
+        tmp = HISTORY_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for d in rows:
+                f.write(json.dumps(d, ensure_ascii=False) + "\n")
+        os.replace(tmp, HISTORY_PATH)
     except Exception:
         pass
 
@@ -227,9 +273,45 @@ def refresh(write: bool = True) -> Dict:
     limit_up = lu.get("limit_up") if lu.get("ok") else None
     temp = sentiment_temperature(up_ratio, limit_up, amount_yi)
 
+    # ---- 分市场情绪温度 ----
+    # A 股用完整口径（涨跌家数 + 涨停 + 成交额分位）；
+    # 港股/美股拿不到逐只涨跌家数，用**主要指数涨跌**做简化温度，
+    # 并明确标注口径，不假装和 A 股一样精确。
+    by_market = {}
+    try:
+        cn_temp = temp
+        by_market["CN"] = {"market": "CN", "name": "A股",
+                           "temperature": cn_temp.get("temperature"),
+                           "level": cn_temp.get("level"),
+                           "basis": "涨跌家数+涨停+成交额分位",
+                           "ok": bool(cn_temp.get("ok")),
+                           "reason": cn_temp.get("reason")}
+
+        for mk, idx_code, label in (("HK", "HSI", "港股"), ("US", "SPX", "美股")):
+            row = next((r for r in idx.get("rows", [])
+                        if str(r.get("code")) == idx_code), None)
+            if not row or row.get("chg_pct") is None:
+                by_market[mk] = {"market": mk, "name": label, "ok": False,
+                                 "temperature": None, "basis": "指数涨跌",
+                                 "reason": f"取不到 {idx_code} 指数"}
+                continue
+            chg = float(row.get("chg_pct") or 0)
+            # 简化映射：-3% -> 0，0 -> 50，+3% -> 100，超出截断
+            t = max(0.0, min(100.0, 50.0 + chg / 3.0 * 50.0))
+            lv = ("过热" if t >= 80 else "偏热" if t >= 60 else
+                  "中性" if t >= 40 else "偏冷" if t >= 20 else "冰点")
+            by_market[mk] = {"market": mk, "name": label, "ok": True,
+                             "temperature": round(t, 1), "level": lv,
+                             "chg_pct": chg, "basis": "主要指数涨跌（简化口径）",
+                             "note": "没有逐只涨跌家数，用指数±3% 线性映射"}
+    except Exception as _e:  # noqa: BLE001
+        by_market = {"CN": {"market": "CN", "ok": False,
+                            "reason": str(_e)[:60]}}
+
     payload = {
         "as_of": datetime.now().astimezone().isoformat(timespec="seconds"),
         "indices": idx.get("rows", []),
+        "sentiment_by_market": by_market,
         "breadth": {"up": up, "down": down, "flat": br.get("flat", 0),
                     "up_ratio": round(up_ratio, 4) if up_ratio is not None else None,
                     "by_market": br.get("by_market")},

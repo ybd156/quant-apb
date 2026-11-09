@@ -36,6 +36,7 @@ import os
 import shutil
 import tarfile
 import time
+import urllib.error
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -128,6 +129,29 @@ def _free_gb(path: str) -> float:
             return 999.0
 
 
+def _token() -> str:
+    """
+    取访问 NAS 用的 token。优先级：
+      1. 环境变量 APB_TOKEN
+      2. apb_defaults.json 里的 token 字段
+    """
+    t = os.environ.get("APB_TOKEN", "").strip()
+    if t:
+        return t
+    for root in (ROOT, os.path.join(ROOT, "tools")):
+        pj = os.path.join(root, "apb_defaults.json")
+        if os.path.isfile(pj):
+            try:
+                with open(pj, encoding="utf-8") as f:
+                    d = json.load(f) or {}
+                t = str(d.get("token") or d.get("nas_token") or "").strip()
+                if t:
+                    return t
+            except Exception:
+                pass
+    return ""
+
+
 def _mirror_urls() -> list:
     """
     下载源，按优先级：
@@ -192,6 +216,12 @@ def download(verbose: bool = True) -> Dict:
         print(f"    {len(candidates)} 个下载源，依次尝试", flush=True)
 
     for src_url in candidates:
+      # 每个源开始前重新读本地文件大小：416 之后 have 可能是旧的，
+      # 而且不同源（全量 vs 精简包）大小差 10 倍，不能共用 have
+      try:
+          have = os.path.getsize(TARBALL) if os.path.isfile(TARBALL) else 0
+      except Exception:
+          have = 0
       if verbose:
           print(f"    -> {src_url[:70]}", flush=True)
       for attempt in range(3):
@@ -202,6 +232,14 @@ def download(verbose: bool = True) -> Dict:
             try:
                 import urllib.request
                 headers = {"User-Agent": "apb", "Accept": "application/octet-stream"}
+                # NAS 上的 /api/data/qlib 需要鉴权（服务设了 APB_PASSWORD 后
+                # 所有非公开端点都要求登录或 token）。训练机用 token 访问。
+                # 实测：不带 token 直接 401，请求立刻失败，**没有任何下载流量**，
+                # 用户以为是"没连上"，其实是鉴权挡住了。
+                _tk = _token()
+                if _tk:
+                    headers["X-APB-Token"] = _tk
+                    headers["X-Token"] = _tk
                 if have > 0:
                     headers["Range"] = f"bytes={have}-"
                 req = urllib.request.Request(src_url, headers=headers)
@@ -229,6 +267,30 @@ def download(verbose: bool = True) -> Dict:
                             "seconds": round(time.time() - t0)}
                 have = size
                 mode_used = mode
+            except urllib.error.HTTPError as e:  # noqa: F821
+                # 416 = 请求的 Range 起点 >= 远端文件大小。
+                # 这说明**本地文件已经下载完整了**，不是错误。
+                #
+                # 实测踩过：TARBALL 已是最新的 571MB，但代码每次都拿它的大小
+                # 去发 Range 续传 -> 每次 416 -> 重试 3 次 -> 判定 download_failed。
+                # 明明下好了却报失败，然后回退到 GitHub（也不通），最后整个同步失败。
+                if getattr(e, "code", 0) == 416:
+                    try:
+                        size = os.path.getsize(TARBALL)
+                    except Exception:
+                        size = 0
+                    if size > 20 * 1024 * 1024:
+                        if verbose:
+                            print(f"    416 -> 本地已有完整文件 {size/1e6:.0f} MB，"
+                                  f"跳过下载", flush=True)
+                        return {"ok": True, "bytes": size, "mode": mode,
+                                "url": src_url, "reused": True,
+                                "seconds": round(time.time() - t0)}
+                if verbose:
+                    print(f"    {mode} HTTP {getattr(e, 'code', '?')}: "
+                          f"{str(e)[:60]}", flush=True)
+                time.sleep(1 + attempt)
+                continue
             except Exception as e:  # noqa: BLE001
                 if verbose:
                     print(f"    {mode} 下载失败(第{attempt+1}次): "
@@ -293,14 +355,29 @@ def sync(force: bool = False, verbose: bool = True) -> Dict:
     out = {"checked_at": _now(), "local_date": local, "remote_tag": remote,
            "synced_at": stamp.get("synced_at")}
 
+    # 关键：remote_tag() 只查 GitHub。国内拿不到时它是 None，
+    # 但**不能因此就放弃下载** —— 本地没数据时那是唯一机会。
+    #
+    # 实测踩过：训练机报 `remote_unreachable`，而 NAS 下载源明明是通的，
+    # 因为这一行在 download() 之前就 return 了，多源回退根本没执行。
     if remote is None:
-        out.update({"ok": False, "reason": "remote_unreachable",
-                    "hint": "GitHub 不可达，检查代理（qcore.net.status()）"})
-        _atomic(STAMP, {**stamp, **out})
-        return out
+        if local:
+            # 本地有数据：保守跳过，不白下 44MB
+            out.update({"ok": True, "action": "skip",
+                        "reason": "remote_version_unknown_but_local_exists",
+                        "hint": "查不到远端版本（GitHub 不可达），本地已有数据 "
+                                f"{local}，跳过。要强制更新用 --force"})
+            _atomic(STAMP, {**stamp, **out})
+            if verbose:
+                print(f"[data_sync] 远端版本未知，本地已有 {local}，跳过下载", flush=True)
+            return out
+        # 本地没数据：必须继续尝试多源下载，不能因为查不到版本就卡死
+        if verbose:
+            print("[data_sync] 远端版本未知（GitHub 不可达），"
+                  "本地无数据 —— 直接尝试多源下载", flush=True)
 
     # 远端 tag 形如 2026-11-08，与本地日历最后一天比
-    if not force and local and remote <= local:
+    if remote and not force and local and remote <= local:
         out.update({"ok": True, "action": "skip", "reason": "already_latest"})
         _atomic(STAMP, {**stamp, **out})
         if verbose:
@@ -308,7 +385,7 @@ def sync(force: bool = False, verbose: bool = True) -> Dict:
         return out
 
     if verbose:
-        print(f"[data_sync] 需要更新：本地 {local or '无'} / 远端 {remote}", flush=True)
+        print(f"[data_sync] 需要更新：本地 {local or '无'} / 远端 {remote or '未知'}", flush=True)
     d = download(verbose=verbose)
     if not d.get("ok"):
         out.update({"ok": False, "reason": d.get("reason"), "download": d})

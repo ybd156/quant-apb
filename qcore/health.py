@@ -47,13 +47,28 @@ def _register():
     from .data import _get_json  # noqa: F401
 
     def probe_kline():
+        """
+        探测东财 K 线。
+
+        两个必须项（实测）：
+          1. **必须带 end 参数**。不带时东财返回 {"rc":102,"data":null}，
+             即使 lmt 给了也返回空 —— 探测会误报「源挂了」，其实源是好的。
+          2. UA 用浏览器串。用 "apb" 这种短 UA 会被当成爬虫。
+        """
         import urllib.request
         u = ("https://push2his.eastmoney.com/api/qt/stock/kline/get"
-             "?secid=1.600519&fields1=f1&fields2=f51,f53&klt=101&fqt=2&lmt=5")
+             "?secid=1.600519&fields1=f1,f2,f3,f4,f5,f6"
+             "&fields2=f51,f52,f53,f54,f55,f56,f57"
+             "&klt=101&fqt=2&beg=20240101&end=20500101&lmt=5")
         r = urllib.request.urlopen(urllib.request.Request(
-            u, headers={"User-Agent": "apb"}), timeout=8)
+            u, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                       "AppleWebKit/537.36 Chrome/120 Safari/537.36"}), timeout=10)
         d = json.loads(r.read().decode("utf-8", "replace"))
-        n = len(((d.get("data") or {}).get("klines") or []))
+        data = d.get("data") or {}
+        n = len(data.get("klines") or [])
+        if n == 0:
+            rc = d.get("rc")
+            raise RuntimeError(f"eastmoney rc={rc} klines=0")
         return n > 0
 
     def probe_index():
