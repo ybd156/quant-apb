@@ -199,9 +199,38 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
                      "score": round(float(score[j]), 6),
                      "weight": round(1.0 / len(order), 4)})
 
+    # ---- 事件调整：用近期事件 + 历史命中率调权重（拿不到就跳过，不影响主流程）----
+    ev_info = None
+    try:
+        from .reward import event_adjust
+        from .data import get_pool as _gp
+        _pool = _gp(top_n=1200)
+        _sec = {str(r.code).zfill(6): str(getattr(r, "industry", "") or "")
+                for r in _pool.itertuples(index=False)}
+        _w = {str(x["code"]): float(x["weight"]) for x in rows}
+        _adj = event_adjust(_w, _sec)
+        if _adj.get("applied"):
+            for x in rows:
+                m = (_adj["multipliers"] or {}).get(str(x["code"]), 1.0)
+                x["event_mult"] = m
+                x["weight_before_event"] = x["weight"]
+                x["weight"] = round(float((_adj["weights"] or {}).get(str(x["code"]), x["weight"])), 4)
+            ev_info = {"n_events": _adj.get("n_events_used"),
+                       "sector_net": _adj.get("sector_net"),
+                       "top_sectors": _adj.get("top_sectors"),
+                       "n_changed": len(_adj.get("changed") or []),
+                       "has_confidence": _adj.get("has_confidence"),
+                       "summary": _adj.get("summary")}
+        else:
+            ev_info = {"n_events": 0, "summary": _adj.get("summary")}
+    except Exception as e:  # noqa: BLE001
+        ev_info = {"error": f"{type(e).__name__}: {str(e)[:80]}"}
+
     payload = {"as_of": str(dates[last].date()), "rows": rows, "n": len(rows),
                "top_k": top_k, "model_age_days": round(model_age_days() or 0, 1),
-               "note": "实时打分（模型未重训时用最近一次保存的模型）"}
+               "event_adjust": ev_info,
+               "note": "实时打分（模型未重训时用最近一次保存的模型）；"
+                       "weight 已含事件调整，weight_before_event 是调整前"}
     os.makedirs(STATE, exist_ok=True)
     tmp = os.path.join(STATE, "picks.json.tmp")
     with open(tmp, "w", encoding="utf-8") as f:

@@ -259,3 +259,157 @@ def reward_report(scorecard: pd.DataFrame, pos: Dict, trust: Dict,
     L.append("> 罚得比奖得快（penalty_lr=0.30 vs reward_lr=0.10）：")
     L.append("> 亏损不可逆，一次侥幸大赚不该掩盖长期无能。")
     return "\n".join(L)
+
+
+# ------------------------------------------------------------------ 事件调整
+def event_adjust(stock_weights: Dict[str, float],
+                 sector_of: Dict[str, str],
+                 events: Optional[List[Dict]] = None,
+                 lookback_days: int = 10,
+                 scale: float = 0.05,
+                 max_mult: float = 1.30,
+                 min_mult: float = 0.70,
+                 verbose: bool = False) -> Dict:
+    """
+    按「近期事件 × 历史命中率」调整个股权重。
+
+    ## 为什么这样设计
+
+    `event_learning` 算出了每类事件的历史命中率：
+      · policy|银行  69% → 这类事件的利好判断值得信
+      · policy|医药   0% → 这类事件的方向判断是反的
+
+    但命中率只是"知道"，不落到仓位上就等于没用。
+    本函数把它变成**每只股票的权重乘数**：
+
+        net_sector = Σ (direction_i × confidence(type_i, sector) × decay_i)
+        mult_stock = clip(1 + net_sector × scale, min_mult, max_mult)
+
+    ## 三个关键约束
+
+    1. **只用已发生的、有方向的事件**（direction=0 的不参与）
+    2. **按时间衰减**：越老的事件影响越小（半衰期 lookback_days/2）
+    3. **乘数有上下限**：单只最多 ±30%，防止事件盖过模型信号
+    4. **scale=0.05 不是 0.30**：一条 direction=1、confidence=1.0 的事件 net≈1.0，
+       scale=0.30 会直接顶到 +30% 上限——一条新闻不该有这么大权重。
+       0.05 意味着单条 +5%，要三条同向事件叠加才到 +15%，上限 ±30% 兜底。
+
+    ## 参数
+    stock_weights : {code: 权重}（应已归一化）
+    sector_of     : {code: 行业名}
+    events        : 事件列表（None 时从 events.json 读）
+    lookback_days : 只看最近 N 天的事件
+
+    ## 返回
+    {"weights", "multipliers", "sector_net", "applied", "summary"}
+    """
+    import json as _json
+    import os as _os
+    from datetime import datetime as _dt, timedelta as _td
+
+    if not stock_weights:
+        return {"ok": False, "reason": "empty_weights"}
+
+    # ---- 1) 取事件 ----
+    if events is None:
+        events = []
+        p = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                          "data", "state", "events.json")
+        try:
+            with open(p, encoding="utf-8") as f:
+                d = _json.load(f)
+            events = list(d.get("live") or []) + list(d.get("rows") or [])
+        except Exception:
+            events = []
+
+    # ---- 2) 取历史命中率（拿不到就全部按 1.0）----
+    try:
+        from . import event_learning as EL
+        conf_cache: Dict[str, float] = {}
+
+        def _conf(t: str, s: str) -> float:
+            k = f"{t}|{s}"
+            if k not in conf_cache:
+                conf_cache[k] = float(EL.confidence(t, s))
+            return conf_cache[k]
+        has_conf = True
+    except Exception:
+        def _conf(t: str, s: str) -> float:  # type: ignore[misc]
+            return 1.0
+        has_conf = False
+
+    # ---- 3) 按板块聚合净信号 ----
+    cutoff = _dt.now().date() - _td(days=lookback_days)
+    half = max(1.0, lookback_days / 2.0)
+    sector_net: Dict[str, float] = {}
+    used: List[Dict] = []
+
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        d = e.get("direction")
+        try:
+            d = int(d)
+        except Exception:
+            continue
+        if d == 0:
+            continue
+        ds = str(e.get("date") or "")[:10]
+        try:
+            age = (_dt.strptime(ds, "%Y-%m-%d").date() - cutoff).days
+        except Exception:
+            continue
+        if age < 0:
+            continue                                  # 太老
+        decay = 0.5 ** (max(0.0, (lookback_days - age)) / half)
+        for s in (e.get("sectors") or []):
+            c = _conf(str(e.get("type")), str(s))
+            v = d * c * decay
+            sector_net[s] = sector_net.get(s, 0.0) + v
+            used.append({"date": ds, "type": e.get("type"), "sector": s,
+                         "direction": d, "confidence": round(c, 3),
+                         "decay": round(decay, 3), "contrib": round(v, 4)})
+
+    if not sector_net:
+        return {"ok": True, "weights": dict(stock_weights),
+                "multipliers": {c: 1.0 for c in stock_weights},
+                "sector_net": {}, "applied": False,
+                "summary": f"最近 {lookback_days} 天没有带方向的事件，权重不变"}
+
+    # ---- 4) 算每只股票的乘数 ----
+    mults: Dict[str, float] = {}
+    for code in stock_weights:
+        sec = sector_of.get(code) or ""
+        net = 0.0
+        if sec:
+            # 精确匹配 + 模糊匹配（事件板块名可能与行业名不完全一致）
+            for k, v in sector_net.items():
+                if k == sec or k in sec or sec in k:
+                    net += v
+        m = float(np.clip(1.0 + net * scale, min_mult, max_mult))
+        mults[code] = round(m, 4)
+
+    # ---- 5) 应用并重新归一 ----
+    raw = {c: float(w) * mults[c] for c, w in stock_weights.items()}
+    tot = sum(raw.values())
+    final = {c: (v / tot if tot > 0 else 0.0) for c, v in raw.items()}
+
+    changed = [{"code": c, "mult": mults[c]} for c in mults if abs(mults[c] - 1.0) > 1e-6]
+    changed.sort(key=lambda x: -abs(x["mult"] - 1.0))
+    top_sec = sorted(sector_net.items(), key=lambda x: -abs(x[1]))[:5]
+
+    return {
+        "ok": True, "weights": final, "multipliers": mults,
+        "sector_net": {k: round(v, 4) for k, v in sector_net.items()},
+        "applied": bool(changed),
+        "has_confidence": has_conf,
+        "n_events_used": len(used),
+        "top_sectors": [{"sector": k, "net": round(v, 4)} for k, v in top_sec],
+        "changed": changed[:10],
+        "summary": (
+            f"用最近 {lookback_days} 天 {len(used)} 条事件调整权重："
+            f"{len(changed)}/{len(stock_weights)} 只被调整"
+            + (f"，最强板块 {top_sec[0][0]}({top_sec[0][1]:+.2f})" if top_sec else "")
+            + ("（未接入历史命中率，全部按 1.0）" if not has_conf else "")
+        ),
+    }
