@@ -62,16 +62,30 @@ POLICY_KW = [
     ("IPO", 1), ("注册制", 2), ("退市", 2), ("减持新规", 3), ("分红", 1),
     ("市值管理", 2), ("并购重组", 2), ("专项债", 2), ("国债", 1),
     ("政策", 1), ("监管", 1), ("试点", 1), ("指导意见", 2), ("征求意见", 1),
+    # --- 英文（国外源用）---
+    ("Fed ", 3), ("Federal Reserve", 3), ("FOMC", 3), ("rate cut", 3),
+    ("rate hike", 3), ("Treasury", 2), ("SEC ", 2), ("stimulus", 3),
+    ("regulation", 1), ("regulator", 2), ("subsidy", 2), ("bailout", 3),
+    ("central bank", 2), ("policy", 1), ("bill ", 1), ("congress", 2),
 ]
 MACRO_KW = [
     ("CPI", 3), ("PPI", 3), ("GDP", 3), ("PMI", 3), ("社融", 3),
     ("M2", 2), ("出口", 1), ("进口", 1), ("失业率", 2), ("工业增加值", 2),
     ("固定资产投资", 2), ("社零", 2), ("非农", 3), ("通胀", 2),
+    # --- 英文 ---
+    ("CPI", 3), ("PPI", 3), ("GDP", 3), ("PMI", 3), ("nonfarm", 3),
+    ("payrolls", 3), ("inflation", 3), ("unemployment", 2), ("jobless", 2),
+    ("retail sales", 2), ("earnings season", 1), ("yield", 1),
 ]
 GEO_KW = [
     ("美联储", 3), ("关税", 3), ("制裁", 3), ("贸易战", 3), ("出口管制", 3),
     ("俄乌", 2), ("中东", 2), ("台海", 3), ("北约", 2), ("欧盟", 1),
     ("白宫", 2), ("特朗普", 2), ("拜登", 2), ("美联储主席", 2),
+    # --- 英文 ---
+    ("sanction", 3), ("tariff", 3), ("trade war", 3), ("export control", 3),
+    ("White House", 2), ("Trump", 2), ("NATO", 2), ("OPEC", 2),
+    ("election", 2), ("midterm", 2), ("geopolitic", 3), ("war", 1),
+    ("China trade", 3), ("chip ban", 3),
 ]
 COMPANY_KW = [
     ("业绩", 1), ("预告", 2), ("回购", 2), ("增持", 2), ("减持", 2),
@@ -83,12 +97,20 @@ BULL_KW = [
     ("鼓励", 1), ("增持", 2), ("回购", 2), ("超预期", 2), ("回暖", 2),
     ("涨停", 1), ("创新高", 2), ("利好", 3), ("放宽", 2), ("刺激", 2),
     ("减税", 2), ("补贴", 2), ("提速", 1), ("扩大", 1),
+    # --- 英文 ---
+    ("surge", 2), ("rally", 2), ("beat", 2), ("record high", 2),
+    ("upgrade", 2), ("bullish", 3), ("optimism", 2), ("rebound", 2),
+    ("rate cut", 3), ("stimulus", 2), ("growth", 1),
 ]
 BEAR_KW = [
     ("加息", 3), ("上调", 1), ("收紧", 2), ("制裁", 3), ("关税", 2),
     ("减持", 2), ("低于预期", 2), ("下滑", 1), ("亏损", 2), ("立案", 3),
     ("处罚", 2), ("跌停", 1), ("创新低", 2), ("利空", 3), ("退市", 2),
     ("暂停", 1), ("调查", 2), ("违约", 3),
+    # --- 英文 ---
+    ("plunge", 3), ("slump", 2), ("selloff", 3), ("miss", 2),
+    ("downgrade", 2), ("bearish", 3), ("recession", 3), ("layoff", 3),
+    ("bankruptcy", 3), ("default", 3), ("crash", 3), ("tariff", 2),
 ]
 
 # 板块关键词 -> 标准板块名
@@ -214,6 +236,113 @@ def fetch_wallstcn(limit: int = 30) -> List[Dict]:
     return out
 
 
+def _parse_rss(xml: str, source: str, limit: int = 30) -> List[Dict]:
+    """
+    极简 RSS/Atom 解析（正则，不引第三方库）。
+    只取 <item>/<entry> 的 title/link/pubDate，够用即可。
+    """
+    out = []
+    blocks = re.findall(r"<(?:item|entry)[^>]*>(.*?)</(?:item|entry)>", xml, re.S | re.I)
+    for b in blocks[:limit]:
+        def pick(tag):
+            m = re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", b, re.S | re.I)
+            if not m:
+                return ""
+            v = m.group(1)
+            v = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"", v, flags=re.S)
+            v = re.sub(r"<[^>]+>", "", v)
+            return v.strip()
+        title = pick("title")
+        link = pick("link") or ""
+        if not link:
+            m = re.search(r'<link[^>]*href="([^"]+)"', b, re.I)
+            link = m.group(1) if m else ""
+        date = pick("pubDate") or pick("published") or pick("updated")
+        if not title:
+            continue
+        out.append({"id": link or title[:20], "source": source,
+                    "title": title[:160], "digest": pick("description")[:300],
+                    "time": _norm_time(date), "url": link})
+    return out
+
+
+def _norm_time(s: str) -> str:
+    """把 RSS 的时间格式统一成 YYYY-MM-DD HH:MM:SS。失败则原样返回。"""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    fmts = ("%a, %d %b %Y %H:%M:%S %z", "%a, %d %b %Y %H:%M:%S %Z",
+            "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S")
+    for f in fmts:
+        try:
+            return datetime.strptime(s, f).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            continue
+    return s[:19]
+
+
+def fetch_sina(limit: int = 30) -> List[Dict]:
+    """新浪财经 7×24。"""
+    url = ("https://zhibo.sina.com.cn/api/zhibo/feed"
+           f"?page=1&page_size={limit}&zhibo_id=152&tag_id=0&dire=f&dpc=1")
+    try:
+        d = json.loads(_get(url))
+    except Exception:
+        return []
+    feed = (((d.get("result") or {}).get("data") or {}).get("feed") or {})
+    lst = feed.get("list") or []
+    out = []
+    for x in lst:
+        t = str(x.get("rich_text") or x.get("content") or "").strip()
+        t = re.sub(r"<[^>]+>", "", t)
+        if not t:
+            continue
+        out.append({"id": str(x.get("id") or t[:20]), "source": "sina",
+                    "title": t[:160], "digest": "",
+                    "time": str(x.get("create_time") or ""), "url": ""})
+    return out
+
+
+def fetch_xueqiu(limit: int = 20) -> List[Dict]:
+    """雪球热帖（HTML 里嵌 JSON）。"""
+    try:
+        b = _get("https://xueqiu.com/statuses/hot/listV2.json?since_id=-1&max_id=-1&size=20")
+        d = json.loads(b)
+    except Exception:
+        return []
+    out = []
+    for x in (d.get("items") or [])[:limit]:
+        t = str(x.get("title") or x.get("description") or "").strip()
+        t = re.sub(r"<[^>]+>", "", t)
+        if not t:
+            continue
+        out.append({"id": str(x.get("id") or t[:20]), "source": "xueqiu",
+                    "title": t[:160], "digest": "", "time": "",
+                    "url": "https://xueqiu.com" + str(x.get("target") or "")})
+    return out
+
+
+def fetch_rss_sources(limit: int = 25) -> List[Dict]:
+    """
+    国外 RSS 源。**只列实测在 NAS 上能通的**：
+      CNBC / MarketWatch / ECB —— 这三条已探活
+      Reuters / FT / GoogleNews / Investing 在 NAS 上网络不可达，不列。
+    """
+    feeds = [
+        ("cnbc", "https://www.cnbc.com/id/100003114/device/rss/rss.html"),
+        ("marketwatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+        ("ecb", "https://www.ecb.europa.eu/rss/press.html"),
+    ]
+    out = []
+    for name, url in feeds:
+        try:
+            xml = _get(url, timeout=10)
+        except Exception:
+            continue
+        out.extend(_parse_rss(xml, name, limit))
+    return out
+
+
 def _dedupe(items: List[Dict]) -> List[Dict]:
     """同一条新闻两个源都有 -> 保留先出现的。key 用标题前 20 字。"""
     seen, out = set(), []
@@ -228,16 +357,29 @@ def _dedupe(items: List[Dict]) -> List[Dict]:
 
 def refresh(limit_em: int = 50, limit_wscn: int = 30, verbose: bool = True) -> Dict:
     """抓取 + 分类 + 落盘。"""
-    raw = fetch_eastmoney(limit_em) + fetch_wallstcn(limit_wscn)
+    raw = (fetch_eastmoney(limit_em) + fetch_wallstcn(limit_wscn)
+           + fetch_sina(limit_em) + fetch_xueqiu(limit_wscn)
+           + fetch_rss_sources(limit_wscn))
     if not raw:
         return {"ok": False, "reason": "all_sources_failed"}
     items = _dedupe(raw)
 
     rows = []
+    dropped_irrelevant = 0
     for it in items:
         c = classify(it.get("title", ""), it.get("digest", ""))
-        if c["type"] == "other" and c["direction"] == 0:
-            continue          # 无信息量的不进事件流
+        # 相关性过滤：三条至少满足一条才进事件流，否则是噪音
+        #   ① 有明确方向（利好/利空）
+        #   ② 是政策或宏观（天然与市场相关）
+        #   ③ 命中了 A 股板块
+        # 实测动机：CNBC 的「Trump offers UFC chief a job」会被判成 geopolitics，
+        # 但对 A 股毫无意义，必须挡掉。
+        relevant = (c["direction"] != 0
+                    or c["type"] in ("policy", "macro")
+                    or bool(c["sectors"]))
+        if not relevant:
+            dropped_irrelevant += 1
+            continue
         rows.append({
             "eid": f"LIVE-{it['id']}"[:40],
             "date": (it.get("time") or "")[:10] or str(datetime.now().date()),
@@ -248,6 +390,8 @@ def refresh(limit_em: int = 50, limit_wscn: int = 30, verbose: bool = True) -> D
             "level": c["level"],
             "title": it["title"],
             "source": it["source"],
+            "region": ("CN" if it["source"] in ("eastmoney", "wallstcn", "sina", "xueqiu")
+                       else "global"),
             "url": it.get("url") or "",
             "note": (it.get("digest") or "")[:120],
             "reliability": 0.5,      # 快讯未经核实，低于人工整理日历的 1.0
@@ -258,8 +402,11 @@ def refresh(limit_em: int = 50, limit_wscn: int = 30, verbose: bool = True) -> D
     payload = {
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "n_raw": len(raw), "n_deduped": len(items), "n_events": len(rows),
-        "sources": {"eastmoney": len([x for x in raw if x["source"] == "eastmoney"]),
-                    "wallstcn": len([x for x in raw if x["source"] == "wallstcn"])},
+        "sources": {s: len([x for x in raw if x["source"] == s])
+                    for s in sorted({x["source"] for x in raw})},
+        "by_region": {"CN": sum(1 for r in rows if r.get("region") == "CN"),
+                      "global": sum(1 for r in rows if r.get("region") == "global")},
+        "dropped_irrelevant": dropped_irrelevant,
         "by_type": {t: sum(1 for r in rows if r["type"] == t)
                     for t in ("policy", "macro", "geopolitics", "company")},
         "rows": rows,

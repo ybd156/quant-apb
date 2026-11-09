@@ -1,7 +1,4 @@
 {
-    "port-config": {
-        "protocol-file": "APB.sc"
-    },
     "data-share": {
         "shares": [
             {

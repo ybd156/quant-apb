@@ -19,7 +19,6 @@
 #   ui/config           桌面入口
 #   ui/images/256.png   图标
 #   ICON.PNG ICON_256.PNG
-#   APB.sc              端口转发
 set -euo pipefail
 
 VERSION="${1:?usage: build-fpk.sh <version> <platform>}"
@@ -33,7 +32,7 @@ PKG="$WORK/package"
 echo "[fpk] version=$VERSION platform=$PLATFORM"
 
 # ---------- 1. 校验源文件 ----------
-for f in manifest config/privilege config/resource APB.sc cmd/service-setup ui/config \
+for f in manifest config/privilege config/resource cmd/service-setup ui/config \
          ICON.PNG ICON_256.PNG; do
   [ -e "$SRC/$f" ] || { echo "[fpk] ERROR missing $SRC/$f"; exit 1; }
 done
@@ -53,6 +52,24 @@ cp "$ROOT/requirements.txt" "$ROOT/VERSION" "$ROOT/LICENSE" "$WORK/app/"
 [ -f "$ROOT/README.md" ] && cp "$ROOT/README.md" "$WORK/app/"
 find "$WORK/app" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$WORK/app" -name '*.pyc' -delete 2>/dev/null || true
+
+# ui/ 必须打进 app.tgz —— fnOS 从 **target 目录** 读 <target>/ui/config
+# （lemon-music 的 ui/ 就在 /vol1/@appcenter/lemon-music/ui/）。
+# 只放 fpk 根目录的话，它不会出现在 target 里，app_service 就没有记录，
+# 应用中心只显示「停用」而没有「打开」，桌面也不会出现图标。
+mkdir -p "$WORK/app/ui/images"
+if [ -f "$SRC/ICON_256.PNG" ]; then
+  cp "$SRC/ICON_256.PNG" "$WORK/app/ui/images/icon_256.png"
+  cp "$SRC/ICON_256.PNG" "$WORK/app/ui/images/icon-256.png"
+fi
+if [ -f "$SRC/ICON.PNG" ]; then
+  cp "$SRC/ICON.PNG" "$WORK/app/ui/images/icon_64.png"
+  cp "$SRC/ICON.PNG" "$WORK/app/ui/images/icon-64.png"
+  cp "$SRC/ICON.PNG" "$WORK/app/ui/images/icon_128.png"
+  cp "$SRC/ICON.PNG" "$WORK/app/ui/images/icon-128.png"
+fi
+[ -f "$SRC/ui/config" ] && cp "$SRC/ui/config" "$WORK/app/ui/config"
+echo "[fpk] app.tgz 内含 ui/: $(ls "$WORK/app/ui/images" 2>/dev/null | tr '\n' ' ')"
 
 tar -czf "$WORK/app.tgz" -C "$WORK/app" .
 APP_TGZ_SIZE=$(wc -c < "$WORK/app.tgz" | tr -d " ")
@@ -81,7 +98,7 @@ echo "[fpk] ui/images: $(ls "$PKG/ui/images" 2>/dev/null | tr '\n' ' ')"
 # fnOS 要求完整的生命周期脚本集：main/installer/service-setup/common + 各 callback
 cp -a "$SRC/cmd/." "$PKG/cmd/"
 chmod +x "$PKG"/cmd/* 2>/dev/null || true
-cp "$SRC/APB.sc" "$PKG/"
+# APB.sc 已移除：改用 ui/config 的 type=url + port 定义服务（同 lemon-music）
 cp "$SRC/ICON.PNG" "$SRC/ICON_256.PNG" "$PKG/"
 cp "$SRC/ICON_256.PNG" "$PKG/ui/images/256.png"
 cp "$SRC/ICON.PNG" "$PKG/ui/images/64.png"

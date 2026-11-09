@@ -8,7 +8,14 @@
 
 CONTAINER="${APPNAME:-apb}"
 # 镜像标签跟随本 fpk 的版本号（从 manifest 读），这样装新 fpk 必然指向新镜像
-APP_VER="$(grep '^version' "${TRIM_APPDEST:-/var/apps/apb}/manifest" 2>/dev/null | awk -F'=' '{print $2}' | tr -d ' ')"
+# 镜像标签跟随本 fpk 的版本号。manifest 可能在多个位置，逐个试。
+APP_VER=""
+for _m in "${TRIM_APPDEST:-}/manifest" "/var/apps/${APPNAME:-apb}/manifest"           "${TRIM_PKGVAR:-}/../manifest"; do
+    if [ -r "$_m" ]; then
+        APP_VER="$(grep -m1 '^version' "$_m" 2>/dev/null | awk -F'=' '{print $2}' | tr -d ' ')"
+        [ -n "$APP_VER" ] && break
+    fi
+done
 IMAGE="${APB_IMAGE:-ghcr.io/ybd156/quant-apb:${APP_VER:-latest}}"
 IMAGE_MIRROR="${APB_IMAGE_MIRROR:-}"
 DATA_DIR="${PKGVAR:-/tmp}/data"
