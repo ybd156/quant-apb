@@ -469,11 +469,21 @@ def stats(verbose: bool = False) -> Dict:
 
 
 def summary() -> Dict:
+    """
+    各周期战绩。**每次都重算**，不读缓存。
+
+    踩过：以前读 OUT 缓存文件，改了统计逻辑（比如加主台账回退）
+    但缓存还在，界面一直显示旧结果（已对账恒为 0）。
+    重算成本很低（读两个 jsonl + 一个主台账），没必要缓存。
+    """
     try:
-        with open(OUT, encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
         return stats(verbose=False)
+    except Exception:
+        try:
+            with open(OUT, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {"ok": False, "horizons": []}
 
 
 if __name__ == "__main__":
