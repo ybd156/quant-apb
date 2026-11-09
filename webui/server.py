@@ -164,6 +164,27 @@ def _is_private_ip(ip: str) -> bool:
         return False
 
 
+def _static_stamp() -> str:
+    """
+    静态资源指纹：版本号 + 关键文件的修改时间。
+
+    只靠 VERSION 不够 —— docker cp 部署时版本号不变，URL 不变，
+    浏览器/CDN 会继续用旧 JS。
+    """
+    import hashlib as _h
+    ver = _read_version()
+    h = _h.sha256(ver.encode())
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+    for name in ("app.js", "style.css", "index.html"):
+        p = os.path.join(base, name)
+        try:
+            h.update(str(int(os.path.getmtime(p))).encode())
+            h.update(str(os.path.getsize(p)).encode())
+        except Exception:
+            pass
+    return f"{ver}-{h.hexdigest()[:8]}"
+
+
 def _read_version() -> str:
     """版本号唯一真源：webui/VERSION。前端不硬编码，只显示这里读到的值。"""
     try:
@@ -420,15 +441,24 @@ class ApiHandler(BaseHTTPRequestHandler):
         except OSError:
             return self._fail("read_error", 200, path=rel)
         # 静态资源版本号：每次发版换 URL，彻底绕开浏览器缓存。
-        # 之前遇到过「代码部署了但页面还是旧的」，就是缓存导致的。
+        # 但只用 VERSION 不够 —— docker cp 部署时版本号没变，URL 就没变，
+        # 浏览器/Cloudflare 继续用旧 JS（实测：改了清空重设的弹窗，用户看到的还是旧版）。
+        # 所以把静态文件的修改时间也算进指纹。
         if rel.endswith("index.html"):
-            blob = blob.replace(b"__APB_VER__", _read_version().encode("utf-8"))
+            blob = blob.replace(b"__APB_VER__", _static_stamp().encode("utf-8"))
         ctype = MIME.get(candidate.suffix.lower(), "application/octet-stream")
+        # HTML/JS/CSS 一律不缓存：宁可多传几 KB，也不要用户看到旧界面。
+        _nocache = rel.endswith((".html", ".js", ".css"))
         try:
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(blob)))
-            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Cache-Control",
+                             "no-store, no-cache, must-revalidate" if _nocache
+                             else "no-cache")
+            if _nocache:
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
             self._security_headers()
             self.end_headers()
             if self.command != "HEAD":

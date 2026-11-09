@@ -569,7 +569,6 @@
     { id: 'market', label: '市场', icon: 'market', title: '实时行情', sub: '指数 / 情绪温度 / 市场宽度' },
     { id: 'chart', label: '个股', icon: 'search', title: '个股行情', sub: 'K线 / 均线 / 成交量' },
     { id: 'hotspot', label: '风口', icon: 'events', title: '当日风口', sub: '涨停梯队 / 板块强度 / 主力资金' },
-    { id: 'watch', label: '自选', icon: 'star', title: '自选股', sub: '分组跟踪 · 加进来就打分' },
       { id: 'signals', label: '信号', icon: 'signals', title: '信号权重', sub: '每个「信号 × 参数」专家当前权重' },
     { id: 'model', label: '模型', icon: 'model', title: '模型', sub: 'Alpha158 + GBDT · 当前推荐持仓' },
     { id: 'ledger', label: '预测台账', icon: 'ledger', title: '预测台账', sub: '先封存，后对账' },
@@ -2511,6 +2510,44 @@
     const period = S.chartPeriod || 'daily';
     const adjust = (S.chartAdjust == null ? 0 : S.chartAdjust);
 
+    // 自选股并入本页：顶部一条分组 chip，点一下就看那只票。
+    // 之前「个股」和「自选」是两个页面，来回跳很别扭 —— 看盘时本来就是
+    // 从自选里点进去看 K 线，合成一页更顺。
+    let watchStrip = '';
+    try {
+      const wres = await apiCached('/api/watch', 4000);
+      const wd = (wres && wres.ok && wres.data) ? wres.data : {};
+      const items = wd.items || [];
+      const groups = wd.groups || [];
+      if (items.length) {
+        const byG = {};
+        items.forEach((it) => {
+          const g = it.group || '未分组';
+          (byG[g] = byG[g] || []).push(it);
+        });
+        const gnames = groups.length ? groups : Object.keys(byG);
+        watchStrip = '<div class="card" style="margin-bottom:14px"><div class="card-head" ' +
+          'style="padding:14px 16px 0"><h2>自选股</h2>' +
+          '<span class="sub">' + items.length + ' 只 · 点一下看 K 线</span></div>' +
+          '<div style="padding:10px 16px 14px">' +
+          gnames.map((g) => {
+            const arr = byG[g] || [];
+            if (!arr.length) return '';
+            return '<div style="margin-bottom:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+              '<span class="muted" style="min-width:52px;font-size:12px">' + esc(g) + '</span>' +
+              arr.map((it) => {
+                const on = String(it.code) === String(code);
+                return '<button type="button" class="btn ghost sm wl-chip' +
+                  (on ? ' is-active' : '') + '" data-code="' + esc(it.code) + '"' +
+                  ' title="' + esc((it.name || '') + ' ' + it.code) + '">' +
+                  esc(it.name || it.code) + '</button>';
+              }).join('') +
+              '</div>';
+          }).join('') +
+          '</div></div>';
+      }
+    } catch (e) { watchStrip = ''; }
+
     const periods = [['daily', '日K'], ['weekly', '周K'], ['monthly', '月K'],
                      ['quarterly', '季K'], ['halfyear', '半年K'], ['yearly', '年K']];
     const adjusts = [[0, '不复权'], [1, '前复权'], [2, '后复权']];
@@ -2586,7 +2623,7 @@
       body: renderCandles(d)
     });
 
-    return searchBar + '<div style="margin-bottom:14px">' + quoteCard + '</div>' +
+    return watchStrip +searchBar + '<div style="margin-bottom:14px">' + quoteCard + '</div>' +
       '<div style="margin-bottom:14px">' + chartCard + '</div>';
   }
 
@@ -3913,6 +3950,11 @@
       return;
     }
     if (id === 'chart') {
+      // 自选条：点 chip 直接切到那只票
+      $$('.wl-chip').forEach((b) => b.addEventListener('click', () => {
+        S.chartCode = b.getAttribute('data-code');
+        navigate('chart', false);
+      }));
       const go = $('#ck-go');
       const inp = $('#ck-code');
       const doQuery = () => {

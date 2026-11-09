@@ -84,15 +84,37 @@ jobs:
             type=raw,value=${{ needs.meta.outputs.version }}
             type=raw,value=${{ needs.meta.outputs.tag }}
             type=raw,value=latest
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # GHCR 推送偶发 permission_denied: write_package —— 同一 token
+      # 上一次成功、下一次失败（实测 v0.27.0 重试即过、v0.27.1 又失败）。
+      # 改用 buildx 直接推送 + shell 重试；buildx 缓存让重试很快。
+      - name: Build and push to GHCR (with retry)
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+          LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          set -u
+          TAGARGS=""
+          for t in $TAGS; do
+            TAGARGS="$TAGARGS -t $t"
+            echo "tag: $t"
+          done
+          for attempt in 1 2 3 4; do
+            echo "=== 第 $attempt 次构建+推送 ==="
+            if docker buildx build \
+                 --platform linux/amd64,linux/arm64 \
+                 $TAGARGS \
+                 --label "$LABELS" \
+                 --cache-from type=gha \
+                 --cache-to type=gha,mode=max \
+                 --push . ; then
+              echo "推送成功"
+              exit 0
+            fi
+            echo "失败，20 秒后重试 ..."
+            sleep 20
+          done
+          echo "重试 4 次仍失败"
+          exit 1
 
   # ---------------- 4. 构建 fpk 并发布 ----------------
   release:
