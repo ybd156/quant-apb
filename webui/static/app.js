@@ -526,7 +526,9 @@
     updating: false,
     names: {},
     namesHint: '',
-    account: null
+    account: null,
+    paperMarket: 'CN',
+    costMap: null
   };
 
   /* ============================== 页面定义 ============================= */
@@ -879,9 +881,10 @@
 
   const rawVal = (v) => (isNil(v) ? '' : String(v));
 
-  const fmtMoney = (v) => {
+  const fmtMoney = (v, cur) => {
     const n = toNum(v);
-    return n === null ? '—' : n.toLocaleString('zh-CN') + ' 元';
+    if (n === null) return '—';
+    return n.toLocaleString('zh-CN') + (cur ? ' ' + cur : ' 元');
   };
 
   /** 0.15 -> "15"（百分数显示）。仅单位换算，不取整、不纠正 */
@@ -890,26 +893,125 @@
     return n === null ? '' : String(+(n * 100).toFixed(4));
   }
 
-  function accountCardHtml(cfg) {
-    const c = cfg || {};
-    const sub = 'data/state/account.json · ' +
-      (c.updated_at ? '更新于 ' + esc(c.updated_at) : '尚未保存过');
+  /* ===================== 模拟实盘：市场隔离（CN/US/HK） ================= */
+
+  const MKTS = ['CN', 'US', 'HK'];
+  const MKT_LABEL = { CN: 'A股', US: '美股', HK: '港股' };
+  const mktLabel = (m) => MKT_LABEL[m] || String(m || '—');
+
+  /** 本金压缩显示（万 / 亿）——纯单位换算 */
+  function compactMoney(v) {
+    const n = toNum(v);
+    if (n === null) return '—';
+    const abs = Math.abs(n);
+    if (abs >= 1e8) return (+(n / 1e8).toFixed(2)) + '亿';
+    if (abs >= 1e4) return (+(n / 1e4).toFixed(2)) + '万';
+    return String(Math.round(n));
+  }
+
+  /** 各市场实测往返成本（从 performance.costs.scenarios 里挑 10 万名义那一行，不做计算） */
+  async function loadCostMap() {
+    if (S.costMap) return S.costMap;
+    const map = {};
+    const res = await apiCached('/api/performance');
+    const scen = res.ok && res.data && res.data.costs && res.data.costs.scenarios;
+    if (Array.isArray(scen)) {
+      scen.forEach((r) => {
+        if (!r || !r.market) return;
+        const bps = toNum(r.round_trip_bps);
+        if (bps === null) return;
+        const notional = toNum(r.notional);
+        if (!(r.market in map) || notional === 100000) {
+          map[r.market] = { bps: bps, notional: notional };
+        }
+      });
+    }
+    S.costMap = map;
+    return map;
+  }
+
+  /** 只有「响应自报属于该市场」才用；A 股直接用共享的 paper.json */
+  function paperForMarket(res, mkt) {
+    if (!res || !res.ok || !res.data) return null;
+    const d = res.data;
+    if (mkt === 'CN') return d;
+    const declared = String(d.market || '').toUpperCase();
+    if (declared === mkt) return (d.markets && d.markets[mkt]) || d;
+    return null;
+  }
+
+  function marketTabsHtml(summary, current) {
+    const markets = (summary && summary.markets) || {};
+    return '<div class="mkt-tabs" role="tablist" aria-label="市场切换">' + MKTS.map((m) => {
+      const cfg = markets[m] || null;
+      const cap = cfg ? compactMoney(cfg.initial_capital) : '—';
+      const cur = (cfg && cfg.currency) || '';
+      const on = m === current;
+      return '<button type="button" class="mkt-tab' + (on ? ' is-active' : '') + '" role="tab"' +
+        ' data-mkt="' + m + '" aria-selected="' + (on ? 'true' : 'false') + '"' +
+        ' title="' + esc(mktLabel(m) + (cur ? ' · ' + cur : '') + (cfg ? ' · 本金 ' + cap : ' · 配置缺失')) + '">' +
+        '<span class="mt-name">' + esc(mktLabel(m)) + '</span>' +
+        '<span class="mt-dot">·</span>' +
+        '<span class="mt-cap">' + esc(cap) + '</span>' +
+        '</button>';
+    }).join('') + '</div>';
+  }
+
+  function marketPlaceholder(mkt, res) {
+    const isCN = mkt === 'CN';
+    const cmd = 'python -m qcore.pipeline' + (isCN ? '' : ' --market ' + mkt);
+    const why = (res && res.error === 'not_ready')
+      ? '缺少 <code>data/state/' + esc(res.missing || 'paper.json') + '</code>，'
+      : '';
+    const tail = isCN
+      ? 'A 股模拟盘由 <code>paper.json</code> 提供；跑一次全流程即可生成。'
+      : '<code>paper.json</code> 只包含 A 股模拟盘；' + esc(mktLabel(mkt)) +
+        '需要单独跑一次 pipeline 才会产出 <code>paper_' + esc(mkt) + '.json</code>。';
     return card({
-      title: '账户设置',
+      title: mktLabel(mkt) + ' · 尚无模拟盘数据',
+      tools: '<span class="tag na">' + esc(mkt) + '</span>',
+      body: '<div class="empty">' + ICON('alert') +
+        '<div class="t">该市场尚无模拟盘数据</div>' +
+        '<div class="d">' + why + '先运行 <code>' + esc(cmd) + '</code> 生成。' +
+        '<br>在生成之前，这里不会显示任何来自其他市场的数据。</div></div>' +
+        '<p class="muted" style="margin-top:10px">' + tail +
+        ' 实盘成交录入（<code>live_trades.jsonl</code>）只在 A 股对账中生效。</p>'
+    });
+  }
+
+  function accountCardHtml(cfg, mkt, costMap, cur) {
+    const c = cfg || {};
+    const market = mkt || c.market || 'CN';
+    const label = mktLabel(market);
+    const currency = cur || c.currency || '';
+    const measured = (costMap && costMap[market]) ? costMap[market] : null;
+    const costHint = measured
+      ? '实测往返 ' + num(measured.bps, 2) + ' bps' +
+        (measured.notional ? '（' + compactMoney(measured.notional) + ' 名义）' : '')
+      : '实测往返成本见「风险体检 → 成本明细」';
+
+    const sub = 'data/state/account.json · ' + esc(label) +
+      (currency ? '（' + esc(currency) + '）' : '') + ' · ' +
+      (c.updated_at ? '更新于 ' + esc(c.updated_at) : '尚未保存过');
+
+    return card({
+      title: '账户设置 · ' + label + (currency ? '（' + currency + '）' : ''),
       sub: sub,
       tools: '<span class="tag na" title="未设 APB_TOKEN 时只允许内网修改">内网免 token</span>',
       body: '<form class="form" id="acct-form" autocomplete="off" novalidate>' +
-        '<label class="field"><span>初始资金（元）</span>' +
+        '<input type="hidden" name="market" value="' + esc(market) + '">' +
+        '<label class="field"><span>初始资金（' + esc(currency || '元') + '）</span>' +
         '<input type="number" name="initial_capital" step="1000" value="' + esc(rawVal(c.initial_capital)) +
         '" placeholder="1000000">' +
-        '<span class="hintline" id="acct-cap-hint">' + esc(fmtMoney(c.initial_capital)) + '</span></label>' +
+        '<span class="hintline" id="acct-cap-hint">' + esc(fmtMoney(c.initial_capital, currency)) + '</span></label>' +
         '<label class="field"><span>持仓数 top_k</span>' +
-        '<input type="number" name="top_k" step="1" value="' + esc(rawVal(c.top_k)) + '" placeholder="10"></label>' +
+        '<input type="number" name="top_k" step="1" value="' + esc(rawVal(c.top_k)) + '" placeholder="20"></label>' +
         '<label class="field"><span>单票上限（%）</span>' +
         '<input type="number" name="max_weight_pct" step="1" value="' + esc(pctOf(c.max_weight)) + '" placeholder="15">' +
         '<span class="hintline">填百分数：15 表示 15%</span></label>' +
         '<label class="field"><span>成本 cost_bps</span>' +
-        '<input type="number" name="cost_bps" step="1" value="' + esc(rawVal(c.cost_bps)) + '" placeholder="10"></label>' +
+        '<input type="number" name="cost_bps" step="0.01" value="' + esc(rawVal(c.cost_bps)) + '" placeholder="10">' +
+        '<span class="hintline">' + esc(costHint) + '</span></label>' +
         '<label class="field"><span>持有期 hold（交易日）</span>' +
         '<input type="number" name="hold" step="1" value="' + esc(rawVal(c.hold)) + '" placeholder="5"></label>' +
         '<div class="form-actions">' +
@@ -917,7 +1019,8 @@
         '<span class="form-msg" id="acct-msg"></span></div>' +
         '</form>' +
         '<p class="acct-note">' + ICON('alert') +
-        '<span>改本金只影响<b>下一次引擎运行</b>，不会重算历史净值与台账。</span></p>'
+        '<span>改本金只影响<b>下一次引擎运行</b>，不会重算历史净值与台账；' +
+        '三个市场各自独立，互不影响。</span></p>'
     });
   }
 
@@ -935,7 +1038,7 @@
       return isFinite(n) ? n : raw;             // 非法输入原样交给后端判定
     };
 
-    const body = {};
+    const body = { market: (form.elements.market && form.elements.market.value) || S.paperMarket || 'CN' };
     const cap = read('initial_capital');
     const topK = read('top_k');
     const mwPct = read('max_weight_pct');
@@ -947,7 +1050,7 @@
     if (cost !== null) body.cost_bps = cost;
     if (hold !== null) body.hold = hold;
 
-    if (!Object.keys(body).length) {
+    if (Object.keys(body).length <= 1) {          // 只有 market，没有实际字段
       msg.className = 'form-msg err';
       msg.textContent = '没有可提交的字段';
       return;
@@ -967,9 +1070,12 @@
 
     if (res.ok) {
       S.account = res.data;
+      const savedMkt = body.market;
+      const savedCur = (res.data && res.data.currency) || '';
       msg.className = 'form-msg ok';
-      msg.textContent = '已保存';
-      toast('已保存，下次运行引擎生效', 'ok');
+      msg.textContent = '已保存 ' + mktLabel(savedMkt) + (savedCur ? '（' + savedCur + '）' : '');
+      toast('已保存 ' + mktLabel(savedMkt) + (savedCur ? '（' + savedCur + '）' : '') +
+        ' 配置，下次运行引擎生效', 'ok');
       clearCache();
       navigate('paper', false);
     } else {
@@ -1651,43 +1757,64 @@
   /* ============================== 模拟实盘 ============================= */
 
   async function pagePaper() {
-    const [res, tradesRes, acctRes] = await Promise.all([
-      apiCached('/api/paper'), apiCached('/api/paper/trades?limit=20'),
-      apiCached('/api/account/config', 0)
+    const mkt = MKTS.indexOf(S.paperMarket) >= 0 ? S.paperMarket : 'CN';
+    const label = mktLabel(mkt);
+
+    const [sumRes, cfgRes, paperRes, tradesRes] = await Promise.all([
+      apiCached('/api/account/config', 0),
+      apiCached('/api/account/config?market=' + mkt, 0),
+      apiCached('/api/paper?market=' + mkt, 0),
+      mkt === 'CN'
+        ? apiCached('/api/paper/trades?limit=20', 0)
+        : Promise.resolve({ ok: true, data: { rows: [], n: 0 } })
     ]);
+
+    const summary = (sumRes.ok && sumRes.data) ? sumRes.data : null;
+    const cfg = (cfgRes.ok && cfgRes.data) ? cfgRes.data : null;
     const trades = (tradesRes.ok && tradesRes.data) ? tradesRes.data : { rows: [], n: 0 };
-    const acct = (acctRes.ok && acctRes.data) ? acctRes.data : null;
+    const costMap = await loadCostMap();
+    const currency = (cfg && cfg.currency) || '';
+    const paperData = paperForMarket(paperRes, mkt);
+    const tag = label + (currency ? '（' + currency + '）' : '');
 
     let body = '';
-    if (!res.ok || !res.data) {
-      setSub('未就绪');
-      body = notReadyBox(res);
+    if (!paperData) {
+      // 未就绪市场：明确说明，绝不显示别的市场的数据
+      setSub(tag + ' · 尚无模拟盘数据');
+      body = '<div style="margin-bottom:14px">' + marketPlaceholder(mkt, paperRes) + '</div>';
     } else {
-      const p = res.data;
+      const p = paperData;
       const cmp = (p.compare && typeof p.compare === 'object') ? p.compare
         : (p.diff && typeof p.diff === 'object') ? p.diff : {};
       const simNav = seriesValues(p.sim_nav || []);
       const liveNav = seriesValues(p.live_nav || []);
       const dates = Array.isArray(p.dates) ? p.dates : [];
       const gap = toNum(cmp.pnl_gap);
-      setSub('对比 ' + num(cmp.n_days_compared, 0) + ' 天 · 模拟期末 ' + num(cmp.sim_final, 0) +
-        ' · 实盘期末 ' + num(cmp.live_final, 0));
+      setSub(tag + ' · 对比 ' + num(cmp.n_days_compared, 0) + ' 天 · 模拟期末 ' +
+        num(cmp.sim_final, 0) + ' · 实盘期末 ' + num(cmp.live_final, 0));
 
       const kpis = [
         kpi({
-          k: '模拟盘期末', v: num(cmp.sim_final, 0), tone: 'brand',
-          s: '年化 ' + pct(cmp.sim_annual) + ' · 命中率 ' + pct(cmp.sim_hit_rate)
+          k: '模拟盘期末 · ' + label, v: num(cmp.sim_final, 0), tone: 'brand',
+          s: esc(currency) + ' · 年化 ' + pct(cmp.sim_annual) + ' · 命中率 ' + pct(cmp.sim_hit_rate)
         }),
-        kpi({ k: '实盘期末', v: num(cmp.live_final, 0), tone: 'brand', s: '成交 ' + num(cmp.live_trades, 0) + ' 笔' }),
         kpi({
-          k: '净值差 pnl_gap', v: signedPct(cmp.pnl_gap), cls: signClass(cmp.pnl_gap),
+          k: '实盘期末 · ' + label, v: num(cmp.live_final, 0), tone: 'brand',
+          s: esc(currency) + ' · 成交 ' + num(cmp.live_trades, 0) + ' 笔'
+        }),
+        kpi({
+          k: '净值差 · ' + label, v: signedPct(cmp.pnl_gap), cls: signClass(cmp.pnl_gap),
           tone: gap === null ? 'neutral' : gap < 0 ? 'bad' : 'good', s: '模拟 − 实盘'
         }),
-        kpi({ k: '跟踪误差(年化)', v: pct(cmp.tracking_error_ann), tone: 'warn', s: '滑点 ' + num(cmp.exec_slippage_bps, 1) + ' bps' })
+        kpi({
+          k: '跟踪误差 · ' + label, v: pct(cmp.tracking_error_ann), tone: 'warn',
+          s: '滑点 ' + num(cmp.exec_slippage_bps, 1) + ' bps'
+        })
       ].join('');
 
       const chartCard = card({
-        title: '净值双线', sub: dates.length ? dates[0] + ' → ' + dates[dates.length - 1] : 'paper.json',
+        title: '净值双线 · ' + tag,
+        sub: dates.length ? dates[0] + ' → ' + dates[dates.length - 1] : 'paper.json',
         body: (simNav.some((v) => v !== null) || liveNav.some((v) => v !== null))
           ? '<div class="chart">' + chartSVG([
             { values: simNav, color: 'var(--brand)', label: '模拟盘' },
@@ -1695,13 +1822,13 @@
           ], {
             height: 280, tipLabels: dates,
             labels: { first: dates[0] || '', last: dates[dates.length - 1] || '' },
-            aria: '模拟盘与实盘净值对比'
+            aria: label + ' 模拟盘与实盘净值对比'
           }) + '</div>'
           : emptyBox('暂无净值曲线', 'paper.json 未包含 sim_nav / live_nav 序列。')
       });
 
       const diffCard = card({
-        title: '差异指标', sub: 'compare',
+        title: '差异指标 · ' + label, sub: 'compare',
         body: kv([
           kvItem('跟踪误差(年化)', pct(cmp.tracking_error_ann)),
           kvItem('净值差', signedPct(cmp.pnl_gap), signClass(cmp.pnl_gap)),
@@ -1718,47 +1845,74 @@
         '<div class="grid two" style="margin-bottom:14px">' + chartCard + diffCard + '</div>';
     }
 
-    const formCard = card({
-      title: '录入实盘成交', sub: 'POST /api/paper/trade → data/state/live_trades.jsonl',
-      body: '<form class="form" id="trade-form" autocomplete="off">' +
-        '<label class="field"><span>日期</span><input type="date" name="date" required></label>' +
-        '<label class="field"><span>代码</span><input type="text" name="code" placeholder="600519 / 00700.HK" required maxlength="24">' +
-        '<span class="hintline" id="trade-name-hint"></span></label>' +
-        '<label class="field"><span>方向</span><select name="side"><option value="buy">买入 buy</option><option value="sell">卖出 sell</option></select></label>' +
-        '<label class="field"><span>成交价</span><input type="number" name="price" step="0.001" min="0.001" placeholder="1520.5" required></label>' +
-        '<label class="field"><span>数量</span><input type="number" name="qty" step="1" min="1" placeholder="100" required></label>' +
-        '<label class="field wide"><span>备注</span><input type="text" name="note" placeholder="可选" maxlength="200"></label>' +
-        '<div class="form-actions"><button class="btn primary" type="submit">' + ICON('check') +
-        '提交成交</button><span class="form-msg" id="trade-msg"></span></div></form>'
-    });
+    // 成交录入只对 A 股开放：live_trades.jsonl 没有市场字段，混记会污染 A 股对账
+    let forms = '';
+    if (mkt === 'CN') {
+      const formCard = card({
+        title: '录入实盘成交 · A股',
+        sub: 'POST /api/paper/trade → data/state/live_trades.jsonl',
+        body: '<form class="form" id="trade-form" autocomplete="off">' +
+          '<label class="field"><span>日期</span><input type="date" name="date" required></label>' +
+          '<label class="field"><span>代码</span><input type="text" name="code" placeholder="600519 / 00700.HK" required maxlength="24">' +
+          '<span class="hintline" id="trade-name-hint"></span></label>' +
+          '<label class="field"><span>方向</span><select name="side"><option value="buy">买入 buy</option><option value="sell">卖出 sell</option></select></label>' +
+          '<label class="field"><span>成交价</span><input type="number" name="price" step="0.001" min="0.001" placeholder="1520.5" required></label>' +
+          '<label class="field"><span>数量</span><input type="number" name="qty" step="1" min="1" placeholder="100" required></label>' +
+          '<label class="field wide"><span>备注</span><input type="text" name="note" placeholder="可选" maxlength="200"></label>' +
+          '<div class="form-actions"><button class="btn primary" type="submit">' + ICON('check') +
+          '提交成交</button><span class="form-msg" id="trade-msg"></span></div></form>'
+      });
 
-    const tradesCard = card({
-      title: '最近成交',
-      sub: '共 ' + (trades.n || 0) + ' 笔 · 最新在前' + (namesEmpty() ? ' · 名称映射未导出' : ''),
-      cls: 'flush',
-      body: '<div style="padding:0 16px 16px">' + table({
-        cols: [
-          { label: '日期', key: 'date', mono: true },
-          { label: '名称（代码）', key: 'code', render: (r) => codeCell(r.code) },
-          {
-            label: '方向', key: 'side',
-            render: (r) => {
-              const sd = String(r.side || '').toLowerCase();
-              return '<span class="' + (sd === 'buy' ? 'up-text' : sd === 'sell' ? 'down-text' : '') + '">' +
-                esc(sd === 'buy' ? '买入' : sd === 'sell' ? '卖出' : r.side || '—') + '</span>';
-            }
-          },
-          { label: '价格', key: 'price', num: true, render: (r) => esc(num(r.price, 3)) },
-          { label: '数量', key: 'qty', num: true, render: (r) => esc(num(r.qty, 0)) },
-          { label: '备注', key: 'note', render: (r) => esc(r.note || '') }
-        ],
-        rows: trades.rows || [],
-        empty: emptyBox('还没有录入成交', '用左边表单记录第一笔真实成交，下次引擎运行会计入实盘净值。')
-      }) + '</div>'
-    });
+      const tradesCard = card({
+        title: '最近成交',
+        sub: '共 ' + (trades.n || 0) + ' 笔 · 最新在前' + (namesEmpty() ? ' · 名称映射未导出' : ''),
+        cls: 'flush',
+        body: '<div style="padding:0 16px 16px">' + table({
+          cols: [
+            { label: '日期', key: 'date', mono: true },
+            { label: '名称（代码）', key: 'code', render: (r) => codeCell(r.code) },
+            {
+              label: '方向', key: 'side',
+              render: (r) => {
+                const sd = String(r.side || '').toLowerCase();
+                return '<span class="' + (sd === 'buy' ? 'up-text' : sd === 'sell' ? 'down-text' : '') + '">' +
+                  esc(sd === 'buy' ? '买入' : sd === 'sell' ? '卖出' : r.side || '—') + '</span>';
+              }
+            },
+            { label: '价格', key: 'price', num: true, render: (r) => esc(num(r.price, 3)) },
+            { label: '数量', key: 'qty', num: true, render: (r) => esc(num(r.qty, 0)) },
+            { label: '备注', key: 'note', render: (r) => esc(r.note || '') }
+          ],
+          rows: trades.rows || [],
+          empty: emptyBox('还没有录入成交', '用左边表单记录第一笔真实成交，下次引擎运行会计入实盘净值。')
+        }) + '</div>'
+      });
 
-    return '<div style="margin-bottom:14px">' + accountCardHtml(acct) + '</div>' +
-      body + '<div class="grid two">' + formCard + tradesCard + '</div>';
+      forms = '<div class="grid two">' + formCard + tradesCard + '</div>';
+    } else {
+      forms = card({
+        title: '实盘成交录入 · ' + label,
+        body: emptyBox('该市场暂不支持成交录入',
+          '实盘对账文件 <code>live_trades.jsonl</code> 没有市场字段，目前只用于 A 股；' +
+          '为避免污染 A 股对账，' + esc(label) + ' 暂不提供录入入口。', 'alert')
+      });
+    }
+
+    // 配置接口失败时给占位，不渲染一个空表单假装能改
+    const acctCard = cfg
+      ? accountCardHtml(cfg, mkt, costMap, currency)
+      : card({
+        title: '账户设置 · ' + label,
+        body: emptyBox('账户配置不可用',
+          '接口返回 <code>' + esc(cfgRes.error || 'unknown') + '</code>' +
+          (cfgRes.detail ? '：' + esc(cfgRes.detail) : '') +
+          '。<br>配置来自 <code>data/state/account.json</code>（由 qcore 读取），请检查 qcore 是否可用。',
+          'alert')
+      });
+
+    return '<div style="margin-bottom:12px">' + marketTabsHtml(summary, mkt) + '</div>' +
+      '<div style="margin-bottom:14px">' + acctCard + '</div>' +
+      body + forms;
   }
 
   /* ============================== 行为因子 ============================= */
@@ -2237,6 +2391,16 @@
     settings: pageSettings
   };
 
+  /** 切换模拟实盘的市场（记住上次选择） */
+  function switchMarket(m) {
+    const next = MKTS.indexOf(m) >= 0 ? m : 'CN';
+    if (next === S.paperMarket && S.page === 'paper') return;
+    S.paperMarket = next;
+    try { localStorage.setItem('apb.paper.market', next); } catch (e) { /* ignore */ }
+    clearCache();
+    if (S.page === 'paper') navigate('paper', false);
+  }
+
   function buildNav() {
     $('#side-nav').innerHTML = PAGES.map((p) =>
       '<button type="button" class="nav-item" data-page="' + p.id + '" title="' + esc(p.label) + '">' +
@@ -2555,7 +2719,9 @@
       $('#scrim').hidden = true;
     });
     document.addEventListener('click', (ev) => {
-      const btn = ev.target.closest('[data-page]');
+      const mktBtn = ev.target.closest ? ev.target.closest('[data-mkt]') : null;
+      if (mktBtn) { switchMarket(mktBtn.getAttribute('data-mkt')); return; }
+      const btn = ev.target.closest ? ev.target.closest('[data-page]') : null;
       if (btn) navigate(btn.getAttribute('data-page'));
     });
     window.addEventListener('hashchange', () => {
@@ -2581,6 +2747,10 @@
     let last = null;
     try { last = localStorage.getItem('apb.page'); } catch (e) { /* ignore */ }
     const start = RENDERERS[fromHash] ? fromHash : (RENDERERS[last] ? last : 'overview');
+    try {
+      const pm = localStorage.getItem('apb.paper.market');
+      if (MKTS.indexOf(pm) >= 0) S.paperMarket = pm;
+    } catch (e) { /* ignore */ }
     const use = $('#theme-ico use');
     if (use) use.setAttribute('href', document.documentElement.getAttribute('data-theme') === 'light' ? '#i-sun' : '#i-moon');
     await Promise.all([loadVersion(), loadHealth(), loadUpdate(), loadNames()]);

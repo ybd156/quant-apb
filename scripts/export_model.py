@@ -97,6 +97,20 @@ def main(argv=None) -> int:
     model = d["model"]
     scores, close, dates, codes = d["scores"], d["close"], d["dates"], d["codes"]
 
+    # ---- 持久化模型（供 live_model / session 实时打分用）----
+    try:
+        from qcore import live_model as LM
+        LM.save_model(model, {
+            "universe": a.universe, "n_stocks": len(codes),
+            "n_factors": int(scores.shape[1]) if scores.ndim > 1 else 158,
+            "n_trees": int(a.trees), "train_end": a.train_end,
+            "train_n": int(sum(1 for _ in [0])),   # 占位，真实值由 train 记录
+            "source": "export_model.py",
+        })
+        print(f"  模型已持久化 -> data/model/gbdt.pkl", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"  模型持久化失败: {e}", flush=True)
+
     # ---- 回测摘要（用最佳参数）----
     r = BT.backtest(scores, close, dates, None,
                     BT.BTConfig(top_k=a.top_k, hold_days=a.hold_days, band=a.band))

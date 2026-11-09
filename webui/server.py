@@ -466,6 +466,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/session":
+            return self._api_session(query)
         if path == "/api/transfer":
             return self._api_transfer()
         if path == "/api/tick":
@@ -529,26 +531,6 @@ class ApiHandler(BaseHTTPRequestHandler):
         if sent is not None:
             return sent
         return self._ok(data)
-
-    def _api_paper(self, query):
-        """
-        模拟盘数据。query: market=CN|US|HK
-        文件解析顺序：paper_<M>.json -> (仅 CN) paper.json
-        美股/港股没有独立文件时明确返回 not_ready，不拿 A 股数据冒充。
-        """
-        m = str(((query or {}).get("market") or ["CN"])[0]).upper()
-        if m not in ("CN", "US", "HK"):
-            m = "CN"
-        cands = [f"paper_{m}.json"]
-        if m == "CN":
-            cands.append("paper.json")     # 兼容老文件名
-        for fn in cands:
-            data, err = _read_json(fn)
-            if err is None:
-                return self._ok({"market": m, "file": fn, "data": data})
-        return self._not_ready(cands[0],
-                               f"{m} 市场尚无模拟盘数据。先运行 "
-                               f"python -m qcore.pipeline --market {m} 生成。")
 
     def _api_paper(self, query):
         """模拟盘 vs 实盘对账（按市场隔离）。
@@ -902,6 +884,35 @@ class ApiHandler(BaseHTTPRequestHandler):
             "run_enabled": ALLOW_RUN,
             "server_time": _now_iso(),
         })
+
+    def _api_session(self, query):
+        """
+        三段式时段数据。query: which=premarket|intraday|postclose|auto
+        auto 按当前时间判断；不在任何窗口内返回 outside_session。
+        """
+        which = str(((query or {}).get("which") or ["auto"])[0]).lower()
+        try:
+            from qcore import session as S
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        if which == "auto":
+            cur = S.in_window()
+            if cur == "closed":
+                return self._ok({"session": "closed",
+                                 "note": "不在任何交易时段窗口内",
+                                 "windows": {"premarket": "08:30-09:30",
+                                             "intraday": "09:30-15:00",
+                                             "postclose": "15:05-17:00"}})
+            which = cur
+        if which not in ("premarket", "intraday", "postclose"):
+            return self._fail("bad_param", 400,
+                              hint="which 取 premarket|intraday|postclose|auto")
+        fn = {"premarket": S.premarket, "intraday": S.intraday,
+              "postclose": S.postclose}[which]
+        try:
+            return self._ok(fn(verbose=False))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("session_failed", 200, detail=str(e)[:160])
 
     def _api_transfer(self):
         """导出/导入能力清单。"""

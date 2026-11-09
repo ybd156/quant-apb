@@ -83,16 +83,39 @@ if [ "$ENABLE_UPDATE_CHECK" = "1" ]; then
     PIDS="$PIDS $!"
 fi
 
-# 4) 收盘演算（每日打分 + 每周重训）
+# 4) 三段式演算：盘前预测 / 盘中偏离 / 收盘复盘
+#    - 08:30-09:30  盘前打分（用 T-1 数据，与训练口径一致）
+#    - 09:30-15:00  盘中偏离监控（每 5 分钟刷新，不做择时）
+#    - 15:05-17:00  收盘复盘 + 生成明日建议
+#    - 每周（模型超龄）重训一次
 if [ "$ENABLE_LIVE" = "1" ]; then
     (
         sleep 30
         while true; do
             python -c "
+from qcore import session as S
+r = S.run('auto', verbose=True)
+print('[session]', r.get('session'), r.get('reason') or 'ok')
+" 2>&1 | tail -3 || true
+            # 盘中 5 分钟一刷，其它时段 30 分钟一查
+            sleep 300
+        done
+    ) &
+    PIDS="$PIDS $!"
+
+    # 每周重训（模型超龄才跑，避免每天烧 10 分钟）
+    (
+        sleep 120
+        while true; do
+            python -c "
 from qcore import live_model as LM
-LM.loop(interval_s=1800, max_age_days=${LIVE_MAX_AGE})
-" || true
-            sleep 60
+if LM.should_retrain(${LIVE_MAX_AGE}):
+    print('[retrain] 模型超龄，开始重训 ...')
+    print(LM.train(verbose=True))
+else:
+    print('[retrain] 模型仍新鲜，跳过')
+" 2>&1 | tail -3 || true
+            sleep 21600
         done
     ) &
     PIDS="$PIDS $!"

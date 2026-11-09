@@ -167,7 +167,10 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
     codes = QD.universe_codes(universe, start=(datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d"))
     if not codes:
         codes = QD.universe_codes(universe)
-    d = bench.build_features(codes, start=(datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d"),
+    # 窗口必须够长：build_features 要求每只票 >=300 根日线，alpha158 还要 60 日预热。
+    # 之前用 400 个自然日 ≈ 270 个交易日，全部被过滤掉 → features_failed。
+    _start = (datetime.now() - timedelta(days=900)).strftime("%Y-%m-%d")
+    d = bench.build_features(codes, start=_start,
                              horizon=1, max_stocks=stocks, verbose=False)
     if not d.get("ok"):
         return {"ok": False, "reason": "features_failed"}

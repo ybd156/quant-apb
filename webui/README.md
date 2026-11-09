@@ -65,7 +65,7 @@ python -m webui.server --host 0.0.0.0
 | **信号** | 权重 Top20 / Bottom20 条形图 + 全表（权重/命中率/更新次数/平均收益/发声 可排序）+ 族筛选 + 搜索 | `weights.json` |
 | **模型** | Alpha158+GBDT 元信息（IC/t/RankIC 大字）、回测 6 KPI、当前推荐持仓表（持有中标记）、因子重要性 Top20 | `model.json` `picks.json` `factor_importance.json` |
 | **预测台账** | 最近预测表（命中绿 / 未中红 / pending 灰）+ 代码搜索 + 日期区间 + 结果筛选 | `ledger.json` |
-| **模拟实盘** | 模拟 vs 实盘双线净值 + 差异指标 + 成交录入表单 + 最近成交 | `paper.json` `live_trades.jsonl` |
+| **模拟实盘** | **按市场分 tab（A股 / 美股 / 港股）**：各自独立的账户设置、净值双线、差异指标；A 股另有成交录入 | `account.json` `paper.json` `paper_{MKT}.json` `live_trades.jsonl` |
 | **行为因子** | 10 个行为因子 IC / 多空价差双向条形 + 明细表（含「中性化后失效」标注） | `performance.behavior`（缺失时显示因子定义） |
 | **政策事件** | 政策日历时间线（类型/方向筛选）+ 影响因子表 | `events.json` → 回退 `data/events/policy_calendar.jsonl` |
 | **风险体检** | 8 条不变量检查 + 数据源健康度 + 成本明细 + 集中度 + 可信度校准 + 漂移监控 | `performance.risk/costs/confidence` `source_health.json` `invariants.json` |
@@ -89,7 +89,8 @@ python -m webui.server --host 0.0.0.0
 | `data/state/regime.json` | regime 色带 | `date, regime`（0 跌低波 / 1 跌高波 / 2 涨低波 / 3 涨高波） |
 | `data/state/ledger.json` | 预测台账 | `as_of, code, score, regime, entry_price, exit_price, ret, hit, status` |
 | `data/state/performance.json` | 总览/行为/体检 | `metrics.hit_rate{h:{hit_rate}}`、`metrics.rank_ic{h:{mean,icir,positive_ratio}}`、`backtest.long_short`、`edge{h:{ic:{mean,t,ci95},subperiods,long_short,deflated_sharpe}}`、`confidence`、`risk`、`costs`、`learned_vs_equal`、`meta`、`behavior`（待导出） |
-| `data/state/paper.json` | 模拟 vs 实盘 | `dates[], sim_nav[], live_nav[], compare{...}` |
+| `data/state/paper.json` | A 股模拟 vs 实盘 | `dates[], sim_nav[], live_nav[], compare{...}` |
+| `data/state/paper_US.json` / `paper_HK.json`（可选） | 其他市场模拟盘 | 同上，建议带 `market:"US"` 字段 |
 | `data/state/source_health.json` | 数据源健康度 | `{源: {ok, fail, latency_ms, last_error}}` |
 | `data/state/live_trades.jsonl` | 实盘成交（**UI 唯一写入**） | 每行 `{date, code, side, price, qty, note}` |
 | `data/state/events.json`（可选） | 政策日历 | `{events:[{date,type,subtype,title,direction,sectors[],evidence_level,note,lag}], impact:[...]}`；缺失时回退 `data/events/policy_calendar.jsonl` |
@@ -172,7 +173,10 @@ token 只存在本机 `localStorage['apb.token']`（跨标签页只填一次）�
 | GET | `/api/performance` | 原样转发 |
 | GET | `/api/behavior` | `{generated_at, dataset, edge, behavior}`（原样转发 performance.json 的段） |
 | GET | `/api/events?limit=500` | `{rows:[], n, source, impact?}`；`events.json` → 回退 `policy_calendar.jsonl` |
-| GET | `/api/paper` | 原样转发 |
+| GET | `/api/account/config` | 三市场总览 `{default_market, markets{CN,US,HK}, updated_at}` |
+| GET | `/api/account/config?market=CN\|US\|HK` | 单个市场配置（含 `currency`） |
+| GET | `/api/paper` | 原样转发 `paper.json` |
+| GET | `/api/paper?market=CN\|US\|HK` | 按市场取：优先 `paper_{MKT}.json`；US/HK 没有专属文件时返回 `no_market_data`（**绝不回落到 A 股数据**） |
 | GET | `/api/paper/trades?limit=50` | 实盘成交明细（最新在前） |
 | GET | `/api/health` | `{ok, as_of, data_age_days, missing_files[], files{}, optional_files{}, source_health{}, invariants, run_enabled, ...}` |
 | GET | `/api/market` | 实时行情与情绪（原样转发 `market.json`） |
@@ -183,7 +187,8 @@ token 只存在本机 `localStorage['apb.token']`（跨标签页只填一次）�
 | POST | `/api/update/apply` | 应用内一键更新（需 `X-Token`）；错误码见 §4.1 |
 | GET | `/api/export?what=all\|ledger\|signals\|performance` | 导出 JSON 附件（原样拼接，不加工） |
 | GET | `/api/run/status` | 最近一次 `/api/run` 的状态 |
-| POST | `/api/paper/trade` | 追加一行到 `live_trades.jsonl`（需 `Content-Type: application/json`） |
+| POST | `/api/account/config` | body 必须带 `market`；越界返回 400 `invalid_config` + `detail` |
+| POST | `/api/paper/trade` | 追加一行到 `live_trades.jsonl`（需 `Content-Type: application/json`；仅 A 股） |
 | POST | `/api/run` | 触发 `python -m qcore.live --once`（需 `X-Token`） |
 
 错误码：`not_ready`、`bad_json`、`read_error`、`bad_schema`、`bad_date`/`bad_code`/`bad_side`/`bad_price`/`bad_qty`（400）、
@@ -206,7 +211,8 @@ token 只存在本机 `localStorage['apb.token']`（跨标签页只填一次）�
 | `regime.json` | 色带位置占位（容器退回普通块，不会被压成 24px） |
 | `ledger.json` | 台账表体占位行 |
 | `performance.json` | 总览 KPI/曲线/明细、行为因子、风险体检各自占位；**行为因子页仍展示 10 个因子定义** |
-| `paper.json` | 模拟实盘净值/差异占位；**成交录入表单照常可用** |
+| `paper.json` | A 股 tab 显示「该市场尚无模拟盘数据」占位；**成交录入表单照常可用** |
+| `paper_US.json` / `paper_HK.json` | 对应市场 tab 显示占位 + `python -m qcore.pipeline --market US` 命令；**不会显示 A 股数据** |
 | `events.json` + JSONL 都缺 | 政策事件页显示占位 + 生成命令提示 |
 | `invariants.json` | 不变量表 8 行全部「未提供」并给出写入格式 |
 | `source_health.json` | 数据源健康度占位 |

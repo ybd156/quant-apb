@@ -1,0 +1,10 @@
+{
+ "universe": "csi300",
+ "n_stocks": 300,
+ "n_factors": 300,
+ "n_trees": 250,
+ "train_end": "2019-12-31",
+ "train_n": 1,
+ "source": "export_model.py",
+ "saved_at": "2026-11-09T08:06:53+08:00"
+}
