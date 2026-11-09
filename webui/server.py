@@ -497,6 +497,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_export(query)
         if path == "/api/train/kit/download":
             return self._api_train_kit_download()
+        if path == "/api/intraday/online":
+            return self._api_intraday_online(query)
         if path == "/api/fees":
             return self._api_fees(query)
         if path == "/api/paper/period":
@@ -1091,6 +1093,29 @@ class ApiHandler(BaseHTTPRequestHandler):
             return True
         except Exception as e:  # noqa: BLE001
             return self._fail("send_failed", 200, detail=str(e)[:100])
+
+    def _api_intraday_online(self, query):
+        """
+        盘中在线训练状态。query: run=1 立刻跑一轮。
+        分钟级：T 分钟预测 T+3，3 分钟后对账；样本外评估。
+        """
+        q = query or {}
+        force = str((q.get("run") or ["0"])[0]) in ("1", "true", "yes")
+        try:
+            from qcore import intraday_online as IO
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        if force:
+            try:
+                day = str((q.get("day") or [""])[0]) or None
+                return self._ok(IO.run_once(day=day, verbose=False))
+            except Exception as e:  # noqa: BLE001
+                return self._fail("run_failed", 200, detail=str(e)[:160])
+        d = IO.summary()
+        if not d or d.get("reason") == "no_stats":
+            return self._not_ready("intraday_online.json",
+                                   "还没有盘中训练数据，跑一次 /api/intraday/online?run=1")
+        return self._ok(d)
 
     def _api_fees(self, query):
         """各市场费用明细 + 对照。query: market=CN 只返回该市场。"""

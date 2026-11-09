@@ -250,6 +250,32 @@ WK.build(days=7, verbose=True)
     PIDS="$PIDS $!"
 fi
 
+# 5.11) 盘中在线训练（每分钟级：T 预测 T+3，3 分钟后对账）
+# 只在交易时段跑，每 5 分钟一轮。用逻辑回归在线 SGD（8 毫秒级），
+# 不是 GBDT —— 分钟级信号极弱，复杂模型必然过拟合。
+if [ "$ENABLE_INTRADAY_TRAIN" != "0" ]; then
+    (
+        sleep 240
+        while true; do
+            python -c "
+from datetime import datetime
+now = datetime.now()
+hm = now.hour * 60 + now.minute
+trading = (9*60+35 <= hm <= 11*60+30) or (13*60+5 <= hm <= 14*60+55)
+if now.weekday() >= 5:
+    print('[intraday] 周末，跳过')
+elif not trading:
+    print('[intraday] 非交易时段，跳过')
+else:
+    from qcore import intraday_online as IO
+    IO.run_once(verbose=True)
+" 2>&1 | tail -6 || true
+            sleep 300
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (
