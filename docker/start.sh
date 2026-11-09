@@ -133,6 +133,23 @@ if [ "$ENABLE_HEALTH" = "1" ]; then
     PIDS="$PIDS $!"
 fi
 
+# 5.5) 实时政策/事件快讯（10 分钟一刷，交易时段）
+if [ "$ENABLE_NEWS" != "0" ]; then
+    (
+        sleep 50
+        while true; do
+            python -c "
+from qcore import news_live as NL
+r = NL.refresh(verbose=True)
+if r.get('ok'):
+    NL.merge_into_events(verbose=False)
+" 2>&1 | tail -2 || true
+            sleep 600
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (

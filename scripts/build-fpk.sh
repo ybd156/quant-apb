@@ -64,6 +64,20 @@ mkdir -p "$PKG/cmd" "$PKG/config" "$PKG/ui/images"
 cp "$WORK/app.tgz" "$PKG/app.tgz"
 cp -a "$SRC/config/." "$PKG/config/"
 cp -a "$SRC/ui/." "$PKG/ui/"
+# fnOS 桌面入口写的是 icon: "images/icon_{0}.png"，{0} 会被替换成 64/256 等尺寸。
+# 所以 ui/images 下必须有 icon_256.png / icon_64.png，否则桌面不显示图标。
+mkdir -p "$PKG/ui/images"
+if [ -f "$SRC/ICON_256.PNG" ]; then
+  cp "$SRC/ICON_256.PNG" "$PKG/ui/images/icon_256.png"
+  cp "$SRC/ICON_256.PNG" "$PKG/ui/images/icon-256.png"
+fi
+if [ -f "$SRC/ICON.PNG" ]; then
+  cp "$SRC/ICON.PNG" "$PKG/ui/images/icon_64.png"
+  cp "$SRC/ICON.PNG" "$PKG/ui/images/icon-64.png"
+  cp "$SRC/ICON.PNG" "$PKG/ui/images/icon_128.png"
+  cp "$SRC/ICON.PNG" "$PKG/ui/images/icon-128.png"
+fi
+echo "[fpk] ui/images: $(ls "$PKG/ui/images" 2>/dev/null | tr '\n' ' ')"
 # fnOS 要求完整的生命周期脚本集：main/installer/service-setup/common + 各 callback
 cp -a "$SRC/cmd/." "$PKG/cmd/"
 chmod +x "$PKG"/cmd/* 2>/dev/null || true

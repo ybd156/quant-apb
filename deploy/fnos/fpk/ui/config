@@ -1,6 +1,15 @@
 {
-    "title": "APB 量化预知",
-    "entry": "/",
-    "icon": "images/256.png",
-    "note": "自学习参数体 · 研究工具，不构成投资建议"
+  ".url": {
+    "apb.Application": {
+      "title": "APB 量化预知",
+      "desc": "自学习参数体 · 研究工具，不构成投资建议",
+      "icon": "images/icon_{0}.png",
+      "type": "url",
+      "protocol": "http",
+      "port": "8765",
+      "url": "/",
+      "allUsers": true,
+      "noDisplay": false
+    }
+  }
 }

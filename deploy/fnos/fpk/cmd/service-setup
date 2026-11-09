@@ -68,6 +68,18 @@ start_daemon() {
         fi
     fi
 
+    # 容器内的 apb 用户（uid 10001）要访问 docker.sock 才能做应用内更新。
+    # socket 属主是 root:docker（srw-rw----），必须把 docker 组带进容器，
+    # 否则 /api/update/apply 会一直返回 docker_socket_unavailable。
+    group_opt=""
+    if [ -S /var/run/docker.sock ]; then
+        _dgid="$(stat -c '%g' /var/run/docker.sock 2>/dev/null || true)"
+        if [ -n "$_dgid" ] && [ "$_dgid" != "0" ]; then
+            group_opt="--group-add ${_dgid}"
+            log "docker.sock 属组 gid=${_dgid}，容器将加入该组"
+        fi
+    fi
+
     if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
         docker start "$CONTAINER" >>"$LOG_FILE" 2>&1 || return 1
     else
@@ -79,6 +91,7 @@ start_daemon() {
             -v "${DATA_DIR}:/app/data" \
             -v "${LOG_HOST_DIR}:/app/logs" \
             -v /var/run/docker.sock:/var/run/docker.sock \
+            ${group_opt} \
             -e APB_CONTAINER_NAME="${CONTAINER}" \
             -e APB_IMAGE="${img}" \
             -e APB_MARKET=1 \

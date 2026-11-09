@@ -466,6 +466,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/news/live":
+            return self._api_news_live(query)
         if path == "/api/data/quality":
             return self._api_data_quality()
         if path == "/api/calendar":
@@ -929,6 +931,28 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._ok(fn(verbose=False))
         except Exception as e:  # noqa: BLE001
             return self._fail("session_failed", 200, detail=str(e)[:160])
+
+    def _api_news_live(self, query):
+        """
+        实时政策/事件快讯。query: refresh=1 强制刷新。
+        返回规则分类结果（type/direction/sectors/level），reliability=0.5。
+        """
+        try:
+            from qcore import news_live as NL
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        force = str(((query or {}).get("refresh") or ["0"])[0]) in ("1", "true", "yes")
+        if force:
+            r = NL.refresh(verbose=False)
+            if not r.get("ok"):
+                return self._fail(r.get("reason", "refresh_failed"), 200)
+            NL.merge_into_events(verbose=False)
+            return self._ok(r)
+        d = NL.load()
+        if not d.get("rows"):
+            return self._not_ready("events_live.json",
+                                   "还没有实时事件，跑一次 /api/news/live?refresh=1")
+        return self._ok(d)
 
     def _api_data_quality(self):
         """最近一次数据清洗的汇总（data_quality.json）。"""
