@@ -499,6 +499,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_data_qlib()
         if path == "/api/train/kit/download":
             return self._api_train_kit_download()
+        if path == "/api/online/learn":
+            return self._api_online_learn(query)
         if path == "/api/intraday/online":
             return self._api_intraday_online(query)
         if path == "/api/fees":
@@ -1346,6 +1348,34 @@ class ApiHandler(BaseHTTPRequestHandler):
             return True
         except Exception as e:  # noqa: BLE001
             return self._fail("send_failed", 200, detail=str(e)[:100])
+
+    def _api_online_learn(self, query):
+        """
+        在线学习状态：每个周期的校准参数 a/b 与更新历史。
+
+        query: run=1 立刻跑一轮（对账 + 校准）
+        """
+        q = query or {}
+        force = str((q.get("run") or ["0"])[0]) in ("1", "true", "yes")
+        try:
+            from qcore import online_calib as OC
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        if force:
+            try:
+                from qcore import horizon_ledger as HL
+                rec = HL.reconcile(verbose=False)
+                r = OC.update_all(verbose=False)
+                d = OC.summary()
+                d["reconcile"] = {"done": rec.get("done", 0)}
+                d["run"] = r
+                return self._ok(d)
+            except Exception as e:  # noqa: BLE001
+                return self._fail("run_failed", 200, detail=str(e)[:160])
+        try:
+            return self._ok(OC.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("summary_failed", 200, detail=str(e)[:160])
 
     def _api_intraday_online(self, query):
         """

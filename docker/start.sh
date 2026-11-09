@@ -305,6 +305,36 @@ if [ "$ENABLE_INVARIANTS" != "0" ]; then
     PIDS="$PIDS $!"
 fi
 
+# 5.13) 在线学习闭环（每交易日收盘后一次）
+#   1) 对账：把到期的预测算实际收益
+#   2) 校准：用已到期样本更新 a/b（预测->实际->调整）
+# 这是「自学习」真正在跑的地方 —— 之前只有定期重训，没有在线调整。
+if [ "$ENABLE_ONLINE_LEARN" != "0" ]; then
+    (
+        sleep 300
+        while true; do
+            python -c "
+from datetime import datetime
+now = datetime.now()
+hm = now.hour * 60 + now.minute
+# 收盘后 15:10-17:00 之间跑一次；周末不跑
+if now.weekday() >= 5:
+    print('[online] 周末跳过')
+elif not (15*60+10 <= hm <= 17*60):
+    print('[online] 非收盘时段，跳过')
+else:
+    from qcore import horizon_ledger as HL
+    from qcore import online_calib as OC
+    r = HL.reconcile(verbose=False)
+    print('[online] 对账', r.get('done', 0), '条')
+    OC.update_all(verbose=True)
+" 2>&1 | tail -8 || true
+            sleep 3600
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (

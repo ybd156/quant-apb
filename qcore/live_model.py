@@ -258,6 +258,19 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
     score = np.full(len(cl), np.nan)
     score[ok] = model.predict(row[ok])
 
+    # ---- 在线校准：把「预测 vs 实际」学到的修正应用到今天的分数上 ----
+    # 这是真的在线学习：模型本身不动，但输出会随历史对账结果调整。
+    # 如果 a 变成负数，说明模型方向反了 —— 系统自己发现的。
+    _cal = None
+    try:
+        from . import online_calib as OC
+        _raw = score[ok]
+        _adj, _cal = OC.apply(horizon, _raw)
+        if _cal.get("applied"):
+            score[ok] = _adj
+    except Exception:
+        _cal = None
+
     order = np.argsort(-np.where(np.isfinite(score), score, -np.inf))[:top_k]
     nm = {}
     for k, v in (NAMES.load() or {}).items():
@@ -322,6 +335,7 @@ def predict(top_k: int = 30, universe: str = "csi300", stocks: int = 300,
                "horizon_label": _hlab,
                "top_k": top_k, "horizon": horizon,
                "horizon_label": HZ.label_for(horizon),
+               "online_calib": _cal,
                "model_age_days": round(model_age_days(horizon) or 0, 1),
                "event_adjust": ev_info,
                "note": "实时打分（模型未重训时用最近一次保存的模型）；"

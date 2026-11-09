@@ -1610,6 +1610,59 @@
       bannerHtml = notReadyBox(perfRes);
     }
 
+    /* --- 在线学习：校准参数 a/b 与更新历史 --- */
+    // 这是「自学习」真正在跑的地方：用已到期样本学 ret ≈ a*score + b。
+    // a 为负说明模型方向反了；b 是整体偏移修正。每次更新都记历史。
+    let onlineCard = '';
+    const OL = (onlineRes && onlineRes.ok && onlineRes.data) ? onlineRes.data : null;
+    if (OL && Array.isArray(OL.horizons)) {
+      const learned = OL.horizons.filter((x) => (x.n_updates || 0) > 0);
+      const rows = OL.horizons.map((x) => {
+        const has = (x.n_updates || 0) > 0;
+        const aCls = has ? (x.a < 0 ? 'is-down' : 'is-up') : '';
+        return '<tr>' +
+          '<td>h' + esc(x.horizon) + '</td>' +
+          '<td class="num ' + aCls + '">' + (has ? num(x.a, 4) : '—') + '</td>' +
+          '<td class="num">' + (has ? num(x.b, 6) : '—') + '</td>' +
+          '<td class="num">' + (x.n_samples || 0) + '</td>' +
+          '<td class="num">' + (x.n_updates || 0) + '</td>' +
+          '<td class="muted">' + esc((x.updated_at || '—').slice(5, 16)) + '</td>' +
+          '</tr>';
+      }).join('');
+      const hist = learned.length
+        ? learned[learned.length - 1].history || []
+        : [];
+      const histHtml = hist.length ? (
+        '<div style="margin-top:14px"><div style="font-weight:600;margin-bottom:6px">' +
+        '最近一次调整</div><div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+        '<th>时间</th><th>样本</th><th>a</th><th>b</th><th>MSE</th><th>方向</th>' +
+        '</tr></thead><tbody>' + hist.slice().reverse().map((e) =>
+          '<tr><td class="mono">' + esc(String(e.at || '').slice(5, 16)) + '</td>' +
+          '<td class="num">' + e.n_samples + '</td>' +
+          '<td class="num mono">' + num(e.a_before, 4) + ' → ' + num(e.a_after, 4) + '</td>' +
+          '<td class="num mono">' + num(e.b_before, 6) + ' → ' + num(e.b_after, 6) + '</td>' +
+          '<td class="num mono">' + num(e.mse_before, 8) + ' → ' + num(e.mse_after, 8) + '</td>' +
+          '<td>' + esc(e.direction || '—') + '</td></tr>').join('') +
+        '</tbody></table></div></div>') : '';
+
+      onlineCard = card({
+        title: '在线学习', sub: 'qcore/online_calib · ret ≈ a × score + b',
+        tools: '<button type="button" class="btn ghost sm" id="ol-run">' +
+          ICON('play') + '立即学习一轮</button>',
+        body: '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+          '<th>周期</th><th>a（区分力）</th><th>b（偏移）</th>' +
+          '<th>样本</th><th>更新次数</th><th>最近更新</th>' +
+          '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+          (learned.length
+            ? '<p class="muted" style="margin-top:10px">a &lt; 0 表示模型给的分数越高、' +
+              '实际收益反而越低（方向反了，系统会自己把分数翻过来）；' +
+              'b 是整体偏移修正。每学到新样本更新一次，全部历史可查。</p>'
+            : '<p class="muted" style="margin-top:10px">还没有可用的已到期样本。' +
+              '等台账累积到 30 个样本以上，点「立即学习一轮」即可。</p>') +
+          histHtml
+      });
+    }
+
     /* --- 学习器为什么无效：逐条给原因，不只说「无显著差异」 --- */
     let diagCard = '';
     const dg = (perf && perf.learned && perf.learned.diagnosis) || null;
@@ -1704,6 +1757,7 @@
     return '<div style="margin-bottom:14px">' + (await modelBarHtml(modelRes)) + '</div>' +
       '<div class="grid four" style="margin-bottom:14px">' + kpis + '</div>' +
       '<div style="margin-bottom:14px">' + bannerHtml + '</div>' +
+      (onlineCard ? '<div style="margin-bottom:14px">' + onlineCard + '</div>' : '') +
       (diagCard ? '<div style="margin-bottom:14px">' + diagCard + '</div>' : '') +
       '<div class="grid two" style="margin-bottom:14px">' + navCard + bandCard + '</div>' +
       '<div class="grid two">' + (subperiodCard || detailCard) + detailCard + '</div>';
@@ -3103,7 +3157,9 @@
   ];
 
   async function pageRisk() {
-    const [perfRes, healthRes] = await Promise.all([apiCached('/api/performance'), apiCached('/api/health')]);
+    const [perfRes, healthRes, onlineRes] = await Promise.all([
+      apiCached('/api/performance'), apiCached('/api/health'),
+      apiCached('/api/online/learn', 5000)]);
     const perf = perfRes.ok ? adaptPerformance(perfRes.data) : null;
     const health = healthRes.ok ? healthRes.data : null;
     setSub(perf ? '生成于 ' + ((perfRes.data && perfRes.data.generated_at) || '—') : '未就绪');
@@ -3898,6 +3954,24 @@
       }));
     }
 
+    if (id === 'risk') {
+      const ol = $('#ol-run');
+      if (ol) ol.addEventListener('click', async () => {
+        ol.disabled = true;
+        const r = await api('/api/online/learn?run=1');
+        ol.disabled = false;
+        if (r && r.ok) {
+          const d = r.data || {};
+          const n = (d.run && d.run.ok_count) || 0;
+          const rec = (d.reconcile && d.reconcile.done) || 0;
+          toast('对账 ' + rec + ' 条，' + n + ' 个周期完成校准', 'ok');
+          rerender();
+        } else {
+          toast('学习失败：' + errText(r), 'err');
+        }
+      });
+      return;
+    }
     if (id === 'paper') {
       $$('#pa-bucket .seg').forEach((b) => b.addEventListener('click', () => {
         S.paBucket = b.getAttribute('data-b');
