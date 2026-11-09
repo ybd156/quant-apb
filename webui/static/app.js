@@ -907,6 +907,23 @@
 
   const rawVal = (v) => (isNil(v) ? '' : String(v));
 
+  /** 交易原因中文化：rebalance_in -> 新进入 top-k */
+  function reasonText(r) {
+    const M = {
+      rebalance_in: '新进入 top-k',
+      rebalance_out: '掉出 top-k',
+      take_profit: '止盈',
+      stop_loss: '止损',
+      trailing_stop: '移动止损',
+      add: '加仓',
+      reduce: '减仓',
+      manual: '手工录入',
+      hold_expired: '持有到期',
+    };
+    const k = String(r || '');
+    return M[k] || k || '—';
+  }
+
   const fmtMoney = (v, cur) => {
     const n = toNum(v);
     if (n === null) return '—';

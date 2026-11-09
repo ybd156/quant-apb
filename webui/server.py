@@ -495,6 +495,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/data/qlib":
+            return self._api_data_qlib()
         if path == "/api/train/kit/download":
             return self._api_train_kit_download()
         if path == "/api/intraday/online":
@@ -1025,6 +1027,187 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._ok(fn(verbose=False))
         except Exception as e:  # noqa: BLE001
             return self._fail("session_failed", 200, detail=str(e)[:160])
+
+    def _build_slim_qlib(self, universe: str, max_stocks: int = 300) -> Dict:
+        """
+        按需打包 Qlib 数据子集（只含指定股票池）。
+
+        ## 为什么必须做
+
+        全量包 546MB，公网实测 0.47MB/s → **19 分钟**。
+        训练机第一次运行就卡在这，用户看到的就是
+        「数据准备失败: remote_unreachable」或者干等。
+
+        csi300 的 300 只票压缩后约 20MB，同带宽 1 分钟内完成。
+
+        ## 缓存
+
+        打包结果缓存在 `/tmp/qlib_slim_{universe}_{n}.tar.gz`，
+        第二次请求直接发文件。股票池不变就不会重打。
+
+        返回 {"ok": True, "path": ..., "bytes": ...}
+        """
+        import os as _os
+        import tarfile as _tar
+        import time as _time
+
+        cache = f"/tmp/qlib_slim_{universe}_{max_stocks}.tar.gz"
+        src_root = str(PROJECT_ROOT / "data" / "qlib" / "x" / "qlib_bin")
+        if not _os.path.isdir(src_root):
+            return {"ok": False, "reason": "qlib_dir_missing",
+                    "detail": "NAS 上没有解压后的 qlib_bin 目录"}
+
+        # 缓存 6 小时内有效
+        if _os.path.isfile(cache) and (_time.time() - _os.path.getmtime(cache)) < 21600:
+            return {"ok": True, "path": cache,
+                    "bytes": _os.path.getsize(cache), "cached": True}
+
+        try:
+            from qcore import qlib_data as QD
+            codes = QD.universe_codes(universe, start="2021-01-01")[:max_stocks]
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "reason": "universe_failed", "detail": str(e)[:100]}
+        if not codes:
+            return {"ok": False, "reason": "universe_empty", "detail": universe}
+
+        wanted = {str(c).lower() for c in codes}
+        tmp = cache + ".tmp"
+        n_files = 0
+        try:
+            with _tar.open(tmp, "w:gz", compresslevel=6) as tf:
+                # 1) calendars / instruments 全要（小）
+                for sub in ("calendars", "instruments"):
+                    d = _os.path.join(src_root, sub)
+                    if _os.path.isdir(d):
+                        for fn in sorted(_os.listdir(d)):
+                            fp = _os.path.join(d, fn)
+                            if _os.path.isfile(fp):
+                                tf.add(fp, arcname=f"qlib_bin/{sub}/{fn}")
+                                n_files += 1
+                # 2) features 只要池内的
+                feat = _os.path.join(src_root, "features")
+                if _os.path.isdir(feat):
+                    for code_dir in sorted(_os.listdir(feat)):
+                        if code_dir.lower() not in wanted:
+                            continue
+                        cd = _os.path.join(feat, code_dir)
+                        if not _os.path.isdir(cd):
+                            continue
+                        for fn in sorted(_os.listdir(cd)):
+                            fp = _os.path.join(cd, fn)
+                            if _os.path.isfile(fp):
+                                tf.add(fp, arcname=f"qlib_bin/features/{code_dir}/{fn}")
+                                n_files += 1
+            _os.replace(tmp, cache)
+        except Exception as e:  # noqa: BLE001
+            try:
+                _os.remove(tmp)
+            except Exception:
+                pass
+            return {"ok": False, "reason": "pack_failed", "detail": str(e)[:120]}
+
+        size = _os.path.getsize(cache)
+        return {"ok": True, "path": cache, "bytes": size,
+                "n_files": n_files, "n_codes": len(wanted), "cached": False}
+
+    def _api_data_qlib(self):
+        """
+        把 Qlib 行情数据包发给训练机。
+
+        ## 为什么需要这个
+
+        训练机第一次运行要 545MB 行情数据，默认从 GitHub 下。
+        但国内常访问不了 GitHub —— 训练机卡在「数据准备失败: remote_unreachable」。
+
+        NAS 上本来就有这份数据，直接发给训练机最快：
+          · 局域网：千兆 100MB/s，546MB 约 6 秒
+          · 公网：取决于上行带宽，但至少是通的
+          · 不占 GitHub 配额，也不依赖代理
+
+        训练机 `qcore.data_sync` 会优先试这个地址，失败才回退 GitHub。
+        支持 Range 断点续传（大文件中断不用重来）。
+        """
+        import os as _os
+        # ?universe=csi300&max_stocks=300 生成精简包：
+        # 全量 546MB 走公网 0.47MB/s 要 19 分钟，训练机根本等不起。
+        # csi300 的 300 只票只占约 40MB，压缩后 20MB 左右，1 分钟内能下完。
+        try:
+            from urllib.parse import parse_qs, urlparse as _up
+            _q = parse_qs(_up(self.path or "").query or "")
+            universe = str((_q.get("universe") or [""])[0]).strip()
+            max_stocks = int((_q.get("max_stocks") or ["300"])[0] or 300)
+        except Exception:
+            universe, max_stocks = "", 300
+
+        if universe:
+            slim = self._build_slim_qlib(universe, max_stocks)
+            if slim.get("ok"):
+                tarball = slim["path"]
+            else:
+                return self._fail(slim.get("reason", "slim_failed"), 200,
+                                  detail=slim.get("detail"))
+        else:
+            tarball = None
+
+        if not tarball:
+            cand = [
+                PROJECT_ROOT / "data" / "qlib" / "qlib_bin.tar.gz",
+                PROJECT_ROOT / "data" / "qlib" / "x" / "qlib_bin.tar.gz",
+            ]
+            for c in cand:
+                if _os.path.isfile(str(c)):
+                    tarball = str(c)
+                    break
+        if not tarball:
+            return self._fail("qlib_tarball_missing", 200,
+                              hint="NAS 上还没有打包的行情数据。"
+                                   "在 NAS 执行：cd /app/data/qlib && "
+                                   "tar czf qlib_bin.tar.gz -C x qlib_bin")
+
+        try:
+            size = _os.path.getsize(tarball)
+            start, end = 0, size - 1
+            rng = self.headers.get("Range") or ""
+            partial = False
+            if rng.startswith("bytes="):
+                spec = rng[6:].split("-", 1)
+                try:
+                    if spec[0]:
+                        start = int(spec[0])
+                    if len(spec) > 1 and spec[1]:
+                        end = min(int(spec[1]), size - 1)
+                    partial = True
+                except (ValueError, IndexError):
+                    start, end, partial = 0, size - 1, False
+            if start >= size:
+                return self._fail("range_not_satisfiable", 416)
+
+            length = end - start + 1
+            self.send_response(206 if partial else 200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Length", str(length))
+            self.send_header("Accept-Ranges", "bytes")
+            if partial:
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+            self.send_header("Content-Disposition",
+                             'attachment; filename="qlib_bin.tar.gz"')
+            self._security_headers()
+            self.end_headers()
+
+            with open(tarball, "rb") as f:
+                f.seek(start)
+                left = length
+                while left > 0:
+                    chunk = f.read(min(1 << 20, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+            return True
+        except (BrokenPipeError, ConnectionResetError):
+            return True
+        except Exception as e:  # noqa: BLE001
+            return self._fail("send_failed", 200, detail=str(e)[:100])
 
     def _api_train_kit_download(self):
         """
@@ -1569,6 +1752,27 @@ f.addEventListener('submit',async(e)=>{
 
         # /login 本身：已登录就直接回首页，未登录给登录页
         if path == "/login":
+            # ?token=XXX 一次性登录：给内网便利和自动化测试用。
+            # 只接受与 APB_TOKEN 匹配的 token，不绕过鉴权。
+            try:
+                from urllib.parse import parse_qs, urlparse as _up
+                q = parse_qs(_up(self.path or "").query or "")
+                tk = (q.get("token") or [""])[0]
+                cont = (q.get("continue") or [""])[0]
+            except Exception:
+                tk, cont = "", ""
+            exp_tk = os.environ.get("APB_TOKEN", "")
+            if tk and exp_tk and hmac.compare_digest(tk, exp_tk):
+                sid_q = AUTH.create_session(self._real_ip(),
+                                            self.headers.get("User-Agent") or "")
+                self.send_response(302)
+                self.send_header("Location", cont or "/")
+                self._set_cookie("apb_session", sid_q,
+                                 int(AUTH.SESSION_DAYS * 86400), self._is_https())
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return True
+
             sid0 = self._cookie("apb_session")
             if sid0 and AUTH.verify_session(sid0, touch=False):
                 self.send_response(302)

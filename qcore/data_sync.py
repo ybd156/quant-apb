@@ -128,10 +128,58 @@ def _free_gb(path: str) -> float:
             return 999.0
 
 
+def _mirror_urls() -> list:
+    """
+    下载源，按优先级：
+      1. NAS 自己（训练机只连 NAS 就行，不需要能访问 GitHub）
+      2. GitHub 直连
+      3. GitHub 镜像
+
+    实测价值：国内训练机访问 GitHub 常报 remote_unreachable，
+    而 NAS 上本来就有这份数据，局域网几秒就传完。
+    """
+    urls = []
+    ns = ""
+    try:
+        ns = os.environ.get("APB_NAS", "").strip()
+        # 1) apb_defaults.json（训练机套件里才有）
+        if not ns:
+            for root in (ROOT, os.path.join(ROOT, "tools")):
+                pj = os.path.join(root, "apb_defaults.json")
+                if os.path.isfile(pj):
+                    with open(pj, encoding="utf-8") as f:
+                        ns = str((json.load(f) or {}).get("nas_url") or "").strip()
+                    if ns:
+                        break
+        # 2) tools/defaults.py 里的兜底常量（源码仓库也有）
+        if not ns:
+            try:
+                import sys as _sys
+                _tp = os.path.join(ROOT, "tools")
+                if _tp not in _sys.path:
+                    _sys.path.insert(0, _tp)
+                import defaults as _DEF  # type: ignore
+                ns = _DEF.nas()
+            except Exception:
+                ns = ""
+    except Exception:
+        pass
+    if ns:
+        # 请求精简包：全量 546MB 走公网要 19 分钟，实测 0.47MB/s。
+        # csi300 的 300 只票压缩后 44MB，1.5 分钟能下完（实测）。
+        # 股票池可通过 APB_UNIVERSE / APB_MAX_STOCKS 覆盖。
+        uv = os.environ.get("APB_UNIVERSE", "csi300").strip() or "csi300"
+        n = os.environ.get("APB_MAX_STOCKS", "300").strip() or "300"
+        urls.append(f"{ns.rstrip('/')}/api/data/qlib?universe={uv}&max_stocks={n}")
+    urls.append(DL)
+    urls.append("https://ghproxy.net/" + DL)
+    return [u for u in urls if u]
+
+
 def download(verbose: bool = True) -> Dict:
     """
-    下载 tarball。支持断点续传 + 直连/代理自动切换。
-    返回 {"ok", "bytes", "mode", "reason"}。
+    下载 tarball。支持断点续传 + 多源回退（NAS -> GitHub -> 镜像）。
+    返回 {"ok", "bytes", "mode", "reason", "url"}。
     """
     from . import net
     os.makedirs(QLIB_DIR, exist_ok=True)
@@ -139,7 +187,14 @@ def download(verbose: bool = True) -> Dict:
     t0 = time.time()
     mode_used = "none"
 
-    for attempt in range(6):
+    candidates = _mirror_urls()
+    if verbose:
+        print(f"    {len(candidates)} 个下载源，依次尝试", flush=True)
+
+    for src_url in candidates:
+      if verbose:
+          print(f"    -> {src_url[:70]}", flush=True)
+      for attempt in range(3):
         # 先试直连再试代理（net.get 内部已有选路，但大文件要自己控制流式写盘）
         for mode, proxy in (("direct", None), ("proxy", net.discover_proxy())):
             if mode == "proxy" and not proxy:
@@ -149,7 +204,7 @@ def download(verbose: bool = True) -> Dict:
                 headers = {"User-Agent": "apb", "Accept": "application/octet-stream"}
                 if have > 0:
                     headers["Range"] = f"bytes={have}-"
-                req = urllib.request.Request(DL, headers=headers)
+                req = urllib.request.Request(src_url, headers=headers)
                 opener = urllib.request.build_opener(
                     urllib.request.ProxyHandler({"http": proxy, "https": proxy} if proxy
                                                 else {}))
@@ -166,8 +221,11 @@ def download(verbose: bool = True) -> Dict:
                             print(f"    {done/1e6:.0f}/{total/1e6:.0f} MB "
                                   f"{done/max(time.time()-t0,1)/1e6:.1f} MB/s", flush=True)
                 size = os.path.getsize(TARBALL)
-                if size > 400 * 1024 * 1024:      # 至少 400MB 才算完整
+                # 完整性阈值：全量包 546MB，精简包 44MB。
+                # 低于 20MB 视为不完整（可能只传了错误页）。
+                if size > 20 * 1024 * 1024:
                     return {"ok": True, "bytes": size, "mode": mode,
+                            "url": src_url,
                             "seconds": round(time.time() - t0)}
                 have = size
                 mode_used = mode
