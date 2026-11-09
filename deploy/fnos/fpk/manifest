@@ -1,5 +1,5 @@
 appname         = apb
-version         = 0.20.0
+version         = 0.20.2
 display_name    = APB 量化预知
 platform        = x86
 maintainer      = ybd156
