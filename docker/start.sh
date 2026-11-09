@@ -289,6 +289,20 @@ else:
     PIDS="$PIDS $!"
 fi
 
+# 5.12) 不变量检查（每 6 小时，结果供「风险体检」页展示）
+# 之前只靠手动跑，导致页面上 8 项全是「未提供」。
+if [ "$ENABLE_INVARIANTS" != "0" ]; then
+    (
+        sleep 300
+        while true; do
+            nice -n 19 python -m qcore.invariants > /app/logs/invariants.log 2>&1 || true
+            tail -3 /app/logs/invariants.log 2>/dev/null || true
+            sleep 21600
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (

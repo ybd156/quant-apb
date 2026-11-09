@@ -405,7 +405,8 @@
       const sectors = Array.isArray(e.sectors) ? e.sectors : (e.sectors ? [e.sectors] : []);
       const dirTxt = dir === null ? '—' : dir > 0 ? '利好' : dir < 0 ? '利空' : '中性';
       return '<li class="tl-item ' + cls + '">' +
-        '<div class="tl-head"><span class="tl-date">' + esc(e.date || '—') + '</span>' +
+        (r._live ? '<span class="tag" title="实时抓取，未经人工核实">实时</span> ' : '') +
+      '<div class="tl-head"><span class="tl-date">' + esc(e.date || '—') + '</span>' +
         '<span class="tag info">' + esc(type) + '</span>' +
         '<span class="tag ' + (dir > 0 ? 'hit' : dir < 0 ? 'miss' : 'na') + '">' + esc(dirTxt) + '</span>' +
         (e.evidence_level ? '<span class="tag na">证据 ' + esc(e.evidence_level) + '</span>' : '') +
@@ -2546,7 +2547,7 @@
               '<td class="num">' + (Number(t.price) || 0).toFixed(2) + '</td>' +
               '<td class="num">' + fmtMoney(t.amount) + '</td>' +
               '<td class="num">' + (t.cost == null ? '—' : Number(t.cost).toFixed(2)) + '</td>' +
-              '<td class="muted">' + esc(t.reason || '—') + '</td></tr>').join('') +
+              '<td class="muted">' + esc(reasonText(t.reason)) + '</td></tr>').join('') +
             '</tbody></table></div>'
           : emptyBox('该周期还没有成交', '点右上角「本周期调仓」建仓；该周期没模型时需先训练+预测')) +
         (PG.buckets && PG.buckets.length
@@ -2711,13 +2712,29 @@
     const liveMeta = res.data.live_meta || {};
     const types = Array.from(new Set(rows.map((r) => r.type).filter(Boolean)));
     const years = Array.from(new Set(rows.map((r) => String(r.date || '').slice(0, 4)).filter(Boolean))).sort();
-    setSub('人工 ' + rows.length + ' 条' + (live.length ? ' + 实时 ' + live.length + ' 条' : '') +
-      ' · ' + types.length + ' 类 · ' +
-      (years.length ? years[0] + '–' + years[years.length - 1] : '—'));
+    setSub('人工 ' + rows.length + ' 条（截至 ' + (curatedUntil || '—') + '）'
+      + (live.length ? ' + 实时 ' + live.length + ' 条' : '')
+      + ' · ' + types.length + ' 类 · '
+      + (years.length ? years[0] + '–' + years[years.length - 1] : '—'));
 
     const tf = S.filter.evType;
     const df = S.filter.evDir;
-    const view = rows.filter((r) => {
+
+    // 人工整理的事件止于 curatedUntil（实测 2025-06），之后只能靠实时抓取。
+    // 把 live 也并进时间线，否则 2026 年那一段是空的 —— 看起来像"系统坏了"。
+    const curatedUntil = years.length ? years[years.length - 1] : '';
+    const liveAsEvents = live.map((r) => ({
+      date: String(r.date || r.time || '').slice(0, 10),
+      type: r.type, direction: r.direction, sectors: r.sectors || [],
+      level: r.level, title: r.title, source: r.source,
+      note: r.note, url: r.url,
+      _live: true,
+      evidence_level: r.level === 'strong' ? 'strong' : 'weak',
+      subtype: null, eid: r.eid,
+    }));
+
+    const merged = rows.concat(liveAsEvents);
+    const view = merged.filter((r) => {
       if (tf !== 'all' && r.type !== tf) return false;
       const d = toNum(r.direction);
       if (df === 'pos' && !(d > 0)) return false;
@@ -2726,7 +2743,8 @@
     }).slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
 
     const tl = card({
-      title: '政策日历时间线', sub: '最新在前 · 共 ' + view.length + ' 条', cls: 'flush',
+      title: '政策日历时间线',
+      sub: '最新在前 · 共 ' + view.length + ' 条（人工 + 实时合并）', cls: 'flush',
       tools: '<label class="field inline"><span>类型</span><select id="f-evtype"><option value="all">全部</option>' +
         types.map((t) => '<option value="' + esc(t) + '"' + (tf === t ? ' selected' : '') + '>' +
           esc(EVENT_TYPES[t] || t) + '</option>').join('') + '</select></label>' +
@@ -2840,6 +2858,7 @@
       body: table({
         cols: [
           { label: '源', key: 'name', mono: true },
+          { label: '用途', key: 'desc', render: (r) => '<span class="muted">' + esc(r.desc || '—') + '</span>' },
           { label: '状态', key: 'tag', render: (r) => r.tag },
           { label: '成功', key: 'ok', num: true, render: (r) => esc(num(r.ok, 0)) },
           {
@@ -2849,13 +2868,22 @@
           { label: '延迟 ms', key: 'latency', num: true, render: (r) => esc(num(r.latency, 1)) },
           { label: '最后错误', key: 'err', render: (r) => '<span class="muted">' + esc(r.err || '—') + '</span>' }
         ],
-        rows: Object.keys(sh).map((k) => {
-          const v = sh[k] || {};
+        // source_health.json 的结构是 {as_of, sources:{...}, summary}。
+        // 之前直接遍历顶层，把 as_of / sources / summary 当成"源"显示出来了。
+        rows: Object.keys((sh && sh.sources) || {}).map((k) => {
+          const v = ((sh && sh.sources) || {})[k] || {};
           const failN = toNum(v.fail);
+          const okN = toNum(v.ok);
+          const bad = (failN !== null && failN > 0 && (okN === null || okN === 0));
           return {
-            name: k, ok: toNum(v.ok), fail: failN, latency: toNum(v.latency_ms),
+            name: k,
+            desc: v.desc || '',
+            ok: okN, fail: failN, latency: toNum(v.latency_ms),
             err: v.last_error || '',
-            tag: (failN !== null && failN > 0) ? '<span class="tag bad">有失败</span>' : '<span class="tag ok">正常</span>'
+            tag: bad ? '<span class="tag bad">失败</span>'
+                     : (failN !== null && failN > 0)
+                       ? '<span class="tag warn">有失败</span>'
+                       : '<span class="tag ok">正常</span>'
           };
         })
       })
