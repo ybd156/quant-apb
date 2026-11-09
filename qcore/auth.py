@@ -84,6 +84,11 @@ PUBLIC_PATHS = (
     # 内容是公开的 A 股日线数据（不含持仓/预测/策略），可以公开。
     # 不加会导致训练机拿 401，请求立刻失败、没有任何下载流量。
     "/api/data/qlib",
+    # 训练工具包：训练机首次运行/自更新时要下载。
+    # 内容是公开代码（GitHub Release 上同样能下），不含持仓/预测/策略。
+    # 不公开会形成死锁：旧版训练机没有 token -> 下载 401 -> 永远更新不到新版。
+    "/api/train/kit",
+    "/api/train/kit/download",
 )
 PUBLIC_PREFIXES = ("/static/", "/favicon", "/apple-touch")
 
