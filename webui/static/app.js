@@ -1411,7 +1411,12 @@
           (picks.top_k ? ' · top_k ' + esc(num(picks.top_k, 0)) : '')
         : '未就绪',
       cls: 'flush',
-      tools: '<span class="tag ok">持有中 = 缓冲带内不动</span>',
+      tools: (picks
+        ? '<span class="tag ok">持有中 = 缓冲带内不动</span>'
+        : '<button type="button" class="btn ghost sm" id="md-predict">' +
+          ICON('play') + '生成该周期预测</button>') +
+        '<button type="button" class="btn ghost sm" id="md-predict-any" style="margin-left:6px">' +
+        ICON('play') + '补齐全部周期</button>',
       body: '<div style="padding:0 16px 16px">' + table({
         cols: [
           { label: '#', key: 'rank', num: true, render: (r) => esc(num(r.rank, 0)) },
@@ -3784,6 +3789,44 @@
         S.modelHorizon = Number(b.getAttribute('data-hz'));
         navigate('model', false);
       }));
+      // 生成该周期预测（纯推理，秒级）
+      const pOne = $('#md-predict');
+      if (pOne) pOne.addEventListener('click', async () => {
+        const h = S.modelHorizon || 1;
+        pOne.disabled = true;
+        const r = await api('/api/predict', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ horizon: h })
+        });
+        pOne.disabled = false;
+        if (r && r.ok) {
+          const d = r.data || {};
+          toast('已生成 h' + h + ' 预测：' + (d.n || 0) + ' 只（' + (d.as_of || '') + '）', 'ok');
+          rerender();
+        } else {
+          toast('生成失败：' + errText(r), 'err');
+        }
+      });
+      // 补齐全部周期：逐个调 predict，缺模型的会明确跳过
+      const pAll = $('#md-predict-any');
+      if (pAll) pAll.addEventListener('click', async () => {
+        pAll.disabled = true;
+        const hs = [1, 3, 5, 10, 15];
+        const done = [], skip = [];
+        for (const h of hs) {
+          const r = await api('/api/predict', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ horizon: h })
+          });
+          if (r && r.ok) done.push(h);
+          else skip.push(h);
+        }
+        pAll.disabled = false;
+        toast('已生成 ' + done.length + ' 个周期' +
+              (skip.length ? '，' + skip.length + ' 个缺模型（需在训练机训练）' : ''), 
+              done.length ? 'ok' : 'err');
+        rerender();
+      });
       return;
     }
     if (id === 'chart') {

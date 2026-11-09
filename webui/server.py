@@ -1488,6 +1488,44 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("weekly_failed", 200, detail=str(e)[:160])
 
+    def _post_predict(self):
+        """
+        用已有模型生成某个周期的预测（推理，秒级）。
+
+        body: {"horizon": 5}
+        这是纯推理，不是训练 —— 训练在训练机做，NAS 只推理。
+        """
+        denied = self._write_allowed()
+        if denied is not None:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        try:
+            h = int(body.get("horizon") or 1)
+        except (TypeError, ValueError):
+            h = 1
+        try:
+            from qcore import live_model as LM
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        m, _meta = LM.load_model(h)
+        if m is None:
+            return self._fail("no_model", 200, horizon=h,
+                              hint=f"h={h} 还没有模型。训练在训练机做："
+                                   f"跑 tools/train_one_click.py --horizons={h} 后上传")
+        try:
+            r = LM.predict(horizon=h, verbose=False)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("predict_failed", 200, detail=str(e)[:200], horizon=h)
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "predict_failed"), 200,
+                              horizon=h, hint=r.get("hint"))
+        return self._ok({"horizon": h, "as_of": r.get("as_of"),
+                         "n": r.get("n"), "label": r.get("horizon_label"),
+                         "file": ("picks.json" if h == 1 else f"picks_h{h}.json")})
+
     def _post_paper_reset(self):
         """
         清空某个 (市场, 周期) 的模拟盘，用新金额重开。
@@ -2562,6 +2600,8 @@ f.addEventListener('submit',async(e)=>{
             return self._post_run()
         if path == "/api/fees/save":
             return self._post_fees_save()
+        if path == "/api/predict":
+            return self._post_predict()
         if path == "/api/paper/reset":
             return self._post_paper_reset()
         if path == "/api/paper/rebalance":
