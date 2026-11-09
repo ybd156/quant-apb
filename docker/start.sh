@@ -14,6 +14,13 @@
 #   6. 告警检查   qcore.alert       —— 30 分钟，写 alerts.jsonl
 set -e
 
+# 0) 从快照恢复缺失的环境变量。
+#    fnOS 应用管理器重建容器时会覆盖手工设的 -e 参数 —— 实测 APB_PASSWORD
+#    消失后服务变成完全公开。data/ 是挂载卷，快照在那里，启动时读回来即可自愈。
+if [ -f /app/data/state/env_snapshot.json ] && [ -f /app/scripts/restore_env.py ]; then
+    eval "$(python /app/scripts/restore_env.py 2>/dev/null)" || true
+fi
+
 HOST="${APB_HOST:-0.0.0.0}"
 PORT="${APB_PORT:-8765}"
 MARKET_INTERVAL="${APB_MARKET_INTERVAL:-60}"

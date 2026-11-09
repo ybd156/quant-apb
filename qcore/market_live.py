@@ -188,6 +188,103 @@ def sentiment_temperature(up_ratio: float, limit_up: int, amount_yi: float) -> D
             "parts": {"up_ratio_pct": p1, "limit_up_pct": p2, "amount_pct": p3}}
 
 
+def backfill_history_from_qlib(days: int = 250, verbose: bool = True) -> Dict:
+    """
+    用 qlib 历史行情重建「市场宽度历史」，让情绪温度立刻可用。
+
+    ## 为什么需要
+
+    情绪温度用「历史分位」。原来的历史来自每 60 秒一次的实时快照，
+    但同一天几百条数值几乎一样 —— 去重后只剩 1-2 个取值，分位算不出来，
+    界面永远显示「暂不计算」。
+
+    而 qlib 里有几千只票的完整日线：**每个历史交易日的涨跌家数可以直接算出来**。
+    用这个当历史分布，比等 20 个交易日靠谱得多，而且立刻可用。
+
+    指标与实时口径一致：
+        up_ratio = 上涨家数 / (上涨 + 下跌)
+        amount_yi = 全市场成交额（亿元）
+        limit_up  = 涨停家数（用涨幅 >= 9.8% 近似；主板 10% 限制）
+    """
+    import numpy as _np
+    import pandas as _pd
+
+    from . import qlib_data as QD
+
+    try:
+        codes = QD.universe_codes("csi300", start="2020-01-01")
+    except Exception:
+        codes = []
+    if not codes:
+        return {"ok": False, "reason": "no_universe"}
+
+    if verbose:
+        print(f"[history] 用 {len(codes)} 只票的日线重建宽度历史 ...", flush=True)
+
+    # 收集每只票的收盘序列
+    closes = {}
+    amounts = {}
+    for i, c in enumerate(codes, 1):
+        df = QD.load_stock(c)
+        if df is None or len(df) < 30:
+            continue
+        s = df.set_index("date")["close"]
+        closes[c] = s
+        if "amount" in df.columns:
+            amounts[c] = df.set_index("date")["amount"]
+        if verbose and i % 100 == 0:
+            print(f"  ... {i}/{len(codes)}", flush=True)
+
+    if len(closes) < 20:
+        return {"ok": False, "reason": f"可用股票太少 {len(closes)}"}
+
+    px = _pd.DataFrame(closes).sort_index()
+    amt = _pd.DataFrame(amounts).sort_index() if amounts else None
+    px = px.tail(days + 1)
+    rets = px.pct_change()
+
+    rows = []
+    for d in rets.index[1:]:
+        r = rets.loc[d].dropna()
+        if len(r) < 20:
+            continue
+        up = int((r > 0).sum())
+        down = int((r < 0).sum())
+        if up + down == 0:
+            continue
+        lu = int((r >= 0.098).sum())
+        a = 0.0
+        if amt is not None and d in amt.index:
+            a = float(amt.loc[d].dropna().sum()) / 1e8
+        rows.append({
+            "as_of": f"{_pd.Timestamp(d).date()}T15:00:00+08:00",
+            "up": up, "down": down,
+            "up_ratio": round(up / (up + down), 6),
+            "limit_up": lu,
+            "amount_yi": round(a, 1),
+            "source": "qlib_backfill",
+        })
+
+    if not rows:
+        return {"ok": False, "reason": "no_rows"}
+
+    try:
+        os.makedirs(os.path.dirname(HISTORY_PATH), exist_ok=True)
+        tmp = HISTORY_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, HISTORY_PATH)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"write_failed: {e}"}
+
+    if verbose:
+        print(f"[history] 写入 {len(rows)} 个交易日 -> {HISTORY_PATH}", flush=True)
+        print(f"          范围 {rows[0]['as_of'][:10]} ~ {rows[-1]['as_of'][:10]}", flush=True)
+    return {"ok": True, "n": len(rows),
+            "first": rows[0]["as_of"][:10], "last": rows[-1]["as_of"][:10]}
+
+
 def _load_history() -> List[Dict]:
     if not os.path.exists(HISTORY_PATH):
         return []

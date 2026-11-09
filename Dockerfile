@@ -43,6 +43,9 @@ COPY webui/ ./webui/
 COPY scripts/ ./scripts/
 # 只带不变量检查需要的静态扫描器（15KB），不带测试目录
 COPY audit/leak_scan.py ./audit/
+# INV-1 无未来函数检验需要它（28KB）。夹具不进镜像 ——
+# 该检验优先用真实 qlib 数据，没有夹具时才退回夹具。
+COPY tests/test_no_lookahead.py ./tests/
 COPY tools/ ./tools/
 COPY docker/start.sh ./start.sh
 COPY VERSION README.md LICENSE ./

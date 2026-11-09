@@ -186,6 +186,31 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
                "last_local": last_local, "n": len(bars), "bars": bars}
     _atomic(overlay_path(day), payload)
 
+    # ---- 把日期追加到 qlib 日历 ----
+    # 关键：overlay 只给个股加了 K 线，日历还是旧的那一天。
+    # pipeline / live / 台账全用日历判断「最新交易日」，
+    # 不追加的话它们仍然认为最后一天是旧的（实测 data_to 又变回 11-06）。
+    try:
+        from . import qlib_data as _QD
+        import os as _os
+        cal_path = _os.path.join(_QD.base_dir(), "calendars", "day.txt")
+        if _os.path.isfile(cal_path):
+            with open(cal_path, encoding="utf-8") as f:
+                days = [ln.strip() for ln in f if ln.strip()]
+            if days and days[-1] < day:
+                with open(cal_path, "a", encoding="utf-8") as f:
+                    f.write(day + "\n")
+                if verbose:
+                    print(f"[daily] 日历追加 {day}（原最后 {days[-1]}）", flush=True)
+                # 清日历缓存，让同进程后续读取看到新日期
+                try:
+                    _QD._cache.pop("calendar", None)
+                except Exception:
+                    pass
+    except Exception as _e:  # noqa: BLE001
+        if verbose:
+            print(f"[daily] 日历追加失败（不影响 overlay）: {type(_e).__name__}", flush=True)
+
     # 同步更新 status.json 的 data_to —— 否则界面上「数据截至」还停在旧日期，
     # 明明预测已经用上新数据了。
     try:
