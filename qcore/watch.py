@@ -49,8 +49,36 @@ def _now() -> str:
 
 
 def _bare(code: str) -> str:
-    c = str(code).strip().lower()
-    return c[2:] if c[:2] in ("sh", "sz", "bj") else c.zfill(6)
+    """
+    归一成「展示用代码」。
+
+    A股：600519 / 000001（6 位数字）
+    港股：00700.HK
+    美股：AAPL（纯字母，**不能** zfill 成 00aapl）
+
+    实测 bug：之前无脑 zfill(6)，把 AAPL 变成 00aapl、00700.HK 变成 00700.hk，
+    自选里显示成一串乱码。
+    """
+    raw = str(code).strip()
+    c = raw.lower()
+    if not c:
+        return c
+    if c[:2] in ("sh", "sz", "bj"):
+        return c[2:]
+    if c.endswith(".hk"):
+        num = c[:-3].lstrip("0") or "0"
+        return num.zfill(5) + ".HK"
+    if c[:2] == "hk":
+        num = c[2:].lstrip("0") or "0"
+        return num.zfill(5) + ".HK"
+    if c[:2] == "us":
+        return raw[2:].upper()
+    # 纯字母 -> 美股（保留 BRK.B 这种双类后缀）
+    if c and not c[0].isdigit():
+        head = c.split(".")[0]
+        tail = c[len(head):]
+        return head.upper() + tail.upper()
+    return c.zfill(6)
 
 
 def _qlib(code: str) -> str:

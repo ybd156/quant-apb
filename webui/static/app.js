@@ -2515,7 +2515,8 @@
     // 从自选里点进去看 K 线，合成一页更顺。
     let watchStrip = '';
     try {
-      const wres = await apiCached('/api/watch', 4000);
+      // TTL=0：自选随时会改，不能吃缓存（实测改了自选页面还是旧的）
+      const wres = await apiCached('/api/watch', 0);
       const wd = (wres && wres.ok && wres.data) ? wres.data : {};
       const items = wd.items || [];
       const groups = wd.groups || [];
@@ -2525,7 +2526,14 @@
           const g = it.group || '未分组';
           (byG[g] = byG[g] || []).push(it);
         });
-        const gnames = groups.length ? groups : Object.keys(byG);
+        // groups 是 [{name, codes, n}] 对象列表，不是字符串列表 ——
+        // 直接当 key 用会拿到 "[object Object]"，整条自选就渲染不出来。
+        const gnames = [];
+        groups.forEach((g) => {
+          const nm = (g && typeof g === 'object') ? g.name : g;
+          if (nm && byG[nm] && gnames.indexOf(nm) < 0) gnames.push(nm);
+        });
+        Object.keys(byG).forEach((k) => { if (gnames.indexOf(k) < 0) gnames.push(k); });
         watchStrip = '<div class="card" style="margin-bottom:14px"><div class="card-head" ' +
           'style="padding:14px 16px 0"><h2>自选股</h2>' +
           '<span class="sub">' + items.length + ' 只 · 点一下看 K 线</span></div>' +
@@ -2545,8 +2553,22 @@
               '</div>';
           }).join('') +
           '</div></div>';
+      } else {
+        // 空列表也显示 —— 否则用户不知道自选并入本页了
+        watchStrip = '<div class="card" style="margin-bottom:14px"><div class="card-head" ' +
+          'style="padding:14px 16px 0"><h2>自选股</h2>' +
+          '<span class="sub">还没有自选</span></div>' +
+          '<div style="padding:10px 16px 14px"><div class="muted" style="font-size:13px">' +
+          '在上面的搜索框输入代码，点「加自选」就会出现在这里。' +
+          '</div></div></div>';
       }
-    } catch (e) { watchStrip = ''; }
+    } catch (e) {
+      // 不静默：自选条加载失败要让用户看见原因
+      watchStrip = '<div class="card" style="margin-bottom:14px"><div class="card-head" ' +
+        'style="padding:14px 16px 0"><h2>自选股</h2></div>' +
+        '<div style="padding:10px 16px 14px"><div class="empty">' +
+        '自选加载失败：' + esc(String((e && e.message) || e)) + '</div></div></div>';
+    }
 
     const periods = [['daily', '日K'], ['weekly', '周K'], ['monthly', '月K'],
                      ['quarterly', '季K'], ['halfyear', '半年K'], ['yearly', '年K']];

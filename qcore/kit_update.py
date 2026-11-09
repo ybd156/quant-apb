@@ -106,37 +106,78 @@ def fetch_manifest(nas: str, token: str = "", timeout: int = 20) -> Dict:
         return {"_error": f"{type(e).__name__}: {str(e)[:60]}"}
 
 
-def _download(url: str, out: str, timeout: int = 300) -> Dict:
-    """下载 zip。先用 net 的自动选路，失败再裸 urllib。"""
+def _ssl_ctx_unverified():
+    """训练机常常没有 CA 证书（Windows 自带 Python 尤其常见）——
+    这时 HTTPS 会直接 CERTIFICATE_VERIFY_FAILED，连 GitHub 都下不了。
+    退回不校验证书，但要明确告知用户。"""
+    import ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _download(url: str, out: str, timeout: int = 300, token: str = "") -> Dict:
+    """
+    下载 zip。
+
+    - 带 X-APB-Token：NAS 开了密码后，kit 下载端点也要鉴权
+    - SSL 失败时退回不校验证书（训练机常缺 CA）
+    """
+    import ssl
+    import urllib.error
     import urllib.request
+
     if os.path.isfile(out):
-        os.remove(out)
-    try:
-        from . import net
-        body, mode = net.get(url, timeout_direct=60, timeout_proxy=120)
-        if body:
-            with open(out, "w", encoding="utf-8", errors="ignore") as f:
-                f.write(body)
-            # net.get 返回的是解码后的文本，二进制会坏 —— 这里改用二进制下载
+        try:
             os.remove(out)
-    except Exception:
-        pass
+        except OSError:
+            pass
 
     h = {"User-Agent": _BROWSER_UA}
-    try:
+    if token:
+        h["X-APB-Token"] = token
+        h["X-Token"] = token
+
+    def _try(ctx):
         req = urllib.request.Request(url, headers=h)
-        with urllib.request.urlopen(req, timeout=timeout) as r, open(out, "wb") as f:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r, \
+                open(out, "wb") as f:
             while True:
                 chunk = r.read(1 << 20)
                 if not chunk:
                     break
                 f.write(chunk)
-        size = os.path.getsize(out)
-        if size < 50000:
-            return {"ok": False, "reason": f"文件太小 {size}B，可能下错了"}
-        return {"ok": True, "bytes": size}
+        return os.path.getsize(out)
+
+    size = 0
+    try:
+        size = _try(None)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {"ok": False, "reason": f"HTTP {e.code} 未授权 —— "
+                                          f"检查 APB_TOKEN 是否与服务端一致"}
+        return {"ok": False, "reason": f"HTTP {e.code}"}
+    except ssl.SSLError:
+        try:
+            size = _try(_ssl_ctx_unverified())
+            print("[kit_update] 警告：证书校验失败，已退回不校验（建议在训练机安装 CA 证书）")
+        except Exception as e2:  # noqa: BLE001
+            return {"ok": False, "reason": f"SSL 失败且重试无效：{str(e2)[:60]}"}
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:60]}"}
+        # 有些环境抛的不是 ssl.SSLError，而是 URLError 包裹
+        if "CERTIFICATE_VERIFY_FAILED" in str(e):
+            try:
+                size = _try(_ssl_ctx_unverified())
+                print("[kit_update] 警告：证书校验失败，已退回不校验")
+            except Exception as e2:  # noqa: BLE001
+                return {"ok": False, "reason": f"SSL 失败且重试无效：{str(e2)[:60]}"}
+        else:
+            return {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:60]}"}
+
+    if size < 50000:
+        return {"ok": False, "reason": f"文件太小 {size}B，可能下错了"}
+    return {"ok": True, "bytes": size}
 
 
 def _validate(tmp: str) -> Dict:
@@ -259,7 +300,7 @@ def check_and_update(nas: str, token: str = "", force: bool = False,
             continue
         if verbose:
             print(f"[kit_update] 下载 {u}")
-        d = _download(u, tmpzip)
+        d = _download(u, tmpzip, token=token)
         if d.get("ok"):
             break
         if verbose:
