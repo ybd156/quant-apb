@@ -3343,10 +3343,36 @@
           '所有会话可在服务端用 <code>python -m qcore.auth</code> 查看。</p>'
     }) : card({
       title: '登录状态', sub: '未启用',
+      cls: 'flush',
       body: banner({ tone: 'warn', icon: 'alert',
         title: '任何人都能打开这个页面看到你的持仓和策略',
-        text: '服务端没设 <code>APB_PASSWORD</code>。暴露到公网前必须设置。',
-        meta: '设置后重启容器生效；设了之后所有页面和 API 都需要登录' })
+        text: '服务端<strong>没有</strong>生效的密码。当前所有页面和 API 都是公开的 —— '
+            + '包括持仓、成交记录、推荐名单、策略参数。',
+        meta: '这是真风险，不是提示性警告。' }) +
+        '<div style="padding:0 16px 16px" class="muted">' +
+        '<p style="margin:12px 0 6px"><strong>怎么修</strong>（在 NAS 上执行）：</p>' +
+        '<pre class="mono" style="white-space:pre-wrap;background:var(--surface-3,#1c2434);' +
+        'padding:10px;border-radius:6px;font-size:11px;line-height:1.7">' +
+        esc('# 1. 删掉当前容器（数据在挂载里，不会丢）\n' +
+            'docker rm -f apb\n\n' +
+            '# 2. 带上密码重新创建\n' +
+            'docker run -d --name apb --restart unless-stopped \\\n' +
+            '  -p 8765:8765 \\\n' +
+            '  -v /usr/local/apps/@appdata/apb/data:/app/data \\\n' +
+            '  -v /usr/local/apps/@appdata/apb/logs:/app/logs \\\n' +
+            '  -v /var/run/docker.sock:/var/run/docker.sock \\\n' +
+            '  -e APB_PASSWORD=你的密码 \\\n' +
+            '  -e APB_TOKEN=你的令牌 \\\n' +
+            '  -e APB_ALLOWED_HOSTS=你的域名 \\\n' +
+            '  -e APB_PUBLIC_URL=https://你的域名 \\\n' +
+            '  ghcr.io/ybd156/quant-apb:latest') +
+        '</pre>' +
+        '<p style="margin:10px 0 0">⚠ 用 <code>docker restart</code> 修不好 —— ' +
+        'restart 不会改变环境变量，必须 <code>rm</code> 后重新 <code>run</code>。</p>' +
+        '<p style="margin:6px 0 0">设好之后，容器会把关键变量记到 ' +
+        '<code>data/state/env_snapshot.json</code>，以后应用内更新重建容器会自动带上，' +
+        '不会因为一次遗漏而永久丢失。</p>' +
+        '</div>'
     });
 
     // ---- 访问令牌 ----

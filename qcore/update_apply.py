@@ -33,6 +33,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from . import docker_api as D
+from . import env_guard as EG
 from . import update_progress as UP
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -93,7 +94,16 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
     info = D.inspect(old_id, sock)
     cfg = info.get("Config") or {}
     hc = info.get("HostConfig") or {}
-    env = cfg.get("Env") or []
+    # 合并环境变量快照 —— 防止「一次丢失被永久继承」
+    # 实测：容器重建时没带上 APB_PASSWORD，之后每次更新都在这个基础上重建，
+    # 服务就一直是公开的，而且没有任何报错。
+    try:
+        env = EG.merge(cfg.get("Env") or [])
+        _v = EG.verify(env)
+        if not _v.get("ok"):
+            _log(f"[!] {_v.get('warn')}")
+    except Exception:
+        env = cfg.get("Env") or []
     cmd = cfg.get("Cmd") or []
     binds = hc.get("Binds") or []
     port_bindings = hc.get("PortBindings") or {}
@@ -167,6 +177,17 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
         pass
     ok = D.start(created["id"], sock)
     _log(f"启动{'成功' if ok else '失败'}")
+    # 重建后校验环境变量，缺了关键项要明确说出来（写日志 + 进度）
+    try:
+        _info2 = D.inspect(created["id"], sock)
+        _env2 = (_info2.get("Config") or {}).get("Env") or []
+        _v2 = EG.verify(_env2)
+        if not _v2.get("ok"):
+            _log(f"[!] 重建后鉴权缺失：{_v2.get('warn')}")
+            UP.step("health", _v2.get("warn") or "", ok=False)
+    except Exception:
+        pass
+
     try:
         if ok:
             UP.step("health", "容器已启动，等待健康检查")

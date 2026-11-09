@@ -55,9 +55,11 @@ USER apb
 
 EXPOSE 8765
 
-# 健康检查：/api/health 返回 200 即视为存活（缺数据时也应返回 200 + ok:false）
+# 健康检查必须探 /api/healthz（公开端点）。
+# /api/health 需要登录 —— 设了 APB_PASSWORD 之后它返回 401，
+# 容器会一直显示 unhealthy（实测踩过：加了密码后健康检查全红）。
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD python -c "import urllib.request,sys; \
-sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/health',timeout=4).status==200 else 1)"
+sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/healthz',timeout=4).status==200 else 1)"
 
 ENTRYPOINT ["/app/start.sh"]

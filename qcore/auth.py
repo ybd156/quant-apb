@@ -77,6 +77,9 @@ PUBLIC_PATHS = (
     "/api/logout",
     "/api/healthz",
     "/api/version",
+    # 登录页要显示「是否启用密码」。这个端点只返回布尔和会话列表，
+    # 不含持仓/策略信息，可以公开。
+    "/api/auth",
 )
 PUBLIC_PREFIXES = ("/static/", "/favicon", "/apple-touch")
 
