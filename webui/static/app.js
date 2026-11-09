@@ -1541,9 +1541,10 @@
   /* =============================== 总览 ================================ */
 
   async function pageOverview() {
-    const [perfRes, regimeRes, paperRes, statusRes, modelRes] = await Promise.all([
+    const [perfRes, regimeRes, paperRes, statusRes, modelRes, onlineRes] = await Promise.all([
       apiCached('/api/performance'), apiCached('/api/regime'),
-      apiCached('/api/paper'), apiCached('/api/status'), apiCached('/api/model')
+      apiCached('/api/paper'), apiCached('/api/status'), apiCached('/api/model'),
+      apiCached('/api/online/learn', 5000)
     ]);
     const perf = perfRes.ok ? adaptPerformance(perfRes.data) : null;
     const status = statusRes.ok ? statusRes.data : null;
@@ -3954,7 +3955,8 @@
       }));
     }
 
-    if (id === 'risk') {
+    if (id === 'overview' || id === 'risk') {
+      // 「在线学习」卡片渲染在总览页，但两个页面都可能出现这个按钮
       const ol = $('#ol-run');
       if (ol) ol.addEventListener('click', async () => {
         ol.disabled = true;
@@ -3970,7 +3972,7 @@
           toast('学习失败：' + errText(r), 'err');
         }
       });
-      return;
+      if (id === 'overview') return;
     }
     if (id === 'paper') {
       $$('#pa-bucket .seg').forEach((b) => b.addEventListener('click', () => {

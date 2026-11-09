@@ -428,12 +428,17 @@ def check_smoke(port: int = 8791) -> None:
       2. 跑不通要能明确看到是哪一页
     """
     import subprocess as sp
+    # 冒烟要测「有真实数据」的页面。
+    # 本地实例常常没有数据 -> 页面提前返回 notReadyBox -> 出错的分支根本执行不到
+    # -> 冒烟全绿，但线上一点开就崩（实测：onlineRes is not defined 就是这样漏的）。
+    # 设 APB_SMOKE_BASE 指向真实环境（如 NAS 域名）即可覆盖这条盲区。
+    base = os.environ.get("APB_SMOKE_BASE", "").strip() or f"http://127.0.0.1:{port}"
     smoke = os.path.join(ROOT, "scripts", "smoke_pages.py")
     if not os.path.isfile(smoke):
         rec("smoke.pages", WARN, "没有 smoke_pages.py")
         return
     try:
-        r = sp.run([sys.executable, smoke, f"--base=http://127.0.0.1:{port}"],
+        r = sp.run([sys.executable, smoke, f"--base={base}"],
                    capture_output=True, text=True, timeout=420,
                    encoding="utf-8", errors="replace",
                    env={k: v for k, v in os.environ.items()
@@ -447,7 +452,7 @@ def check_smoke(port: int = 8791) -> None:
             if "[smoke]" in line and "通过" in line:
                 m = line.strip()
         if r.returncode == 0:
-            rec("smoke.pages", PASS, m or "全部页面通过")
+            rec("smoke.pages", PASS, (m or "全部页面通过") + f" @ {base}")
         else:
             fails = [ln.strip() for ln in out.splitlines() if "[FAIL]" in ln]
             rec("smoke.pages", FAIL,
