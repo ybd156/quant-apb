@@ -165,6 +165,33 @@ def _lot(code: str, market: str = "CN") -> int:
         return 100 if str(market).upper() == "CN" else 1
 
 
+# 每个周期默认持有几只。
+#
+# 逻辑：周期越短，换手越频繁、成本占比越高，越该集中。
+#   T+1  年换手 250 次，成本拖累 38.6%/年 -> 只做 2 只，减少交易次数
+#   15 天 年换手 17 次，成本 2.6%/年 -> 可以分散到 10 只
+#
+# 实测：5000 元本金下，T+1 分 5 只每只 1000 元，
+# 排名靠前的票一手就要上万 —— 一只都买不起，账户永远空仓。
+HORIZON_TOP_K = {1: 2, 3: 3, 5: 5, 10: 8, 15: 10}
+
+
+def default_top_k(horizon: int, market: str = "CN") -> int:
+    """该周期的默认持仓数；配置里显式设了就用配置的。"""
+    h = int(horizon or 1)
+    base = HORIZON_TOP_K.get(h, 5)
+    try:
+        from . import account_config as AC
+        cfg = AC.load(market)
+        # 配置值明显大于周期默认值时，取小的（小资金/短周期优先）
+        ck = int(cfg.get("top_k") or 0)
+        if ck > 0:
+            return min(ck, base) if ck > base else ck
+    except Exception:
+        pass
+    return base
+
+
 def rebalance(picks: Optional[Dict] = None, market: str = "CN",
               top_k: Optional[int] = None, dry_run: bool = False,
               verbose: bool = True, horizon: int = 1,
@@ -186,7 +213,8 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     market = str(market).upper()
     h = int(horizon or 1)
     cfg = AC.load(market)
-    k = int(top_k or cfg.get("top_k") or 20)
+    # 持仓数：显式传入 > 周期默认（短线集中、长线分散）
+    k = int(top_k or default_top_k(h, market) or 5)
     cost_bps = float(cfg.get("cost_bps") or 10.0)
 
     # ---- 按周期选 picks 文件 ----
@@ -239,7 +267,7 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
 
     acc = load_account(market, h)
     if not acc:
-        acc = init_account(float(cfg.get("initial_capital") or 1_000_000), market, h)
+        acc = init_account(float(cfg.get("initial_capital") or 5_000), market, h)
     if acc.get("market") != market:
         return {"ok": False, "reason": "market_mismatch",
                 "account_market": acc.get("market"), "want": market,
@@ -274,10 +302,42 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
             except Exception:
                 pass
 
-    want = [str(r.get("code", "")).zfill(6) for r in rows[:k]]
-    score_of = {str(r.get("code", "")).zfill(6): float(r.get("score") or 0) for r in rows}
     pos: Dict[str, Dict] = dict(acc.get("positions") or {})
     cash = float(acc.get("cash") or 0)
+    score_of = {str(r.get("code", "")).zfill(6): float(r.get("score") or 0) for r in rows}
+
+    # ---- 选目标：小资金必须优先选「买得起」的 ----
+    # 直接取排名前 k 是错的：5000 元本金下，排名第 1 的票 131 元/股，
+    # 一手就要 13100 元 —— 一只也买不了，账户永远空仓。
+    # 做法：按排名往下扫，能买得起的才要；已持有的无条件保留（否则会被误卖）。
+    def _affordable(code: str, budget: float) -> bool:
+        try:
+            px = _price(code)
+            if not px or px <= 0:
+                return False
+            unit = float(_lot(code, market) or 1)
+            return px * unit <= budget * 1.05      # 允许 5% 超出，买入时再按实际算
+        except Exception:
+            return False
+
+    budget = cash / max(k, 1)
+    want: List[str] = []
+    # 1) 先放已持有的（保住，不因"买不起"被误判掉出 top-k）
+    for code in pos:
+        if code in score_of:
+            want.append(code)
+    # 2) 再按排名补，跳过买不起的
+    for r in rows:
+        if len(want) >= k:
+            break
+        code = str(r.get("code", "")).zfill(6)
+        if code in want:
+            continue
+        if _affordable(code, budget):
+            want.append(code)
+    # 3) 一只都买不起时退回原逻辑（至少让台账有记录，并会在 filled 里说明）
+    if not want:
+        want = [str(r.get("code", "")).zfill(6) for r in rows[:k]]
 
     # fees 模块算每笔明细（佣金有最低收费、印花税仅卖出、各市场不同）。
     # 不用扁平 bps —— 买卖不对称，用平均值会系统性低估卖出成本。
@@ -449,9 +509,9 @@ def reset(market: str = "CN", horizon: int = 1,
     if capital is None:
         try:
             from . import account_config as AC
-            capital = float(AC.load(m).get("initial_capital") or 1_000_000)
+            capital = float(AC.load(m).get("initial_capital") or 5_000)
         except Exception:
-            capital = 1_000_000.0
+            capital = 5_000.0
     capital = float(capital)
     if capital <= 0:
         return {"ok": False, "reason": "bad_capital", "capital": capital}

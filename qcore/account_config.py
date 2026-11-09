@@ -19,11 +19,11 @@ A 股、美股、港股的资金、成本、最小交易单位、涨跌停规则
 {
   "default_market": "CN",
   "markets": {
-    "CN": {"initial_capital": 1000000.0, "top_k": 20, "max_weight": 0.15,
+    "CN": {"initial_capital": 5000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 19.28, "hold": 20, "currency": "CNY"},
-    "US": {"initial_capital": 100000.0,  "top_k": 20, "max_weight": 0.15,
+    "US": {"initial_capital": 500.0,  "top_k": 5, "max_weight": 0.35,
            "cost_bps": 3.28,  "hold": 20, "currency": "USD"},
-    "HK": {"initial_capital": 500000.0,  "top_k": 20, "max_weight": 0.15,
+    "HK": {"initial_capital": 5000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 38.17, "hold": 20, "currency": "HKD"}
   },
   "updated_at": "..."
@@ -53,12 +53,17 @@ PATH = os.path.join(STATE, "account.json")
 MARKETS = ("CN", "US", "HK")
 
 # 各市场的默认值（成本来自 qcore/costs.py 的实测值）
+# 默认起始资金：小资金模式
+#   A股 5000 元、美股 500 美元、港股 5000 港币
+# 小资金下 top_k 不能太大 —— 5000 元分 20 只，每只 250 元，
+# 很多股票一手（100 股）就超了。所以默认 top_k 调小到 5，
+# 由 qcore/lot.py 的可行性检查兜底（买不起的会被跳过）。
 DEFAULTS: Dict[str, Dict] = {
-    "CN": {"initial_capital": 1_000_000.0, "top_k": 20, "max_weight": 0.15,
+    "CN": {"initial_capital": 5_000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 19.28, "hold": 20, "currency": "CNY"},
-    "US": {"initial_capital": 100_000.0, "top_k": 20, "max_weight": 0.15,
+    "US": {"initial_capital": 500.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 3.28, "hold": 20, "currency": "USD"},
-    "HK": {"initial_capital": 500_000.0, "top_k": 20, "max_weight": 0.15,
+    "HK": {"initial_capital": 5_000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 38.17, "hold": 20, "currency": "HKD"},
 }
 

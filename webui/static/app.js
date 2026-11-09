@@ -2858,6 +2858,7 @@
     // ================= 当前周期的自动交易账户 =================
     const AU = (periodRes && periodRes.ok && periodRes.data) ? periodRes.data : {};
     const A = (AU.account && AU.account.account) ? AU.account.account : {};
+    S.paperAcct = A;          // 事件处理器要用（那里拿不到这里的局部变量）
     const auTrades = (AU.account && AU.account.recent_trades) || [];
     const PG = AU.period || {};
     const FS = AU.fees || {};
@@ -4048,7 +4049,9 @@
       if (rsb) rsb.addEventListener('click', async () => {
         const mktNow = S.paperMarket || 'CN';
         const hzNow = S.paHorizon || 1;
-        const curNav = (A && A.equity != null) ? A.equity : (A && A.initial_capital) || 0;
+        // 不能用局部变量 A —— 这里在 bindPageEvents 作用域，A 不存在（会 ReferenceError）
+        const _acc = S.paperAcct || {};
+        const curNav = (_acc.equity != null) ? _acc.equity : (_acc.initial_capital || 0);
         const inp = window.prompt(
           '清空 ' + mktNow + ' / h' + hzNow + ' 的模拟盘，用新金额重新开始。\n\n' +
           '当前净值：' + fmtMoney(curNav) + '\n' +
@@ -4457,6 +4460,24 @@
   }
 
   /* ------------------------------- 启动 ------------------------------- */
+
+  // 全局兜底：任何脚本错误都弹出来。
+  // 之前点击处理器里出现 ReferenceError 时，界面毫无反应 ——
+  // 用户只能看到「点了没用」，完全不知道发生了什么。
+  window.addEventListener('error', (e) => {
+    try {
+      const msg = (e && e.message) ? String(e.message) : '未知脚本错误';
+      if (/favicon/i.test(msg)) return;
+      toast('页面脚本错误：' + msg.slice(0, 120), 'err');
+    } catch (_) { /* 忽略 */ }
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    try {
+      const r = e && e.reason;
+      const msg = (r && (r.message || r.error)) ? String(r.message || r.error) : String(r || '');
+      if (msg) toast('请求失败：' + msg.slice(0, 120), 'err');
+    } catch (_) { /* 忽略 */ }
+  });
 
   async function boot() {
     buildNav();
