@@ -87,6 +87,7 @@ LR = 0.02            # 学习率（0.05 时 loss 会反弹）
 L2 = 1e-4            # 正则
 EPOCHS = 2           # 每次调用在到期样本上过几遍（3 时开始过拟合）
 MIN_SAMPLES = 60     # 少于这个数不训练（会过拟合）
+MIN_TRADES = 30      # 阈值扫描里单组最少交易次数，低于此视为噪音
 
 
 def _now() -> str:
@@ -489,6 +490,177 @@ def evaluate(panel: Dict, model: Optional[Dict] = None,
             "verdict": verdict, "per_minute": per_min[-20:]}
 
 
+# ---------------------------------------------------------------- 阈值扫描
+def threshold_sweep(panel: Dict, model: Optional[Dict] = None,
+                    thresholds: Optional[List[float]] = None,
+                    rows_subset=None) -> Dict:
+    """
+    扫阈值：不同置信度门槛下，单边/双边各自的真实表现。
+
+    ## 为什么必须扫
+
+    「分钟级不可行」的结论是在「每分钟全池多空对冲」下得出的：
+        毛 +9.44bps vs 成本 11.28bps → 净 -1.84bps
+
+    但门槛提高后交易次数骤减，成本占比同步下降。极端信号可能是有价值的：
+        只做 prob>0.75 的单子，一天可能只有几次，但毛收益可能翻倍
+
+    而且**单边比双边省一半成本**（不用付两次往返）。
+
+    ## 口径
+
+    单边做多：prob >= t 的样本，收益 = fwd_ret - 单边成本
+    单边做空：prob <= 1-t 的样本，收益 = -fwd_ret - 单边成本
+    双边：两组都做，各扣自己的成本
+
+    成本用 fees 模块的真实现金费率（含佣金最低收费），不是扁平 bps。
+
+    全部只在**样本外**那段评估 —— 用训练集评自己会虚高 10pp 以上。
+    """
+    model = model or load_model()
+    ths = thresholds or [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80]
+    src = rows_subset if rows_subset is not None else panel["rows"]
+    rows = [r for r in src if r.get("y") is not None and r.get("fwd_ret") is not None]
+    if len(rows) < MIN_SAMPLES:
+        return {"ok": False, "reason": f"样本不足 {len(rows)}"}
+
+    X = np.array([r["x"] for r in rows], dtype=np.float64)
+    Xn = _normalize(X, model["mu"], model["sd"])
+    prob = _sigmoid(Xn @ model["w"] + model["b"])
+
+    # 单边成本（用 fees 算真实费率，10 万元一单）
+    try:
+        from . import fees as FEES
+        one_side_bps = float(FEES.trade_fees("CN", "buy", 100000).get("bps") or 5.64)
+    except Exception:
+        one_side_bps = 5.64
+    cost_one = one_side_bps / 1e4
+
+    out = []
+    for t in ths:
+        longs = [(prob[i], rows[i]["fwd_ret"]) for i in range(len(rows)) if prob[i] >= t]
+        shorts = [(prob[i], rows[i]["fwd_ret"]) for i in range(len(rows)) if prob[i] <= 1.0 - t]
+
+        def _stat(pairs, sign=1.0):
+            if not pairs:
+                return {"n": 0, "hit": None, "gross_bps": None,
+                        "net_bps": None, "win": None}
+            rets = np.array([sign * r for _, r in pairs], dtype=float)
+            net = rets - cost_one
+            return {
+                "n": len(pairs),
+                "hit": round(float((rets > 0).mean()), 4),
+                "gross_bps": round(float(rets.mean()) * 1e4, 2),
+                "net_bps": round(float(net.mean()) * 1e4, 2),
+                "win": round(float((net > 0).mean()), 4),
+                "total_net_bps": round(float(net.sum()) * 1e4, 1),
+            }
+
+        L = _stat(longs, 1.0)
+        S = _stat(shorts, -1.0)
+        # 双边：两组合并
+        both = [(p, r) for p, r in longs] + [(p, -r) for p, r in shorts]
+        B = _stat(both, 1.0) if both else {"n": 0}
+
+        # 只在样本量够的配置里挑最优。
+        # 实测教训：t=0.65 的做多只有 2 次样本，净 +66.89bps —— 那是运气，
+        # 拿它当结论会把人骗进坑里。低于 MIN_TRADES 一律标 insufficient。
+        best = None
+        best_raw = None
+        for name, st in (("单边做多", L), ("单边做空", S), ("双边", B)):
+            if not st.get("n") or st.get("net_bps") is None:
+                continue
+            if best_raw is None or st["net_bps"] > best_raw[1]:
+                best_raw = (name, st["net_bps"], st["n"])
+            if st["n"] >= MIN_TRADES:
+                if best is None or st["net_bps"] > best[1]:
+                    best = (name, st["net_bps"], st["n"])
+
+        out.append({
+            "threshold": t,
+            "long": L, "short": S, "both": B,
+            "best_side": best[0] if best else None,
+            "best_net_bps": best[1] if best else None,
+            "best_n": best[2] if best else None,
+            "min_trades": MIN_TRADES,
+            # 样本不足时如实说，不给出"最优"
+            "insufficient": best is None,
+            "raw_best": ({"side": best_raw[0], "net_bps": best_raw[1],
+                          "n": best_raw[2],
+                          "note": f"仅 {best_raw[2]} 次样本，噪音，不采信"}
+                         if best_raw and (best is None or best_raw[2] < MIN_TRADES)
+                         else None),
+            "verdict": (
+                f"阈值 {t:.2f}：" + (
+                    f"{best[0]} 净 {best[1]:+.2f}bps/次（{best[2]} 次）"
+                    if best else
+                    f"所有方向样本 < {MIN_TRADES}，不足以判断"
+                )
+            ),
+        })
+
+    # 挑出净收益最高的配置
+    viable = [x for x in out if x.get("best_net_bps") is not None
+              and x["best_net_bps"] > 0]
+    viable.sort(key=lambda x: -x["best_net_bps"])
+    top = viable[0] if viable else None
+    short_sample = [x for x in out if x.get("insufficient")]
+
+    return {
+        "ok": True, "n_samples": len(rows),
+        "cost_one_side_bps": round(one_side_bps, 2),
+        "thresholds": out,
+        "viable_count": len(viable),
+        "best": top,
+        "min_trades": MIN_TRADES,
+        "verdict": (
+            f"扫描 {len(ths)} 个阈值（单边成本 {one_side_bps:.2f}bps，"
+            f"每组最少 {MIN_TRADES} 次才采信），"
+            f"{len(viable)} 个配置扣成本后为正"
+            + (f"，其中 {len(short_sample)} 个因样本不足被排除" if short_sample else "")
+            + "。"
+            + (f"最优：阈值 {top['threshold']:.2f} 的 {top['best_side']}，"
+               f"净 {top['best_net_bps']:+.2f}bps/次（{top['best_n']} 次）。" if top
+               else "**所有达标配置扣成本后都为负** —— 这个市场/时段分钟级不成立。")
+        ),
+    }
+
+
+def adaptive_side(panel: Dict, model: Optional[Dict] = None,
+                  rows_subset=None) -> Dict:
+    """
+    自适应选择方向：先扫阈值，再判断这个市场适合单边还是双边。
+
+    「适合单边就只做单边」的判断依据：
+      · 单边做多净收益 > 双边 → 只做多（省一半成本）
+      · 双边净收益 > 单边 → 做双边
+      · 都不为正 → 不做，只保留预测能力（当作日频特征）
+    """
+    sw = threshold_sweep(panel, model=model, rows_subset=rows_subset)
+    if not sw.get("ok"):
+        return sw
+    rows_ok = [x for x in sw["thresholds"] if x.get("best_net_bps") is not None]
+    if not rows_ok:
+        return {"ok": True, "suitable": "none", "note": "没有合格信号"}
+    best = max(rows_ok, key=lambda x: x["best_net_bps"])
+    side = best.get("best_side")
+    if best["best_net_bps"] <= 0:
+        return {"ok": True, "suitable": "none",
+                "recommendation": "不交易",
+                "reason": f"最优配置（阈值 {best['threshold']:.2f} {side}）"
+                          f"扣成本仍为 {best['best_net_bps']:+.2f}bps",
+                "note": "分钟级预测能力仍可用于日频特征（见 live_features）",
+                "sweep": sw}
+    return {"ok": True, "suitable": "long_only" if side == "单边做多"
+            else "short_only" if side == "单边做空" else "both",
+            "threshold": best["threshold"],
+            "net_bps": best["best_net_bps"],
+            "recommendation": f"用阈值 {best['threshold']:.2f} 只做{side}",
+            "reason": (f"{side} 净 {best['best_net_bps']:+.2f}bps/次，"
+                       f"优于其他配置"),
+            "sweep": sw}
+
+
 def run_once(day: Optional[str] = None, verbose: bool = True) -> Dict:
     """完整一轮：建面板 → 训练 → 预测 → 评估 → 落盘。"""
     d = day or datetime.now().strftime("%Y%m%d")
@@ -509,6 +681,8 @@ def run_once(day: Optional[str] = None, verbose: bool = True) -> Dict:
     ev = evaluate(panel, model=model, rows_subset=sp["test"], oos=True)
     # 样本内也留一份做对照 —— 差距大说明过拟合严重
     ev_in = evaluate(panel, model=model, rows_subset=sp["train"], oos=False)
+    sw = threshold_sweep(panel, model=model, rows_subset=sp["test"])
+    ad = adaptive_side(panel, model=model, rows_subset=sp["test"])
 
     payload = {"generated_at": _now(), "day": d,
                "n_minutes": panel.get("n_minutes"),
@@ -530,6 +704,12 @@ def run_once(day: Optional[str] = None, verbose: bool = True) -> Dict:
                "evaluate_in_sample": {k: ev_in.get(k) for k in
                                       ("ok", "oos", "n_samples", "hit_rate",
                                        "mean_spread_bps", "net_bps")},
+               "sweep": {k: sw.get(k) for k in
+                         ("ok", "n_samples", "cost_one_side_bps",
+                          "thresholds", "viable_count", "best", "verdict")},
+               "adaptive": {k: ad.get(k) for k in
+                            ("ok", "suitable", "threshold", "net_bps",
+                             "recommendation", "reason", "note")},
                "note": ("分钟级：T 分钟预测 T+3 分钟，3 分钟后对账。"
                         "用逻辑回归在线 SGD（GBDT 训 3000 样本要 30 秒，做不到每分钟）。"
                         "分位多空扣双重成本后才是真实可交易性。")}
@@ -550,6 +730,24 @@ def run_once(day: Optional[str] = None, verbose: bool = True) -> Dict:
                       f"净 {ei['net_bps']:+.2f}bps（对照，差距大说明过拟合）",
                       flush=True)
             print(f"  {e['verdict']}", flush=True)
+            sv = payload.get("sweep") or {}
+            if sv.get("ok"):
+                print(f"  阈值扫描（单边成本 {sv['cost_one_side_bps']}bps）：", flush=True)
+                for x in sv["thresholds"]:
+                    L, S, B = x["long"], x["short"], x["both"]
+                    def _f(st):
+                        if not st.get("n"):
+                            return "    0次/    —    "
+                        v = st.get("net_bps")
+                        return f"{st['n']:>5}次/{v:>8.2f}bps"
+                    mark = " (样本不足)" if x.get("insufficient") else ""
+                    print(f"    t={x['threshold']:.2f}  "
+                          f"多 {_f(L)}  空 {_f(S)}  双边 {_f(B)}{mark}", flush=True)
+                print(f"  {sv['verdict']}", flush=True)
+            adp = payload.get("adaptive") or {}
+            if adp.get("ok"):
+                print(f"  建议：{adp.get('recommendation') or adp.get('suitable')} "
+                      f"— {adp.get('reason') or adp.get('note')}", flush=True)
         else:
             print(f"[intraday] 评估跳过：{e.get('reason')}", flush=True)
     return {"ok": True, **payload}

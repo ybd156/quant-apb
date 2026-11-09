@@ -50,6 +50,19 @@ try:
     w=json.load(open('/app/data/state/watchlist.json'))
     codes+= [it['code'] for it in (w.get('items') or [])][:10]
 except Exception: pass
+
+# ---- 主流 ETF ----
+# ETF 免印花税、免过户费，往返成本约 6.08bps vs 股票 11.28bps。
+# 分钟级交易能不能成立，成本是关键变量 —— 所以 ETF 必须纳入监控。
+# 选的都是日成交额十亿以上的，流动性足够。
+codes += ['510300','510500','588000','159915','512880',
+          '512480','515030','512690','513100','518880',
+          '159949','512170','515790','588080','159920']
+
+# ---- 港美股（腾讯接口支持 hk/us 前缀）----
+codes += ['00700.HK','09988.HK','03690.HK',
+          'AAPL','MSFT','NVDA','TSLA','SPY','QQQ']
+
 print(','.join(dict.fromkeys(codes)) or '600519')
 " > /tmp/tick_codes.txt 2>/dev/null
             python -m qcore.tick --loop --interval="${TICK_INTERVAL}" \
@@ -268,7 +281,7 @@ elif not trading:
     print('[intraday] 非交易时段，跳过')
 else:
     from qcore import intraday_online as IO
-    IO.run_once(verbose=True)
+    IO.run_all_markets(verbose=True)
 " 2>&1 | tail -6 || true
             sleep 300
         done

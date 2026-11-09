@@ -55,16 +55,78 @@ def _get(url: str, encoding: str = "gbk", timeout: int = 6,
 
 
 def _norm(code: str) -> str:
-    """600519 -> sh600519；000001 -> sz000001；已带前缀原样返回。"""
-    c = str(code).strip().lower()
-    if c[:2] in ("sh", "sz", "bj"):
+    """
+    统一成腾讯的代码格式。支持 A股 / 港股 / 美股。
+
+        600519      -> sh600519
+        000001      -> sz000001
+        00700.HK    -> hk00700      （港股）
+        AAPL        -> usAAPL       （美股）
+        hk00700     -> hk00700      （已带前缀原样）
+
+    多市场是必须的：分钟级预测要在所有市场都试一遍，
+    不同市场的波动结构和成本差异很大，不能假设结论通用。
+    """
+    raw = str(code).strip()
+    c = raw.lower()
+    if not c:
         return c
+    if c[:2] in ("sh", "sz", "bj", "hk", "us"):
+        # 已带前缀：港股补零对齐，美股保持原样（含 BRK.B 这种双类）
+        if c.startswith("hk"):
+            return "hk" + c[2:].zfill(5)
+        if c.startswith("us"):
+            return "us" + raw[2:].upper()
+        return c
+
+    # 港股：00700.HK / 0700.HK / 700.HK
+    if c.endswith(".hk"):
+        num = c[:-3].lstrip("0") or "0"
+        return "hk" + num.zfill(5)
+
+    # 美股：AAPL / TSLA / BRK.B —— 带字母。双类股保留后面的 .X
+    # （BRK.B 在腾讯里就是 usBRK.B，不能截断成 usBRK）
+    if c and not c[0].isdigit():
+        head = c.split(".")[0]
+        tail = c[len(head):]        # 保留 .B / .A 之类
+        return "us" + head.upper() + tail.upper()
+
     c6 = c.zfill(6)
-    if c6[0] in ("6", "9"):
+    # 上交所：股票 6/9 开头；ETF/LOF：51/52/56/58 开头
+    #   510300 沪深300ETF  588000 科创50ETF  512880 证券ETF
+    if c6[0] in ("6", "9") or c6[:2] in ("51", "52", "56", "58"):
         return "sh" + c6
+    # 北交所
     if c6[:2] in ("43", "83", "87", "92"):
         return "bj" + c6
+    # 深交所：股票 0/3 开头；ETF/LOF：15/16/18 开头
+    #   159915 创业板ETF  159919 沪深300ETF  161725 白酒LOF
     return "sz" + c6
+
+
+def is_etf(code: str) -> bool:
+    """
+    判断是不是 ETF/LOF。**这直接影响成本**：
+    A股 ETF 免印花税（股票卖出要 0.05%）、免过户费，
+    往返成本比股票低约一半 —— 分钟级交易能不能成立，差别就在这。
+    """
+    c = str(code).strip().lower()
+    if c[:2] in ("sh", "sz", "bj"):
+        c = c[2:]
+    c6 = c.zfill(6)
+    return c6[:2] in ("51", "52", "56", "58", "15", "16", "18")
+
+
+def _bare(code: str) -> str:
+    """sh600519 -> 600519；hk00700 -> 00700.HK；usAAPL -> AAPL"""
+    c = str(code).strip().lower()
+    if c.startswith("hk"):
+        return c[2:].zfill(5) + ".HK"
+    if c.startswith("us"):
+        return c[2:].upper()        # usBRK.B -> BRK.B
+    if c[:2] in ("sh", "sz", "bj"):
+        return c[2:]
+    return c
 
 
 # ------------------------------------------------------------------ 腾讯
@@ -156,6 +218,9 @@ def _eastmoney(codes: List[str]) -> Dict[str, Dict]:
     out: Dict[str, Dict] = {}
     for c in codes:
         n = _norm(c)
+        # 东财这条路只覆盖 A 股；港美股走腾讯/新浪
+        if not (n.startswith("sh") or n.startswith("sz") or n.startswith("bj")):
+            continue
         secid = f"{'1' if n.startswith('sh') else '0'}.{n[2:]}"
         try:
             txt = _get("https://push2.eastmoney.com/api/qt/stock/get"

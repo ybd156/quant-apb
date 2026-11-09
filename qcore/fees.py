@@ -90,6 +90,20 @@ BUILTIN: Dict[str, Dict] = {
         "verified_on": "2026-11", "source": "builtin",
         "note": "零佣金券商：只有 SEC fee + TAF，且都只在卖出收",
     },
+    "CN_ETF": {
+        "market": "CN_ETF", "name": "A股ETF/LOF", "currency": "CNY",
+        "commission_bps": 2.5, "commission_min": 5.0,
+        "stamp_duty_bps": 0.0,        # **ETF 免印花税**（股票卖出 0.05%）
+        "stamp_side": "none",
+        "transfer_bps": 0.0,          # **ETF 免过户费**
+        "exchange_bps": 0.341,        # 经手费照收
+        "regulator_bps": 0.2,         # 证管费照收
+        "sec_fee_bps_sell": 0.0,
+        "taf_per_share": 0.0,
+        "lot_size": 100,
+        "verified_on": "2026-11", "source": "builtin",
+        "note": "ETF 免印花税、免过户费 → 往返成本约为股票的一半",
+    },
     "HK": {
         "market": "HK", "name": "港股", "currency": "HKD",
         "commission_bps": 3.0, "commission_min": 3.0,
@@ -189,12 +203,21 @@ def get(market: str) -> Dict:
 
 # ---------------------------------------------------------------- 计算
 def trade_fees(market: str, side: str, amount: float,
-               qty: float = 0, price: float = 0) -> Dict:
+               qty: float = 0, price: float = 0,
+               code: str = "") -> Dict:
     """
     算一笔成交的全部费用。返回明细 + 合计。
     side: "buy" | "sell"
     amount: 成交金额（qty * price）
     """
+    # 传了代码就自动识别 ETF，用对应的费率表
+    if code and str(market).upper() == "CN":
+        try:
+            from .tick import is_etf
+            if is_etf(code):
+                market = "CN_ETF"
+        except Exception:
+            pass
     s = get(market)
     side = str(side).lower()
     amt = max(float(amount or 0), 0.0)
