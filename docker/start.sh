@@ -24,6 +24,8 @@ ENABLE_TICK="${APB_TICK:-1}"
 TICK_INTERVAL="${APB_TICK_INTERVAL:-3}"
 ENABLE_LIVE="${APB_LIVE:-1}"
 LIVE_MAX_AGE="${APB_LIVE_MAX_AGE_DAYS:-7}"
+# NAS 上训练默认关闭（训练机负责）；需要兜底时设 APB_RETRAIN=1
+ENABLE_RETRAIN="${APB_RETRAIN:-0}"
 ENABLE_HEALTH="${APB_HEALTH:-1}"
 HEALTH_INTERVAL="${APB_HEALTH_INTERVAL:-21600}"
 ENABLE_ALERT="${APB_ALERT:-1}"
@@ -134,9 +136,10 @@ print('[session]', r.get('session'), r.get('reason') or 'ok')
         (
             sleep 180
             while true; do
-                # 自举：遍历所有周期，缺模型/超龄的都补上，训完立刻生成预测。
-            # 之前只训 h=1，h=3/10/15 永远「未训」，必须等人去训练机跑。
-            # 用户问「没模型就一定要停下来等吗」—— 不该。
+                # 自举：遍历所有周期，缺模型/超龄的都补上。
+            # 注意：默认只在 APB_RETRAIN=1 时才启用（见上方说明）。
+            # 常规做法是在训练机跑 tools/train_one_click.py（一次训全部周期后上传），
+            # NAS 只在训练机长期不在线时才兜底。
             nice -n 19 python -c "
 from datetime import datetime
 from qcore import model_bootstrap as MB
