@@ -216,20 +216,6 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     # 持仓数：显式传入 > 周期默认（短线集中、长线分散）
     k = int(top_k or default_top_k(h, market) or 5)
 
-    # 资金约束：每只至少要有 MIN_PER_STOCK 元，否则一手都买不起。
-    # 实测数据（A股，2026-11）：
-    #   h3/h10 排名靠前的标的，一手成本 1880 / 4880 / 20350 元不等。
-    #   5000 元按 3 只分，每只 1667 元 —— 连最便宜的 1880 都买不起，0 成交。
-    #   每只预算提到 2500 后，1880 那只能买，账户不再空仓。
-    MIN_PER_STOCK = 2500.0
-    try:
-        _cash_now = float((acc or {}).get("cash") or 0)
-        if _cash_now > 0:
-            _max_k = max(1, int(_cash_now // MIN_PER_STOCK))
-            if k > _max_k:
-                k = _max_k
-    except Exception:
-        pass
     cost_bps = float(cfg.get("cost_bps") or 10.0)
 
     # ---- 按周期选 picks 文件 ----
@@ -287,6 +273,17 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
         return {"ok": False, "reason": "market_mismatch",
                 "account_market": acc.get("market"), "want": market,
                 "hint": "模拟盘按市场独立，请用对应市场的账户"}
+    # ---- 资金约束：每只至少要有 MIN_PER_STOCK 元，否则一手都买不起 ----
+    # 注意：这段必须在 acc 赋值**之后**。之前放在前面引用了未定义的 acc，
+    # UnboundLocalError 被 except 吞掉，约束从未生效 —— 实测 5000 元本金
+    # 仍然按 k=5 分（每只 1000 元），账户照样空仓。
+    MIN_PER_STOCK = 2500.0
+    _equity = float(acc.get("equity") or acc.get("cash") or 0)
+    if _equity > 0:
+        _max_k = max(1, int(_equity // MIN_PER_STOCK))
+        if k > _max_k:
+            k = _max_k
+
 
     # ---- 持有期闸门：没到 h 个交易日就不调仓 ----
     if not force:
@@ -539,16 +536,16 @@ def reset(market: str = "CN", horizon: int = 1,
 
     # 金额：显式传入 > 原账户本金 > 配置默认
     if capital is None:
-        # 优先用「该周期专属本金」——这是配置里明确的意图。
-        # 之前先取旧账户的 initial_capital，导致改了配置也重置不生效
-        # （旧账户永远是上次那个数）。
+        # 优先级：显式传入 > 旧账户本金 > 配置里该周期本金。
+        # 之前先取 capital_for（它永远有返回值），导致「沿用原值」变成死代码，
+        # 一次「清空重设」会把 80 万本金静默改成 5000。
+        capital = float((old_acc or {}).get("initial_capital") or 0) or None
+    if capital is None:
         try:
             from . import account_config as AC
-            capital = float(AC.capital_for(m, h) or 0) or None
+            capital = float(AC.capital_for(m, h) or 0) or 5_000.0
         except Exception:
-            capital = None
-    if capital is None:
-        capital = float((old_acc or {}).get("initial_capital") or 0) or 5_000.0
+            capital = 5_000.0
     capital = float(capital)
     if capital <= 0:
         return {"ok": False, "reason": "bad_capital", "capital": capital}
@@ -602,7 +599,7 @@ def reset(market: str = "CN", horizon: int = 1,
     acc = init_account(capital, m, h)
     try:
         from . import account_config as AC
-        AC.save({"initial_capital": capital}, m)
+        AC.save({"horizon_capital": {str(h): capital}}, m)
     except Exception:
         pass
 

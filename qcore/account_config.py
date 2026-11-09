@@ -59,20 +59,22 @@ MARKETS = ("CN", "US", "HK")
 # 很多股票一手（100 股）就超了。所以默认 top_k 调小到 5，
 # 由 qcore/lot.py 的可行性检查兜底（买不起的会被跳过）。
 # 每个周期可以单独设本金：不同周期的最优资金规模不一样。
+#
+# **不要**把 horizon_capital 放进 DEFAULTS —— 一旦预填，
+# capital_for 就永远能取到值，用户显式设的 initial_capital 从此失效
+# （实测：initial_capital=800000 + 预填全 5000 -> 实际用 5000）。
+# 空 dict / 缺失 = 未设置，回落到 initial_capital。
 #   T+1 换手极快，本金大了成本吃光收益；15 天可以放更多。
 DEFAULT_HORIZON_CAPITAL = {1: 5_000.0, 3: 5_000.0, 5: 5_000.0,
                            10: 5_000.0, 15: 5_000.0}
 
 DEFAULTS: Dict[str, Dict] = {
     "CN": {"initial_capital": 5_000.0, "top_k": 5, "max_weight": 0.35,
-           "cost_bps": 19.28, "hold": 20, "currency": "CNY",
-           "horizon_capital": dict(DEFAULT_HORIZON_CAPITAL)},
+           "cost_bps": 19.28, "hold": 20, "currency": "CNY"},
     "US": {"initial_capital": 500.0, "top_k": 5, "max_weight": 0.35,
-           "cost_bps": 3.28, "hold": 20, "currency": "USD",
-           "horizon_capital": {h: 500.0 for h in DEFAULT_HORIZON_CAPITAL}},
+           "cost_bps": 3.28, "hold": 20, "currency": "USD"},
     "HK": {"initial_capital": 5_000.0, "top_k": 5, "max_weight": 0.35,
-           "cost_bps": 38.17, "hold": 20, "currency": "HKD",
-           "horizon_capital": dict(DEFAULT_HORIZON_CAPITAL)},
+           "cost_bps": 38.17, "hold": 20, "currency": "HKD"},
 }
 
 # 字段 -> (下限, 上限)。initial_capital 按市场另设（见 CAPITAL_LIMITS）
@@ -223,7 +225,14 @@ def save(payload: Dict, market: str = "CN") -> Tuple[Optional[Dict], Optional[st
         return None, err
     cfg = load()
     m = str(market).upper()
+    # horizon_capital 要逐键合并：整对象替换会把用户留空的周期删掉，
+    # 那个周期就静默回落到 initial_capital，量级可能差 100 倍。
+    _hc = clean.pop("horizon_capital", None)
     cfg["markets"][m].update(clean)
+    if _hc:
+        cur = dict(cfg["markets"][m].get("horizon_capital") or {})
+        cur.update(_hc)
+        cfg["markets"][m]["horizon_capital"] = cur
     cfg["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     os.makedirs(STATE, exist_ok=True)
     tmp = PATH + ".tmp"

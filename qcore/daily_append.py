@@ -164,6 +164,9 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
             continue
         try:
             bars[str(c).lower()] = {
+                # 记下「这根比值是相对哪一天」—— 下游要用它校验连续性，
+                # 否则断档日会被静默吞掉（实测 11-09 缺一天，+5% 直接消失）
+                "prev": str(_pd.Timestamp(prev["date"]).date()),
                 "oo": round(float(cur["open"]) / pc, 8),
                 "oc": round(float(cur["close"]) / pc, 8),
                 "ol": round(float(cur["low"]) / pc, 8),

@@ -208,6 +208,14 @@ def _apply_overlay(code: str, df: pd.DataFrame) -> pd.DataFrame:
         b = (o.get("bars") or {}).get(c)
         if not b:
             continue
+        # 连续性校验：overlay 的比值是相对 prev 那天算的。
+        # 若本地最后一根不是 prev（中间缺了交易日），硬乘会把
+        # 断档日的涨跌整段吞掉 —— 宁可少一根，也不要错一根。
+        _prev = b.get("prev")
+        if _prev:
+            _expect = str(last_date.date()) if not rows else str(rows[-1]["date"].date())
+            if str(_prev) != _expect:
+                continue
         prev_close = last_close if not rows else float(rows[-1]["close"])
         try:
             rows.append({
@@ -225,7 +233,13 @@ def _apply_overlay(code: str, df: pd.DataFrame) -> pd.DataFrame:
         return df
     add = pd.DataFrame(rows)
     add["vwap"] = (add["high"] + add["low"] + add["close"]) / 3.0
-    add["factor"] = 1.0
+    # factor 是 qlib 的**归一化尺度**（600519 约 0.028），不是复权因子。
+    # 硬写 1.0 会让 noon.py 的 close/factor 算出 -97% 的假亏损，
+    # 也会让 cleaning 每天报 factor_jump 假警报。沿用上一根。
+    try:
+        add["factor"] = float(df["factor"].iloc[-1]) if "factor" in df.columns else 1.0
+    except Exception:
+        add["factor"] = 1.0
     for col in df.columns:
         if col not in add.columns:
             add[col] = df[col].iloc[-1]

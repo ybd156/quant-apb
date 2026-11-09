@@ -173,9 +173,39 @@ def sentiment_temperature(up_ratio: float, limit_up: int, amount_yi: float) -> D
                           f"接下来每交易日会累积 1 条）",
                 "distinct": len(_u), "have_days": len(hist),
                 "temperature": None}
+    def _comparable(key, cur):
+        """
+        当前值是否与历史同口径。
+
+        判定：当前值超过历史最大值 2 倍（且历史最大值 > 0）时，
+        说明两边统计范围不同 —— 例如历史是 csi300 回填（涨停最多 7 家），
+        实时是全市场（54 家）。这时分位永远 = 1.0，等于没有信息量，
+        还会把温度下限锁死。
+        """
+        vals = [h.get(key) for h in hist if h.get(key) is not None]
+        if not vals or cur is None:
+            return True
+        try:
+            hi = max(float(v) for v in vals)
+            if hi <= 0:
+                return True
+            return float(cur) <= hi * 2.0
+        except (TypeError, ValueError):
+            return True
+
+    dropped = []
+    if not _comparable("limit_up", limit_up):
+        p2 = None
+        dropped.append("limit_up")
+    else:
+        p2 = _pct_rank([h.get("limit_up") for h in hist], limit_up)
+    if not _comparable("amount_yi", amount_yi):
+        p3 = None
+        dropped.append("amount_yi")
+    else:
+        p3 = _pct_rank([h.get("amount_yi") for h in hist], amount_yi)
     p1 = _pct_rank([h.get("up_ratio") for h in hist], up_ratio)
-    p2 = _pct_rank([h.get("limit_up") for h in hist], limit_up)
-    p3 = _pct_rank([h.get("amount_yi") for h in hist], amount_yi)
+
     parts = [(p1, 0.4), (p2, 0.3), (p3, 0.3)]
     avail = [(p, w) for p, w in parts if p is not None]
     if not avail:
@@ -184,8 +214,13 @@ def sentiment_temperature(up_ratio: float, limit_up: int, amount_yi: float) -> D
     temp = 100.0 * sum(p * w for p, w in avail) / wsum
     level = ("过热" if temp >= 80 else "偏热" if temp >= 60 else
              "中性" if temp >= 40 else "偏冷" if temp >= 20 else "冰点")
-    return {"ok": True, "temperature": round(temp, 1), "level": level,
-            "parts": {"up_ratio_pct": p1, "limit_up_pct": p2, "amount_pct": p3}}
+    out = {"ok": True, "temperature": round(temp, 1), "level": level,
+           "parts": {"up_ratio_pct": p1, "limit_up_pct": p2, "amount_pct": p3}}
+    if dropped:
+        out["dropped"] = dropped
+        out["note"] = ("以下分量与历史口径不可比，已剔除并重新分配权重："
+                       + "、".join(dropped))
+    return out
 
 
 def backfill_history_from_qlib(days: int = 250, verbose: bool = True) -> Dict:
@@ -252,10 +287,22 @@ def backfill_history_from_qlib(days: int = 250, verbose: bool = True) -> Dict:
         down = int((r < 0).sum())
         if up + down == 0:
             continue
-        lu = int((r >= 0.098).sum())
+        # 涨停家数：创业板/科创板是 20%，主板是 10%。
+        # 统一用 9.8% 会把 300/301/688 的普通大涨误计成涨停（实测 7 家里错 1 家）。
+        _code_of = {c: str(c).lower() for c in r.index}
+        _n20 = sum(1 for c in r.index
+                   if _code_of[c][2:5].startswith(("300", "301", "688")))
+        _is20 = _pd.Series(
+            [str(c).lower()[2:5].startswith(("300", "301", "688")) for c in r.index],
+            index=r.index)
+        lu = int((r[_is20] >= 0.198).sum() + (r[~_is20] >= 0.098).sum())
+
+        # 成交额单位：qlib 的 amount 是**千元**（volume 是手）。
+        # 除以 1e8 会让成交额低估 1000 倍 -> 分位永远 1.0 ->
+        # 温度下限被锁死在 60 分，任何行情都显示「偏热」。正确是 /1e5。
         a = 0.0
         if amt is not None and d in amt.index:
-            a = float(amt.loc[d].dropna().sum()) / 1e8
+            a = float(amt.loc[d].dropna().sum()) / 1e5
         rows.append({
             "as_of": f"{_pd.Timestamp(d).date()}T15:00:00+08:00",
             "up": up, "down": down,
