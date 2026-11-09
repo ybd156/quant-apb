@@ -491,6 +491,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/train/kit/download":
+            return self._api_train_kit_download()
+        if path == "/api/paper/auto":
+            return self._api_paper_auto()
+        if path == "/api/live/features":
+            return self._api_live_features()
+        if path == "/api/train/kit":
+            return self._api_train_kit()
         if path == "/api/hotspot":
             return self._api_hotspot(query)
         if path == "/api/horizons":
@@ -1005,6 +1013,139 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._ok(fn(verbose=False))
         except Exception as e:  # noqa: BLE001
             return self._fail("session_failed", 200, detail=str(e)[:160])
+
+    def _api_train_kit_download(self):
+        """
+        把训练机套件发给客户端。本地缓存没有就从 GitHub 拉一次并缓存。
+        这样训练机只需要能连 NAS —— 不用能访问 GitHub。
+        """
+        ver = _read_version()
+        name = f"apb-train-kit_{ver}.zip"
+        cache_dir = STATE_DIR / "kit"
+        cache = cache_dir / name
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        if not cache.is_file():
+            # 本地缓存没有：先看项目目录有没有构建产物，再不行从 GitHub 拉
+            import glob as _g
+            local = _g.glob(os.path.join(str(PROJECT_ROOT), "apb-train-kit_*.zip"))
+            if local:
+                try:
+                    import shutil as _sh
+                    _sh.copy2(sorted(local)[-1], cache)
+                except Exception:
+                    pass
+            if not cache.is_file():
+                repo = os.environ.get("APB_REPO", "ybd156/quant-apb")
+                url = (f"https://github.com/{repo}/releases/download/"
+                       f"v{ver}/{name}")
+                try:
+                    from qcore import net as _net
+                    body, _mode = _net.get(url, timeout_direct=90, timeout_proxy=150)
+                    if body:
+                        # net.get 返回解码后的文本，二进制会坏 —— 用裸下载
+                        import urllib.request as _ur
+                        req = _ur.Request(url, headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                        with _ur.urlopen(req, timeout=180) as r, open(cache, "wb") as f:
+                            while True:
+                                chunk = r.read(1 << 20)
+                                if not chunk:
+                                    break
+                                f.write(chunk)
+                except Exception as e:  # noqa: BLE001
+                    return self._fail("kit_unavailable", 200,
+                                      detail=f"拉取失败: {type(e).__name__}: {str(e)[:80]}",
+                                      hint="该版本的训练机套件还没构建完成，稍后再试")
+
+        if not cache.is_file():
+            return self._fail("kit_not_built", 200,
+                              hint=f"{name} 尚未生成（CI 构建完成后可用）")
+        try:
+            size = cache.stat().st_size
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(size))
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            with open(cache, "rb") as f:
+                while True:
+                    chunk = f.read(1 << 20)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            return True
+        except Exception as e:  # noqa: BLE001
+            return self._fail("send_failed", 200, detail=str(e)[:100])
+
+    def _api_paper_auto(self):
+        """模拟盘自动交易：账户 + 成交记录。"""
+        try:
+            from qcore import paper_auto as PA
+            return self._ok(PA.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("paper_auto_failed", 200, detail=str(e)[:160])
+
+    def _post_paper_rebalance(self):
+        """
+        按当前 picks 自动调仓。body: {"dry_run": true, "market": "CN", "top_k": 20}
+        """
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        try:
+            from qcore import paper_auto as PA
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        try:
+            r = PA.rebalance(market=str(body.get("market") or "CN"),
+                             top_k=(int(body["top_k"]) if body.get("top_k") else None),
+                             dry_run=bool(body.get("dry_run")),
+                             verbose=False)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("rebalance_failed", 200, detail=str(e)[:160])
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "rebalance_failed"), 200,
+                              hint=r.get("hint"))
+        return self._ok(r)
+
+    def _api_live_features(self):
+        """实时特征（从 tick 提取）：积累天数 + 是否够训练。"""
+        try:
+            from qcore import live_features as LF
+            return self._ok(LF.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("live_features_failed", 200, detail=str(e)[:160])
+
+    def _api_train_kit(self):
+        """
+        训练机套件的版本清单 —— 服务端下发的更新源。
+        训练机轮询这个接口，版本比自己新就自动下载覆盖。
+        """
+        ver = _read_version()
+        repo = os.environ.get("APB_REPO", "ybd156/quant-apb")
+        base = f"https://github.com/{repo}/releases/download/v{ver}"
+        name = f"apb-train-kit_{ver}.zip"
+        payload = {
+            "version": ver,
+            "name": name,
+            "url": f"{base}/{name}",
+            "url_mirror": f"https://ghproxy.net/{base}/{name}",
+            "released_at": None,
+            "note": ("训练机执行 python tools/sync_agent.py --auto-update "
+                     "会自动比对版本并覆盖更新"),
+            "public_url": os.environ.get("APB_PUBLIC_URL", ""),
+        }
+        # 永远给 local_url —— NAS 自己当镜像，训练机只连 NAS 就行，
+        # 不需要能访问 GitHub（国内很多网络到不了）。
+        payload["local_url"] = "/api/train/kit/download"
+        payload["local_file"] = name
+        return self._ok(payload)
 
     def _api_hotspot(self, query):
         """
@@ -1850,6 +1991,8 @@ f.addEventListener('submit',async(e)=>{
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/paper/rebalance":
+            return self._post_paper_rebalance()
         if path == "/api/login":
             return self._api_login()
         if path == "/api/logout":

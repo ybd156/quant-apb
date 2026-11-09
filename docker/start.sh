@@ -180,6 +180,36 @@ HS.snapshot(verbose=True)
     PIDS="$PIDS $!"
 fi
 
+# 5.8) 模拟盘自动调仓（每 2 小时一次，按最新 picks）
+if [ "$ENABLE_PAPER_AUTO" != "0" ]; then
+    (
+        sleep 120
+        while true; do
+            python -c "
+from qcore import paper_auto as PA
+PA.rebalance(verbose=True)
+" 2>&1 | tail -3 || true
+            sleep 7200
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
+# 5.9) 实时特征提取（收盘后把当天 tick 压成日频特征）
+if [ "$ENABLE_LIVE_FEAT" != "0" ]; then
+    (
+        sleep 150
+        while true; do
+            python -c "
+from qcore import live_features as LF
+LF.extract_all(verbose=True)
+" 2>&1 | tail -3 || true
+            sleep 3600
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
 # 6) 告警检查
 if [ "$ENABLE_ALERT" = "1" ]; then
     (

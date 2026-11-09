@@ -3003,6 +3003,17 @@
         '</p>'
     });
 
+    const autoOn = S.autoRefresh !== false;
+    const autoCard = card({
+      title: '自动刷新', sub: '行情类页面自动更新，不用手点刷新',
+      body: '<div class="segmented" id="set-auto">' +
+        '<button type="button" class="seg' + (autoOn ? ' is-active' : '') + '" data-v="1">开启</button>' +
+        '<button type="button" class="seg' + (!autoOn ? ' is-active' : '') + '" data-v="0">关闭</button>' +
+        '</div><p class="muted" style="margin-top:10px">' +
+        '交易时段 30 秒刷新一次，非交易时段 5 分钟。只在「总览 / 市场 / 风口 / 个股 / 自选」生效；' +
+        '设置页不刷新（会把正在填的表单冲掉）。弹窗打开时也暂停。</p>'
+    });
+
     const themeCard = card({
       title: '外观', sub: '存 localStorage，默认暗色',
       body: '<div class="segmented" id="set-theme">' +
@@ -3013,11 +3024,47 @@
 
     return '<div class="grid two" style="margin-bottom:14px">' + infoCard + filesCard + '</div>' +
       '<div style="margin-bottom:14px">' + updateCard(u) + '</div>' +
-      '<div style="margin-bottom:14px">' + authCard + '</div>' +
+      '<div class="grid two" style="margin-bottom:14px">' + authCard + autoCard + '</div>' +
       '<div style="margin-bottom:14px">' + tokenCard + '</div>' +
       '<div style="margin-bottom:14px">' + trainCard + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + runCard + exportCard + '</div>' +
       themeCard;
+  }
+
+  /* ============================== 自动刷新 ============================= */
+
+  /**
+   * 行情类页面自动刷新。交易时段 30 秒，非交易时段 5 分钟。
+   * 只在「行情/风口/个股/自选」页生效 —— 设置页刷新会把用户正在填的表单冲掉。
+   */
+  const AUTO_PAGES = { market: 1, hotspot: 1, chart: 1, watch: 1, overview: 1 };
+  let _autoTimer = null;
+
+  function _isTradingTime() {
+    const d = new Date();
+    const wd = d.getDay();
+    if (wd === 0 || wd === 6) return false;
+    const hm = d.getHours() * 60 + d.getMinutes();
+    return (hm >= 9 * 60 + 15 && hm <= 11 * 60 + 35) ||
+           (hm >= 12 * 60 + 55 && hm <= 15 * 60 + 10);
+  }
+
+  function startAutoRefresh(page) {
+    stopAutoRefresh();
+    if (!AUTO_PAGES[page]) return;
+    if (S.autoRefresh === false) return;
+    const ms = _isTradingTime() ? 30000 : 300000;
+    _autoTimer = setTimeout(() => {
+      // 弹窗打开时不刷，避免打断操作
+      const mask = document.getElementById('modal-mask');
+      const modalOpen = mask && !mask.hasAttribute('hidden');
+      if (!modalOpen) navigate(S.page, false, true);
+      else startAutoRefresh(page);
+    }, ms);
+  }
+
+  function stopAutoRefresh() {
+    if (_autoTimer) { clearTimeout(_autoTimer); _autoTimer = null; }
   }
 
   /* =============================== 路由 =============================== */
@@ -3067,8 +3114,9 @@
       '</div><div class="card"><div class="skeleton" style="width:100%;height:120px"></div></div>';
   }
 
-  async function navigate(id, push) {
+  async function navigate(id, push, silent) {
     if (!RENDERERS[id]) id = 'overview';
+    stopAutoRefresh();
     S.page = id;
     const meta = pageMeta(id);
     $('#page-title').textContent = meta.title;
@@ -3081,7 +3129,8 @@
       try { localStorage.setItem('apb.page', id); } catch (e) { /* ignore */ }
     }
     const view = $('#view');
-    view.innerHTML = skeleton();
+    const _scrollY = silent ? window.scrollY : 0;
+    if (!silent) view.innerHTML = skeleton();
     let html;
     try {
       html = await RENDERERS[id]();
@@ -3090,8 +3139,13 @@
     }
     if (S.page !== id) return;      // 期间已切页
     view.innerHTML = html;
-    window.scrollTo(0, 0);
+    if (silent) {
+      window.scrollTo(0, _scrollY);   // 自动刷新不能把用户拽回顶部
+    } else {
+      window.scrollTo(0, 0);
+    }
     bindPageEvents(id);
+    startAutoRefresh(id);
   }
 
   /* --------------------------- 页内事件绑定 --------------------------- */
@@ -3564,6 +3618,10 @@
     const fromHash = (location.hash || '').replace(/^#\/?/, '');
     let last = null;
     try { last = localStorage.getItem('apb.page'); } catch (e) { /* ignore */ }
+  try {
+    const _ar = localStorage.getItem('apb.autoRefresh');
+    S.autoRefresh = (_ar == null) ? true : (_ar === '1');
+  } catch (e) { S.autoRefresh = true; }
     const start = RENDERERS[fromHash] ? fromHash : (RENDERERS[last] ? last : 'overview');
     try {
       const pm = localStorage.getItem('apb.paper.market');

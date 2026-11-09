@@ -145,6 +145,10 @@ def main(argv=None) -> int:
     ap.add_argument("--loop", type=int, default=0, help="常驻，每隔 N 秒轮询")
     ap.add_argument("--push-only", action="store_true", help="不领任务，直接推送现有模型")
     ap.add_argument("--horizons", default="", help="--push-only 时指定，如 1,5")
+    ap.add_argument("--auto-update", action="store_true",
+                    help="每轮先检查服务端版本，比自己新就自动覆盖代码")
+    ap.add_argument("--update-only", action="store_true",
+                    help="只检查更新，不领任务")
     a = ap.parse_args(argv)
 
     try:
@@ -162,6 +166,22 @@ def main(argv=None) -> int:
         print("       检查地址、端口、以及 NAS 是否在跑")
         return 1
     print(f"已连接 {nas}  版本 {h.get('data', {}).get('version', '?')}")
+
+    def _maybe_update() -> None:
+        """服务端下发更新：版本比自己新就覆盖代码（不动 data/dist/runtime）。"""
+        if not (a.auto_update or a.update_only):
+            return
+        try:
+            from qcore import kit_update as KU
+            r = KU.check_and_update(nas, token, verbose=True)
+            if r.get("action") == "updated":
+                print(f"  已更新到 {r.get('to')}（重启后生效）")
+        except Exception as e:  # noqa: BLE001
+            print(f"  更新检查失败：{type(e).__name__}: {str(e)[:60]}")
+
+    _maybe_update()
+    if a.update_only:
+        return 0
 
     if a.push_only:
         hs = ([int(x) for x in a.horizons.split(",") if x.strip()]
@@ -188,6 +208,7 @@ def main(argv=None) -> int:
         print(f"常驻模式，每 {a.loop} 秒轮询一次（Ctrl+C 退出）")
         while True:
             try:
+                _maybe_update()
                 _one()
             except KeyboardInterrupt:
                 print("\n退出")
