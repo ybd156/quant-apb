@@ -1046,3 +1046,28 @@ select { cursor: pointer; }
 .tbl td { padding: 8px 10px; border-bottom: 1px solid rgba(120,140,180,.10); }
 .tbl td.num, .tbl td.mono { font-variant-numeric: tabular-nums; }
 .tbl .tag.is-active { background: rgba(74,125,255,.16); color: #6aa6ff; }
+
+/* ============================== 个股行情 ============================== */
+.ck-input { flex: 1; min-width: 180px; padding: 9px 12px; border-radius: 8px;
+  border: 1px solid rgba(120,140,180,.28); background: rgba(120,140,180,.06);
+  color: var(--text-1, #d5dae3); font-size: 14px; font-variant-numeric: tabular-nums;
+  text-transform: uppercase; }
+.ck-input:focus { outline: none; border-color: #4a7dff; background: rgba(74,125,255,.08); }
+
+.quote-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.quote-price { font-size: 32px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+.quote-chg { font-size: 16px; font-variant-numeric: tabular-nums; }
+.quote-price.is-up, .quote-chg.is-up { color: #e8544a; }
+.quote-price.is-down, .quote-chg.is-down { color: #2bb673; }
+
+.quote-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); gap: 10px 16px; }
+.qg-item { display: flex; flex-direction: column; gap: 3px; }
+.qg-k { font-size: 11.5px; color: var(--text-3, #6b7684); }
+.qg-v { font-size: 13.5px; font-variant-numeric: tabular-nums; color: var(--text-1, #d5dae3); }
+
+.kline-wrap { width: 100%; overflow: hidden; }
+.kline-svg { display: block; width: 100%; height: 420px; }
+.ma-chips { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11.5px; }
+.ma-chip { display: inline-flex; align-items: center; gap: 5px; color: var(--text-2, #9aa4b2);
+  font-variant-numeric: tabular-nums; }
+.ma-chip i { width: 8px; height: 2.5px; border-radius: 2px; display: inline-block; }

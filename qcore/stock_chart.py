@@ -78,6 +78,31 @@ def _pct(a: Optional[float], b: Optional[float]) -> Optional[float]:
     return round((a / b - 1.0) * 100.0, 3)
 
 
+def _resample(df, period: str):
+    """
+    把日线聚合成周/月/季/半年/年线。
+    A 股用东财原生周期（和交易所切分一致）；港美股只有日线，只能本地聚合。
+    本地聚合按自然周/月切分，节假周可能和交易所略有差异 —— 会标注出来。
+    """
+    if period == "daily":
+        return df
+    import pandas as pd
+    rule = {"weekly": "W-FRI", "monthly": "ME", "quarterly": "QE",
+            "halfyear": "6ME", "yearly": "YE"}.get(period)
+    if rule is None:
+        return None
+    d = df.copy()
+    d["date"] = pd.to_datetime(d["date"], errors="coerce")
+    d = d.dropna(subset=["date"]).set_index("date").sort_index()
+    agg = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    if "volume" in d.columns:
+        agg["volume"] = "sum"
+    if "amount" in d.columns:
+        agg["amount"] = "sum"
+    out = d.resample(rule).agg(agg).dropna(subset=["open", "close"]).reset_index()
+    return out
+
+
 def build(code: str, period: str = "daily", count: int = 180,
           adjust: int = 0) -> Dict:
     """返回一只股票的图表数据。取不到就明确失败，不编造。"""
@@ -88,13 +113,38 @@ def build(code: str, period: str = "daily", count: int = 180,
     count = max(30, min(int(count or 180), 1000))
     code = str(code).strip()
 
-    try:
-        from . import data as D
-        df = D.fetch_kline(code, adjust=int(adjust), klt=PERIOD_KLT[period],
-                           beg="19900101")
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "reason": f"fetch_failed: {type(e).__name__}",
-                "detail": str(e)[:120]}
+    df = None
+    fetch_err = None
+    # A 股走东财（支持日/周/月/季/半年/年）
+    # 港股/美股走 us_data（只有日线，周期由本地聚合）
+    _c = str(code).upper()
+    _is_hk = _c.endswith(".HK")
+    _is_us = (not _is_hk) and (not str(code).isdigit()) and _c.isalpha()
+    if _is_hk or _is_us:
+        try:
+            from . import us_data as U
+            # adjust 必须透传：us_data 默认 ADJUST=2（后复权），
+            # 直接调会让 AAPL 显示 79066 而不是 270 —— 用户会以为数据错了。
+            _adj = int(adjust)
+            raw = (U.load_hk_kline(code, adjust=_adj) if _is_hk
+                   else U.load_us_kline(code, adjust=_adj))
+            if raw is not None and len(raw):
+                df = _resample(raw, period)
+                if df is None:
+                    return {"ok": False, "reason": "unsupported_period_for_market",
+                            "detail": "港美股只有日线，周期由本地聚合；"
+                                      "请用 daily/weekly/monthly"}
+        except Exception as e:  # noqa: BLE001
+            fetch_err = f"{type(e).__name__}: {str(e)[:100]}"
+    else:
+        try:
+            from . import data as D
+            df = D.fetch_kline(code, adjust=int(adjust), klt=PERIOD_KLT[period],
+                               beg="19900101")
+        except Exception as e:  # noqa: BLE001
+            fetch_err = f"{type(e).__name__}: {str(e)[:100]}"
+    if df is None:
+        return {"ok": False, "reason": "fetch_failed", "detail": fetch_err or ""}
 
     if df is None or len(df) == 0:
         return {"ok": False, "reason": "no_data", "code": code}
@@ -168,7 +218,9 @@ def build(code: str, period: str = "daily", count: int = 180,
     name = None
     try:
         from . import names as NAMES
-        name = NAMES.name_of(code)
+        m = NAMES.load() or {}
+        rec = m.get(str(code)) or m.get(str(code).zfill(6)) or {}
+        name = rec.get("name") if isinstance(rec, dict) else (str(rec) if rec else None)
     except Exception:
         pass
 

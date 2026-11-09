@@ -436,6 +436,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
+        _a = self._auth_check()
+        if _a is not None:
+            return
         _g = self._guard_request()
         if _g is not None:
             return
@@ -497,6 +500,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_calendar(query)
         if path == "/api/lot":
             return self._api_lot(query)
+        if path == "/api/auth":
+            return self._api_auth()
+        if path == "/api/kline":
+            return self._api_kline(query)
         if path == "/api/healthz":
             return self._api_healthz()
         if path == "/api/netguard":
@@ -1151,6 +1158,228 @@ class ApiHandler(BaseHTTPRequestHandler):
                                   hint="未设 APB_TOKEN 时只允许内网")
         return None
 
+    # ============================== 登录 ==============================
+
+    LOGIN_HTML = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>登录 · APB</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:#0d1117;color:#d5dae3;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",
+  "PingFang SC","Microsoft YaHei",sans-serif}
+.card{width:min(380px,calc(100vw - 40px));padding:32px 28px;border-radius:16px;
+  background:#151b23;border:1px solid rgba(120,140,180,.18);
+  box-shadow:0 20px 60px rgba(0,0,0,.45)}
+.brand{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,#4a7dff,#6aa6ff);
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;color:#fff}
+h1{font-size:17px;margin:0;font-weight:600}
+.sub{font-size:12.5px;color:#7d8794;margin:0 0 22px}
+label{display:block;font-size:12.5px;color:#9aa4b2;margin-bottom:7px}
+input{width:100%;padding:11px 13px;border-radius:9px;font-size:14px;
+  border:1px solid rgba(120,140,180,.28);background:rgba(120,140,180,.06);color:#d5dae3}
+input:focus{outline:none;border-color:#4a7dff;background:rgba(74,125,255,.08)}
+button{width:100%;margin-top:16px;padding:11px;border-radius:9px;border:0;cursor:pointer;
+  background:linear-gradient(135deg,#4a7dff,#6aa6ff);color:#fff;font-size:14px;font-weight:500}
+button:hover{filter:brightness(1.08)}
+button:disabled{opacity:.6;cursor:not-allowed}
+.err{color:#ff6b6b;font-size:12.5px;margin-top:12px;min-height:18px}
+.foot{margin-top:18px;font-size:11.5px;color:#5b6470;text-align:center}
+</style></head><body>
+<form class="card" id="f">
+  <div class="brand"><div class="logo">APB</div><h1>自学习参数体</h1></div>
+  <p class="sub">请输入访问密码</p>
+  <label for="pw">密码</label>
+  <input id="pw" type="password" autocomplete="current-password" autofocus required>
+  <button type="submit" id="btn">进入</button>
+  <div class="err" id="err"></div>
+  <div class="foot">连续输错会被临时锁定</div>
+</form>
+<script>
+const f=document.getElementById('f'),pw=document.getElementById('pw'),
+      btn=document.getElementById('btn'),err=document.getElementById('err');
+f.addEventListener('submit',async(e)=>{
+  e.preventDefault();
+  btn.disabled=true; err.textContent='';
+  try{
+    const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({password:pw.value})});
+    const d=await r.json().catch(()=>({}));
+    if(d && d.ok){ location.replace('/'); return; }
+    err.textContent=(d && (d.hint||d.error))||'登录失败';
+  }catch(ex){ err.textContent='网络错误'; }
+  btn.disabled=false; pw.select();
+});
+</script></body></html>"""
+
+    def _auth_check(self):
+        """
+        全局门禁。返回 None 放行；否则已写好响应。
+        会话 cookie 或 X-APB-Token（机器访问）任一有效即通过。
+        """
+        try:
+            from qcore import auth as AUTH
+        except Exception:
+            return None
+        if not AUTH.enabled():
+            return None
+        path = (self.path or "/").split("?")[0]
+
+        # /login 本身：已登录就直接回首页，未登录给登录页
+        if path == "/login":
+            sid0 = self._cookie("apb_session")
+            if sid0 and AUTH.verify_session(sid0, touch=False):
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return True
+            body = self.LOGIN_HTML.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except Exception:
+                pass
+            return True
+
+        if AUTH.is_public_path(path):
+            return None
+
+        # 机器访问：X-APB-Token（训练机同步代理用）
+        expected = os.environ.get("APB_TOKEN", "")
+        given = self.headers.get("X-APB-Token") or ""
+        if expected and given and hmac.compare_digest(given, expected):
+            return None
+
+        sid = self._cookie("apb_session")
+        if sid and AUTH.verify_session(sid):
+            return None
+
+        if path.startswith("/api/"):
+            return self._fail("login_required", 401,
+                              hint="请先登录（浏览器打开首页输入密码）")
+        # 非 API：给登录页
+        body = self.LOGIN_HTML.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except Exception:
+            pass
+        return True
+
+    def _cookie(self, name: str) -> str:
+        raw = self.headers.get("Cookie") or ""
+        for part in raw.split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return ""
+
+    def _set_cookie(self, name: str, value: str, max_age: int, secure: bool) -> None:
+        parts = [f"{name}={value}", "Path=/", f"Max-Age={int(max_age)}",
+                 "HttpOnly", "SameSite=Lax"]
+        if secure:
+            parts.append("Secure")
+        self.send_header("Set-Cookie", "; ".join(parts))
+
+    def _api_login(self):
+        try:
+            from qcore import auth as AUTH
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        if not AUTH.enabled():
+            return self._fail("login_disabled", 200,
+                              hint="服务端未设 APB_PASSWORD，登录未启用")
+        ip = self._real_ip()
+        limited, wait = AUTH.rate_limited(ip)
+        if limited:
+            return self._fail("too_many_attempts", 429,
+                              hint=f"失败次数过多，请 {wait} 秒后再试")
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        pw = str((body or {}).get("password") or "")
+        if not AUTH.check_password(pw):
+            AUTH.record_fail(ip)
+            return self._fail("bad_password", 401, hint="密码不对")
+        AUTH.clear_fails(ip)
+        sid = AUTH.create_session(ip, self.headers.get("User-Agent") or "")
+        secure = self._is_https()
+        payload = {"ok": True, "data": {"ok": True, "expires_days": AUTH.SESSION_DAYS}}
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self._set_cookie("apb_session", sid, int(AUTH.SESSION_DAYS * 86400), secure)
+        self.end_headers()
+        try:
+            self.wfile.write(raw)
+        except Exception:
+            pass
+        return True
+
+    def _api_logout(self):
+        try:
+            from qcore import auth as AUTH
+            sid = self._cookie("apb_session")
+            if sid:
+                AUTH.destroy_session(sid)
+        except Exception:
+            pass
+        payload = {"ok": True, "data": {"ok": True}}
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        self.send_header("Cache-Control", "no-store")
+        self._set_cookie("apb_session", "", 0, self._is_https())
+        self.end_headers()
+        try:
+            self.wfile.write(raw)
+        except Exception:
+            pass
+        return True
+
+    def _real_ip(self) -> str:
+        try:
+            from qcore import net_guard as NG
+            return NG.real_ip((self.client_address or ("", 0))[0],
+                              {k: v for k, v in (self.headers or {}).items()})
+        except Exception:
+            return (self.client_address or ("", 0))[0]
+
+    def _is_https(self) -> bool:
+        """判断是否 HTTPS（决定 cookie 要不要 Secure）。"""
+        xf = (self.headers.get("X-Forwarded-Proto") or "").lower()
+        if xf:
+            return xf == "https"
+        cf = (self.headers.get("CF-Visitor") or "").lower()
+        if "https" in cf:
+            return True
+        return False
+
+    def _api_auth(self):
+        try:
+            from qcore import auth as AUTH
+            st = AUTH.status()
+            st["logged_in"] = bool(self._cookie("apb_session")
+                                   and AUTH.verify_session(self._cookie("apb_session"), touch=False))
+            st["you_are"] = self._real_ip()
+            return self._ok(st)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("auth_status_failed", 200, detail=str(e)[:160])
+
     def _guard_request(self):
         """
         统一前置检查：Host 头（防 DNS rebinding）+ CORS 预检。
@@ -1191,6 +1420,37 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception:
             client = (self.client_address or ("", 0))[0]
             return _is_private_ip(client)
+
+    def _api_kline(self, query):
+        """
+        个股 K 线 + 均线 + 量能 + 区间统计。
+        query: code=600519 & period=daily|weekly|monthly & count=180 & adjust=0
+        """
+        q = query or {}
+        code = str((q.get("code") or [""])[0]).strip()
+        if not code:
+            return self._fail("bad_param", 400, hint="需要 code，如 600519 / 00700.HK / AAPL")
+        period = str((q.get("period") or ["daily"])[0]).lower()
+        count = _clamp_int(q.get("count"), 180, 30, 1000)
+        try:
+            adjust = int((q.get("adjust") or ["0"])[0])
+        except (TypeError, ValueError):
+            adjust = 0
+        if adjust not in (0, 1, 2):
+            adjust = 0
+        try:
+            from qcore import stock_chart as SC
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        try:
+            r = SC.build(code, period=period, count=count, adjust=adjust)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("kline_failed", 200, detail=str(e)[:160])
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "kline_failed"), 200,
+                              detail=r.get("detail"),
+                              supported=r.get("supported"))
+        return self._ok(r)
 
     def _api_healthz(self):
         """给反向代理/容器编排用的极简健康检查（不读任何状态文件）。"""
@@ -1478,6 +1738,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         self._body_error = None
         if not self._drain_body():
             return
+        _a = self._auth_check()
+        if _a is not None:
+            return
         _g = self._guard_request()
         if _g is not None:
             return
@@ -1499,6 +1762,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/login":
+            return self._api_login()
+        if path == "/api/logout":
+            return self._api_logout()
         if path == "/api/sync/task":
             return self._post_sync_task()
         if path == "/api/sync/result":

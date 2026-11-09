@@ -97,6 +97,15 @@
 
   async function api(url, options) {
     const opts = Object.assign({ headers: { Accept: 'application/json' } }, options || {});
+    // 写请求自动带 token：服务端设了 APB_TOKEN 时，不带就是 403。
+    // 调用方显式传的 X-Token 优先（比如「触发一次更新」卡片里的输入框）。
+    const _m = String(opts.method || 'GET').toUpperCase();
+    if (_m !== 'GET' && _m !== 'HEAD') {
+      opts.headers = Object.assign({}, opts.headers);
+      const has = Object.keys(opts.headers).some((k) => k.toLowerCase() === 'x-token');
+      const t = getToken();
+      if (!has && t) opts.headers['X-Token'] = t;
+    }
     let res;
     try {
       res = await fetch(url, opts);
@@ -111,6 +120,17 @@
     }
     body._status = res.status;
     if (body.ok !== true && !body.error) body.error = 'http_' + res.status;
+    if ((body.error === 'unauthorized' || body.error === 'forbidden')
+        && !body.hint2) {
+      body.hint2 = '服务端设了 APB_TOKEN。去「设置 → 访问令牌」填一次，浏览器会记住。';
+    }
+    // 会话过期/未登录：直接送去登录页，不要停在一个到处报错的界面
+    if (body.error === 'login_required') {
+      if (!window.__apbRedirecting) {
+        window.__apbRedirecting = true;
+        location.replace('/login');
+      }
+    }
     return body;
   }
 
@@ -536,7 +556,8 @@
   const PAGES = [
     { id: 'overview', label: '总览', icon: 'overview', title: '总览', sub: '这台测量仪现在读数是多少' },
     { id: 'market', label: '市场', icon: 'market', title: '实时行情', sub: '指数 / 情绪温度 / 市场宽度' },
-    { id: 'signals', label: '信号', icon: 'signals', title: '信号权重', sub: '每个「信号 × 参数」专家当前权重' },
+    { id: 'chart', label: '个股', icon: 'search', title: '个股行情', sub: 'K线 / 均线 / 成交量' },
+      { id: 'signals', label: '信号', icon: 'signals', title: '信号权重', sub: '每个「信号 × 参数」专家当前权重' },
     { id: 'model', label: '模型', icon: 'model', title: '模型', sub: 'Alpha158 + GBDT · 当前推荐持仓' },
     { id: 'ledger', label: '预测台账', icon: 'ledger', title: '预测台账', sub: '先封存，后对账' },
     { id: 'paper', label: '模拟实盘', icon: 'paper', title: '模拟实盘', sub: '模拟盘 vs 实盘对账' },
@@ -1721,6 +1742,213 @@
     return '<div style="margin-bottom:14px">' + factorCard + '</div>' + legacyBlock;
   }
 
+  /* ============================== 个股行情 ============================= */
+
+  /**
+   * K 线图 —— 纯 SVG，零依赖。
+   *
+   * 为什么不引图表库：本项目约束是「只有 numpy + pandas + pillow」，
+   * 前端也不引第三方 CDN（NAS 可能没外网）。手写 SVG 反而更可控。
+   *
+   * 布局：上方 K 线（含均线），下方成交量，共用 X 轴。
+   */
+  function renderCandles(d) {
+    const bars = d.bars || [];
+    if (!bars.length) return emptyBox('无 K 线数据', '换一个代码或周期试试');
+    const ma = d.ma || {};
+    const W = 1120, H = 420, PAD_L = 8, PAD_R = 62, PAD_T = 14;
+    const volH = 84, gap = 18;
+    const priceH = H - PAD_T - volH - gap;
+    const n = bars.length;
+    const slot = (W - PAD_L - PAD_R) / Math.max(n, 1);
+    const bw = Math.max(1.2, Math.min(slot * 0.68, 12));
+
+    // 价格区间（含均线，避免均线跑出画面）
+    let hi = -Infinity, lo = Infinity;
+    bars.forEach((b) => {
+      if (b.h != null) hi = Math.max(hi, b.h);
+      if (b.l != null) lo = Math.min(lo, b.l);
+    });
+    Object.keys(ma).forEach((k) => (ma[k] || []).forEach((v) => {
+      if (v != null) { hi = Math.max(hi, v); lo = Math.min(lo, v); }
+    }));
+    if (!isFinite(hi) || !isFinite(lo)) return emptyBox('价格数据异常', '');
+    const pad = (hi - lo) * 0.04 || hi * 0.01 || 1;
+    hi += pad; lo -= pad;
+
+    const yOf = (p) => PAD_T + (hi - p) / (hi - lo) * priceH;
+    const xOf = (i) => PAD_L + slot * (i + 0.5);
+
+    // 网格 + 右侧价格刻度
+    let grid = '';
+    const ticks = 5;
+    for (let i = 0; i <= ticks; i++) {
+      const p = lo + (hi - lo) * i / ticks;
+      const y = yOf(p);
+      grid += '<line x1="' + PAD_L + '" y1="' + y.toFixed(1) + '" x2="' + (W - PAD_R) +
+        '" y2="' + y.toFixed(1) + '" stroke="rgba(120,140,180,.12)" stroke-width="1"/>';
+      grid += '<text x="' + (W - PAD_R + 6) + '" y="' + (y + 3.5).toFixed(1) +
+        '" fill="#7d8794" font-size="10.5">' + p.toFixed(2) + '</text>';
+    }
+
+    // 蜡烛
+    let candles = '';
+    bars.forEach((b, i) => {
+      if (b.o == null || b.c == null) return;
+      const up = b.c >= b.o;
+      const col = up ? '#e8544a' : '#2bb673';
+      const x = xOf(i);
+      const yO = yOf(b.o), yC = yOf(b.c);
+      const top = Math.min(yO, yC);
+      const bh = Math.max(1, Math.abs(yC - yO));
+      if (b.h != null && b.l != null) {
+        candles += '<line x1="' + x.toFixed(1) + '" y1="' + yOf(b.h).toFixed(1) +
+          '" x2="' + x.toFixed(1) + '" y2="' + yOf(b.l).toFixed(1) +
+          '" stroke="' + col + '" stroke-width="1"/>';
+      }
+      candles += '<rect x="' + (x - bw / 2).toFixed(1) + '" y="' + top.toFixed(1) +
+        '" width="' + bw.toFixed(1) + '" height="' + bh.toFixed(1) +
+        '" fill="' + (up ? col : col) + '" opacity="' + (up ? 0.95 : 0.95) + '"/>';
+    });
+
+    // 均线
+    const MA_COLORS = { ma5: '#f5c542', ma10: '#5b9dff', ma20: '#c77dff', ma60: '#38d39f', ma120: '#ff8f5b' };
+    let maPath = '';
+    Object.keys(ma).forEach((k) => {
+      const arr = ma[k] || [];
+      const col = MA_COLORS[k] || '#888';
+      let seg = '', started = false;
+      arr.forEach((v, i) => {
+        if (v == null) { started = false; return; }
+        seg += (started ? 'L' : 'M') + xOf(i).toFixed(1) + ' ' + yOf(v).toFixed(1) + ' ';
+        started = true;
+      });
+      if (seg) maPath += '<path d="' + seg + '" fill="none" stroke="' + col +
+        '" stroke-width="1.3" opacity="0.9"/>';
+    });
+
+    // 成交量
+    const vols = bars.map((b) => b.v || 0);
+    const vmax = Math.max.apply(null, vols.concat([1]));
+    const volTop = PAD_T + priceH + gap;
+    let volBars = '';
+    bars.forEach((b, i) => {
+      const v = b.v || 0;
+      if (!v) return;
+      const h = (v / vmax) * (volH - 8);
+      const up = (b.c != null && b.o != null) ? b.c >= b.o : true;
+      volBars += '<rect x="' + (xOf(i) - bw / 2).toFixed(1) + '" y="' + (volTop + volH - h).toFixed(1) +
+        '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) +
+        '" fill="' + (up ? '#e8544a' : '#2bb673') + '" opacity="0.55"/>';
+    });
+    let volLabel = '<text x="' + PAD_L + '" y="' + (volTop + 11) +
+      '" fill="#7d8794" font-size="10.5">成交量 ' + fmtVol(vmax) + '</text>';
+
+    // X 轴日期（取 6 个）
+    let xlab = '';
+    const step = Math.max(1, Math.floor(n / 6));
+    for (let i = 0; i < n; i += step) {
+      xlab += '<text x="' + xOf(i).toFixed(1) + '" y="' + (H - 3) +
+        '" fill="#7d8794" font-size="10" text-anchor="middle">' +
+        esc(String(bars[i].d || '').slice(2)) + '</text>';
+    }
+
+    return '<div class="kline-wrap"><svg viewBox="0 0 ' + W + ' ' + H +
+      '" preserveAspectRatio="none" class="kline-svg">' +
+      grid + volBars + volLabel + candles + maPath + xlab + '</svg></div>';
+  }
+
+  function fmtVol(v) {
+    const n = toNum(v);
+    if (n == null) return '—';
+    if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+    if (n >= 1e4) return (n / 1e4).toFixed(2) + '万';
+    return n.toFixed(0);
+  }
+
+  async function pageChart() {
+    const code = (S.chartCode || '').trim();
+    const period = S.chartPeriod || 'daily';
+    const adjust = (S.chartAdjust == null ? 0 : S.chartAdjust);
+
+    const periods = [['daily', '日K'], ['weekly', '周K'], ['monthly', '月K'],
+                     ['quarterly', '季K'], ['halfyear', '半年K'], ['yearly', '年K']];
+    const adjusts = [[0, '不复权'], [1, '前复权'], [2, '后复权']];
+
+    const searchBar = '<div class="card" style="margin-bottom:14px"><div class="card-head" style="padding:14px 16px 0">' +
+      '<h2>个股行情</h2><span class="sub">输入代码：600519 / 00700.HK / AAPL</span></div>' +
+      '<div style="padding:12px 16px 16px">' +
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">' +
+        '<input id="ck-code" class="ck-input" placeholder="股票代码" value="' + esc(code) + '">' +
+        '<button type="button" class="btn" id="ck-go">' + ICON('search') + '查询</button>' +
+        '<div class="segmented" id="ck-period">' + periods.map(([v, l]) =>
+          '<button type="button" class="seg' + (period === v ? ' is-active' : '') +
+          '" data-p="' + v + '">' + l + '</button>').join('') + '</div>' +
+        '<div class="segmented" id="ck-adjust">' + adjusts.map(([v, l]) =>
+          '<button type="button" class="seg' + (adjust === v ? ' is-active' : '') +
+          '" data-a="' + v + '">' + l + '</button>').join('') + '</div>' +
+      '</div></div></div>';
+
+    if (!code) {
+      setSub('输入代码开始');
+      return searchBar + emptyBox('还没选股票',
+        '在上面的输入框填代码，比如 <code>600519</code>、<code>00700.HK</code>、<code>AAPL</code>');
+    }
+
+    setSub(code + ' · 加载中');
+    const q = '/api/kline?code=' + encodeURIComponent(code) +
+      '&period=' + encodeURIComponent(period) + '&adjust=' + adjust + '&count=240';
+    const res = await apiCached(q, 15000);
+    if (!res.ok || !res.data) {
+      setSub(code + ' · 取不到');
+      return searchBar + notReadyBox(res);
+    }
+    const d = res.data;
+    const qt = d.quote || {};
+    const st = d.stats || {};
+    const chg = toNum(qt.chg_pct);
+    const tone = chg == null ? '' : (chg > 0 ? 'is-up' : chg < 0 ? 'is-down' : '');
+    setSub((d.name || code) + ' · ' + d.period_label + ' · ' + d.count + ' 根');
+
+    const quoteCard = card({
+      title: (d.name || code) + '  ' + code, sub: d.period_label + ' · ' + (d.adjust_note || ''),
+      body:
+        '<div class="quote-head">' +
+          '<div class="quote-price ' + tone + '">' + (qt.price != null ? qt.price.toFixed(2) : '—') + '</div>' +
+          '<div class="quote-chg ' + tone + '">' +
+            (chg == null ? '—' : (chg > 0 ? '+' : '') + chg.toFixed(2) + '%') + '</div>' +
+          (qt.stale ? '<span class="tag pending">非实时</span>' : '<span class="tag hit">实时</span>') +
+        '</div>' +
+        '<div class="quote-grid">' +
+          [['今开', qt.open], ['最高', qt.high], ['最低', qt.low], ['昨收', qt.prev_close],
+           ['成交量', qt.volume != null ? fmtVol(qt.volume) : null],
+           ['5日', st.chg_5 != null ? st.chg_5 + '%' : null],
+           ['20日', st.chg_20 != null ? st.chg_20 + '%' : null],
+           ['60日', st.chg_60 != null ? st.chg_60 + '%' : null]]
+            .map(([k, v]) => '<div class="qg-item"><span class="qg-k">' + k + '</span>' +
+              '<span class="qg-v">' + (v == null ? '—' : (typeof v === 'number' ? v.toFixed(2) : v)) + '</span></div>')
+            .join('') +
+        '</div>'
+    });
+
+    const maLast = (d.ma_windows || []).map((w) => {
+      const arr = (d.ma['ma' + w] || []);
+      const v = arr.length ? arr[arr.length - 1] : null;
+      const col = { 5: '#f5c542', 10: '#5b9dff', 20: '#c77dff', 60: '#38d39f', 120: '#ff8f5b' }[w] || '#888';
+      return '<span class="ma-chip"><i style="background:' + col + '"></i>MA' + w + ' ' +
+        (v == null ? '—' : v.toFixed(2)) + '</span>';
+    }).join('');
+
+    const chartCard = card({
+      title: 'K 线', sub: d.count + ' 根 · ' + (d.adjust_note || ''),
+      tools: '<div class="ma-chips">' + maLast + '</div>',
+      body: renderCandles(d)
+    });
+
+    return searchBar + '<div style="margin-bottom:14px">' + quoteCard + '</div>' +
+      '<div style="margin-bottom:14px">' + chartCard + '</div>';
+  }
+
   /* ============================== 预测台账 ============================= */
 
   const isHit = (r) => r.hit === true || r.hit === 1 || r.hit === '1' || r.hit === 'true' || r.hit === 'True';
@@ -2348,6 +2576,10 @@
       const sy = await apiCached('/api/sync', 3000);
       S.sync = (sy && sy.ok && sy.data) ? sy.data : {};
     } catch (e) { S.sync = {}; }
+    try {
+      const au = await apiCached('/api/auth', 3000);
+      S.auth = (au && au.ok && au.data) ? au.data : {};
+    } catch (e) { S.auth = {}; }
     const [verRes, healthRes, updRes] = await Promise.all([
       apiCached('/api/version', 0), apiCached('/api/health', 0), apiCached('/api/update', 0)
     ]);
@@ -2450,6 +2682,45 @@
       '<label class="chip-check"><input type="checkbox" class="tk-h" value="' + h + '"' +
       (h === 1 || h === 5 ? ' checked' : '') + '> h' + h + '</label>').join('');
 
+    // ---- 登录状态 ----
+    const AU = S.auth || {};
+    const authCard = AU.enabled ? card({
+      title: '登录状态', sub: '会话 ' + (AU.session_days || 7) + ' 天，滑动续期',
+      body:
+        '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">' +
+          '<span class="tag ' + (AU.logged_in ? 'hit' : 'miss') + '">' +
+            (AU.logged_in ? '已登录' : '未登录') + '</span>' +
+          '<span class="muted">当前会话数 ' + (AU.active_sessions || 0) + '</span>' +
+          '<span class="muted">你的 IP ' + esc(AU.you_are || '—') + '</span>' +
+          '<button type="button" class="btn ghost" id="au-logout">退出登录</button>' +
+        '</div>' +
+        '<p class="muted" style="margin-top:10px">退出后需要重新输入密码。' +
+          '所有会话可在服务端用 <code>python -m qcore.auth</code> 查看。</p>'
+    }) : card({
+      title: '登录状态', sub: '未启用',
+      body: banner({ tone: 'warn', icon: 'alert',
+        title: '任何人都能打开这个页面看到你的持仓和策略',
+        text: '服务端没设 <code>APB_PASSWORD</code>。暴露到公网前必须设置。',
+        meta: '设置后重启容器生效；设了之后所有页面和 API 都需要登录' })
+    });
+
+    // ---- 访问令牌 ----
+    const curTok = getToken();
+    const tokenCard = card({
+      title: '访问令牌', sub: '服务端设了 APB_TOKEN 后，所有写操作都要带它',
+      body:
+        '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
+          '<label class="field" style="flex:1;min-width:260px"><span>令牌</span>' +
+            '<input type="password" id="tok-input" placeholder="粘贴 APB_TOKEN 的值" value="' +
+            esc(curTok) + '"></label>' +
+          '<button type="button" class="btn" id="tok-save">' + ICON('check') + '保存</button>' +
+          '<button type="button" class="btn ghost" id="tok-clear">清除</button>' +
+        '</div>' +
+        '<p class="muted" style="margin-top:10px">当前状态：' +
+          (curTok ? '<span class="tag hit">已设置</span>' : '<span class="tag miss">未设置</span>') +
+          ' · 只存在本机 localStorage，不上传任何地方。</p>'
+    });
+
     const trainCard = card({
       title: '训练任务', sub: 'NAS 下发 → 训练机自动领取 → 训练完自动上传',
       tools: '<button type="button" class="btn ghost sm" id="tk-refresh">' + ICON('refresh') + '刷新</button>',
@@ -2490,6 +2761,8 @@
 
     return '<div class="grid two" style="margin-bottom:14px">' + infoCard + filesCard + '</div>' +
       '<div style="margin-bottom:14px">' + updateCard(u) + '</div>' +
+      '<div style="margin-bottom:14px">' + authCard + '</div>' +
+      '<div style="margin-bottom:14px">' + tokenCard + '</div>' +
       '<div style="margin-bottom:14px">' + trainCard + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + runCard + exportCard + '</div>' +
       themeCard;
@@ -2499,6 +2772,7 @@
 
   const RENDERERS = {
     overview: pageOverview,
+    chart: pageChart,
     market: pageMarket,
     signals: pageSignals,
     model: pageModel,
@@ -2569,6 +2843,31 @@
   /* --------------------------- 页内事件绑定 --------------------------- */
 
   function bindPageEvents(id) {
+    if (id === 'chart') {
+      const go = $('#ck-go');
+      const inp = $('#ck-code');
+      const doQuery = () => {
+        const v = ((inp || {}).value || '').trim().toUpperCase();
+        if (!v) { toast('请输入股票代码', 'warn'); return; }
+        S.chartCode = v;
+        navigate('chart', false);
+      };
+      if (go) go.addEventListener('click', doQuery);
+      if (inp) {
+        inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') doQuery(); });
+        // 首次进入时聚焦，省一次点击
+        if (!S.chartCode) setTimeout(() => inp.focus(), 60);
+      }
+      $$('#ck-period .seg').forEach((b) => b.addEventListener('click', () => {
+        S.chartPeriod = b.getAttribute('data-p');
+        navigate('chart', false);
+      }));
+      $$('#ck-adjust .seg').forEach((b) => b.addEventListener('click', () => {
+        S.chartAdjust = Number(b.getAttribute('data-a'));
+        navigate('chart', false);
+      }));
+      return;
+    }
     if (id === 'signals') {
       const fam = $('#f-family');
       if (fam) fam.addEventListener('change', () => { S.filter.family = fam.value; navigate('signals', false); });
@@ -2687,6 +2986,47 @@
       const doUpd = $('#btn-do-update');
       if (doUpd) doUpd.addEventListener('click', openUpdateModal);
       $$('#set-theme .seg').forEach((b) => b.addEventListener('click', () => setTheme(b.getAttribute('data-t'))));
+
+      // ---- 登录状态 ----
+    const AU = S.auth || {};
+    const authCard = AU.enabled ? card({
+      title: '登录状态', sub: '会话 ' + (AU.session_days || 7) + ' 天，滑动续期',
+      body:
+        '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">' +
+          '<span class="tag ' + (AU.logged_in ? 'hit' : 'miss') + '">' +
+            (AU.logged_in ? '已登录' : '未登录') + '</span>' +
+          '<span class="muted">当前会话数 ' + (AU.active_sessions || 0) + '</span>' +
+          '<span class="muted">你的 IP ' + esc(AU.you_are || '—') + '</span>' +
+          '<button type="button" class="btn ghost" id="au-logout">退出登录</button>' +
+        '</div>' +
+        '<p class="muted" style="margin-top:10px">退出后需要重新输入密码。' +
+          '所有会话可在服务端用 <code>python -m qcore.auth</code> 查看。</p>'
+    }) : card({
+      title: '登录状态', sub: '未启用',
+      body: banner({ tone: 'warn', icon: 'alert',
+        title: '任何人都能打开这个页面看到你的持仓和策略',
+        text: '服务端没设 <code>APB_PASSWORD</code>。暴露到公网前必须设置。',
+        meta: '设置后重启容器生效；设了之后所有页面和 API 都需要登录' })
+    });
+
+    // ---- 访问令牌 ----
+      const tokSave = $('#tok-save');
+      if (tokSave) {
+        tokSave.addEventListener('click', () => {
+          const v = (($('#tok-input') || {}).value || '').trim();
+          setToken(v);
+          toast(v ? '令牌已保存' : '令牌已清空', v ? 'ok' : 'warn');
+          rerender();
+        });
+      }
+      const tokClear = $('#tok-clear');
+      if (tokClear) {
+        tokClear.addEventListener('click', () => {
+          setToken('');
+          toast('令牌已清空', 'warn');
+          rerender();
+        });
+      }
 
       // ---- 训练任务 ----
       const tkAdd = $('#tk-add');
