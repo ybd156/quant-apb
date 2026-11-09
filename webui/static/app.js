@@ -1220,10 +1220,62 @@
         '<button class="btn primary" type="submit">' + ICON('check') + '保存</button>' +
         '<span class="form-msg" id="acct-msg"></span></div>' +
         '</form>' +
+        // 每个周期单独设本金（在 form 之外，单独一个保存按钮）
+        '<div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--line,#26303f)">' +
+        '<div style="font-weight:600;margin-bottom:6px">各周期本金（' + esc(currency || '元') + '）</div>' +
+        '<p class="muted" style="margin:0 0 10px;font-size:12px">' +
+        '不同周期的最优资金规模不一样：T+1 换手极快，本金大了成本吃光收益；' +
+        '15 天可以放更多。留空表示用上面的「初始资金」。</p>' +
+        '<div class="form" style="gap:10px">' +
+        [1, 3, 5, 10, 15].map(function (h) {
+          const lbl = ({ 1: 'T+1 短线', 3: 'T+3 中短线', 5: '1 周 中线',
+                         10: '2 周', 15: '15 天 中长线' })[h] || ('h' + h);
+          const v = (c.horizon_capital && c.horizon_capital[String(h)] != null)
+            ? c.horizon_capital[String(h)] : '';
+          return '<label class="field"><span>' + esc(lbl) + '</span>' +
+            '<input type="number" class="hz-cap" data-h="' + h + '" step="1000" ' +
+            'value="' + esc(v === '' ? '' : String(v)) + '" placeholder="' +
+            esc(rawVal(c.initial_capital)) + '"></label>';
+        }).join('') +
+        '</div>' +
+        '<div class="form-actions" style="margin-top:12px">' +
+        '<button class="btn primary" type="button" id="hz-cap-save">' +
+        ICON('check') + '保存各周期本金</button>' +
+        '<span class="form-msg" id="hz-cap-msg"></span></div></div>' +
         '<p class="acct-note">' + ICON('alert') +
         '<span>改本金只影响<b>下一次引擎运行</b>，不会重算历史净值与台账；' +
         '三个市场各自独立，互不影响。</span></p>'
     });
+  }
+
+  /** 保存各周期本金（独立于基础设置） */
+  async function submitHorizonCapital(market) {
+    const msg = $('#hz-cap-msg');
+    const hc = {};
+    $$('.hz-cap').forEach(function (el) {
+      const raw = String(el.value || '').trim();
+      if (raw === '') return;                  // 留空 = 不设置这一项
+      const n = Number(raw);
+      if (!isFinite(n) || n <= 0) return;
+      hc[String(el.getAttribute('data-h'))] = n;
+    });
+    if (!Object.keys(hc).length) {
+      if (msg) { msg.className = 'form-msg err'; msg.textContent = '没有填写任何金额'; }
+      return;
+    }
+    const r = await api('/api/account/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ market: market, horizon_capital: hc })
+    });
+    if (r && r.ok) {
+      if (msg) { msg.className = 'form-msg ok'; msg.textContent = '已保存'; }
+      toast('各周期本金已保存', 'ok');
+      rerender();
+    } else {
+      const t = (r && (r.hint || r.error)) || '保存失败';
+      if (msg) { msg.className = 'form-msg err'; msg.textContent = String(t).slice(0, 120); }
+      toast('保存失败：' + errText(r), 'err');
+    }
   }
 
   /** 提交账户配置：越界一律交给后端判定，前端不做自动纠正 */
@@ -4134,6 +4186,15 @@
           });
         }
       }
+
+      // 各周期本金保存
+      const hzBtn = $('#hz-cap-save');
+      if (hzBtn) hzBtn.addEventListener('click', () => {
+        const mf = $('#acct-form');
+        const mk = (mf && mf.elements.market) ? mf.elements.market.value
+                                              : (S.paperMarket || 'CN');
+        submitHorizonCapital(mk);
+      });
 
       // 账户设置表单
       const acctForm = $('#acct-form');

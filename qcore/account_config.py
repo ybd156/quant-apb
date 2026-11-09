@@ -58,13 +58,21 @@ MARKETS = ("CN", "US", "HK")
 # 小资金下 top_k 不能太大 —— 5000 元分 20 只，每只 250 元，
 # 很多股票一手（100 股）就超了。所以默认 top_k 调小到 5，
 # 由 qcore/lot.py 的可行性检查兜底（买不起的会被跳过）。
+# 每个周期可以单独设本金：不同周期的最优资金规模不一样。
+#   T+1 换手极快，本金大了成本吃光收益；15 天可以放更多。
+DEFAULT_HORIZON_CAPITAL = {1: 5_000.0, 3: 5_000.0, 5: 5_000.0,
+                           10: 5_000.0, 15: 5_000.0}
+
 DEFAULTS: Dict[str, Dict] = {
     "CN": {"initial_capital": 5_000.0, "top_k": 5, "max_weight": 0.35,
-           "cost_bps": 19.28, "hold": 20, "currency": "CNY"},
+           "cost_bps": 19.28, "hold": 20, "currency": "CNY",
+           "horizon_capital": dict(DEFAULT_HORIZON_CAPITAL)},
     "US": {"initial_capital": 500.0, "top_k": 5, "max_weight": 0.35,
-           "cost_bps": 3.28, "hold": 20, "currency": "USD"},
+           "cost_bps": 3.28, "hold": 20, "currency": "USD",
+           "horizon_capital": {h: 500.0 for h in DEFAULT_HORIZON_CAPITAL}},
     "HK": {"initial_capital": 5_000.0, "top_k": 5, "max_weight": 0.35,
-           "cost_bps": 38.17, "hold": 20, "currency": "HKD"},
+           "cost_bps": 38.17, "hold": 20, "currency": "HKD",
+           "horizon_capital": dict(DEFAULT_HORIZON_CAPITAL)},
 }
 
 # 字段 -> (下限, 上限)。initial_capital 按市场另设（见 CAPITAL_LIMITS）
@@ -181,6 +189,28 @@ def validate(payload: Dict, market: str) -> Tuple[Optional[Dict], Optional[str]]
         if not (lo <= v <= hi):
             return None, f"{k} 必须在 [{lo}, {hi}] 之间，收到 {v}"
         clean[k] = int(v) if k in INT_FIELDS else v
+    # 每个周期单独的本金：{"horizon_capital": {"1": 5000, "5": 20000}}
+    if "horizon_capital" in payload:
+        hc = payload["horizon_capital"]
+        if not isinstance(hc, dict):
+            return None, "horizon_capital 必须是对象，如 {\"1\": 5000}"
+        out = {}
+        for k, v in hc.items():
+            try:
+                hh = int(k)
+            except (TypeError, ValueError):
+                return None, f"horizon_capital 的键必须是周期数字，收到 {k}"
+            if hh not in (1, 3, 5, 10, 15):
+                return None, f"周期只能是 1/3/5/10/15，收到 {hh}"
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return None, f"horizon_capital[{hh}] 必须是数字"
+            v = float(v)
+            if not (clo <= v <= chi):
+                return None, f"horizon_capital[{hh}] 必须在 [{clo}, {chi}] 之间"
+            out[str(hh)] = v
+        if out:
+            clean["horizon_capital"] = out
+
     if not clean:
         return None, "没有可更新的字段"
     return clean, None
@@ -201,6 +231,34 @@ def save(payload: Dict, market: str = "CN") -> Tuple[Optional[Dict], Optional[st
         json.dump(cfg, f, ensure_ascii=False, indent=1)
     os.replace(tmp, PATH)
     return load(m), None
+
+
+def capital_for(market: str = "CN", horizon: int = 1) -> float:
+    """
+    该 (市场, 周期) 的本金。优先用周期专属值，没有就退回市场默认。
+    """
+    try:
+        cfg = load(market)
+    except Exception:
+        cfg = {}
+    hc = cfg.get("horizon_capital") or {}
+    try:
+        v = hc.get(str(int(horizon)))
+        if v is None:
+            v = hc.get(int(horizon))
+    except (TypeError, ValueError):
+        v = None
+    if v is not None:
+        try:
+            f = float(v)
+            if f > 0:
+                return f
+        except (TypeError, ValueError):
+            pass
+    try:
+        return float(cfg.get("initial_capital") or 5_000)
+    except (TypeError, ValueError):
+        return 5_000.0
 
 
 def summary() -> Dict:

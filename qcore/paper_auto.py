@@ -215,6 +215,21 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     cfg = AC.load(market)
     # 持仓数：显式传入 > 周期默认（短线集中、长线分散）
     k = int(top_k or default_top_k(h, market) or 5)
+
+    # 资金约束：每只至少要有 MIN_PER_STOCK 元，否则一手都买不起。
+    # 实测数据（A股，2026-11）：
+    #   h3/h10 排名靠前的标的，一手成本 1880 / 4880 / 20350 元不等。
+    #   5000 元按 3 只分，每只 1667 元 —— 连最便宜的 1880 都买不起，0 成交。
+    #   每只预算提到 2500 后，1880 那只能买，账户不再空仓。
+    MIN_PER_STOCK = 2500.0
+    try:
+        _cash_now = float((acc or {}).get("cash") or 0)
+        if _cash_now > 0:
+            _max_k = max(1, int(_cash_now // MIN_PER_STOCK))
+            if k > _max_k:
+                k = _max_k
+    except Exception:
+        pass
     cost_bps = float(cfg.get("cost_bps") or 10.0)
 
     # ---- 按周期选 picks 文件 ----
@@ -267,7 +282,7 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
 
     acc = load_account(market, h)
     if not acc:
-        acc = init_account(float(cfg.get("initial_capital") or 5_000), market, h)
+        acc = init_account(float(AC.capital_for(market, h) or 5_000), market, h)
     if acc.get("market") != market:
         return {"ok": False, "reason": "market_mismatch",
                 "account_market": acc.get("market"), "want": market,
@@ -335,9 +350,28 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
             continue
         if _affordable(code, budget):
             want.append(code)
-    # 3) 一只都买不起时退回原逻辑（至少让台账有记录，并会在 filled 里说明）
+    # 3) 一只都买不起：不要静默 0 成交，明确告诉用户为什么
     if not want:
-        want = [str(r.get("code", "")).zfill(6) for r in rows[:k]]
+        _cheapest = None
+        for r in rows[:20]:
+            _c = str(r.get("code", "")).zfill(6)
+            _p = _price(_c)
+            _u = _lot(_c, market)
+            if _p and _u:
+                _cost = _p * _u
+                if _cheapest is None or _cost < _cheapest[1]:
+                    _cheapest = (_c, _cost)
+        hint = ""
+        if _cheapest:
+            hint = (f"当前本金 {cash:,.0f} 元，每只预算 {budget:,.0f} 元；"
+                    f"候选里最便宜的一手也要 {_cheapest[1]:,.0f} 元（{_cheapest[0]}）。"
+                    f"建议提高本金，或减少持仓数")
+        return {"ok": False, "reason": "no_affordable_target", "horizon": h,
+                "market": market, "cash": round(cash, 2),
+                "per_stock_budget": round(budget, 2),
+                "cheapest_lot_cost": round(_cheapest[1], 2) if _cheapest else None,
+                "hint": hint or "本金太小，买不起任何候选标的的一手",
+                "orders": [], "filled": [], "skipped": [], "account": acc}
 
     # fees 模块算每笔明细（佣金有最低收费、印花税仅卖出、各市场不同）。
     # 不用扁平 bps —— 买卖不对称，用平均值会系统性低估卖出成本。
@@ -505,13 +539,16 @@ def reset(market: str = "CN", horizon: int = 1,
 
     # 金额：显式传入 > 原账户本金 > 配置默认
     if capital is None:
-        capital = float((old_acc or {}).get("initial_capital") or 0) or None
-    if capital is None:
+        # 优先用「该周期专属本金」——这是配置里明确的意图。
+        # 之前先取旧账户的 initial_capital，导致改了配置也重置不生效
+        # （旧账户永远是上次那个数）。
         try:
             from . import account_config as AC
-            capital = float(AC.load(m).get("initial_capital") or 5_000)
+            capital = float(AC.capital_for(m, h) or 0) or None
         except Exception:
-            capital = 5_000.0
+            capital = None
+    if capital is None:
+        capital = float((old_acc or {}).get("initial_capital") or 0) or 5_000.0
     capital = float(capital)
     if capital <= 0:
         return {"ok": False, "reason": "bad_capital", "capital": capital}
