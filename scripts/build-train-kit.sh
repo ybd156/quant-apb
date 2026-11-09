@@ -29,6 +29,7 @@ cp "$ROOT/requirements.txt" "$KIT/"
 cp "$ROOT/VERSION" "$KIT/"
 cp "$ROOT/LICENSE" "$KIT/" 2>/dev/null || true
 cp "$ROOT/train.bat" "$ROOT/train.sh" "$KIT/"
+cp "$ROOT/daemon.bat" "$KIT/" 2>/dev/null || true
 chmod +x "$KIT/train.sh" 2>/dev/null || true
 
 # ---------- 2. 清掉不需要的 ----------
@@ -96,7 +97,20 @@ cat > "$KIT/README-训练机.md" <<'MD'
 
 ### Windows
 
-双击 **`train.bat`**
+**训练一次**：双击 `train.bat`
+
+**当成常驻训练机**（推荐）：双击 `daemon.bat`
+
+区别：
+| | train.bat | daemon.bat |
+|---|---|---|
+| 跑一次就退出 | ✅ | ❌ |
+| 自动领 NAS 任务 | ❌ | ✅ |
+| 自动检查更新 | ❌ | ✅ |
+| 适合 | 手动补训一个周期 | 长期挂着当训练机 |
+
+`daemon.bat` 会一直运行，每 60 秒问一次 NAS 有没有新任务。
+窗口关掉就停 —— 想让它后台跑，用「任务计划程序」或直接最小化。
 
 ### Linux / macOS
 
@@ -168,7 +182,8 @@ python tools/train_one_click.py --dry-run           # 只检查环境
 
 ```
 apb-train-kit/
-├─ train.bat / train.sh        一键启动
+├─ train.bat / train.sh        训练一次
+├─ daemon.bat                  常驻训练机（推荐长期用）
 ├─ tools/
 │   ├─ train_one_click.py      训练主程序
 │   └─ sync_agent.py           自动领任务 + 上传

@@ -48,12 +48,16 @@ if errorlevel 1 (
 echo.
 echo Starting. First run downloads ~545MB of market data, please wait.
 echo.
-%PY% tools	rain_one_click.py %*
+%PY% tools\train_one_click.py %*
 set "RC=%ERRORLEVEL%"
 
 echo.
 echo ============================================================
 echo   Done. Models were uploaded to your NAS automatically.
+echo.
+echo   Want this machine to keep working as a training worker?
+echo   Run daemon.bat instead - it stays online and picks up tasks.
+echo   (This window ran a one-time training.)
 echo   If the network was down, find the fallback zip in dist\models\
 echo ============================================================
 echo.
