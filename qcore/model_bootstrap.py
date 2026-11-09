@@ -119,9 +119,37 @@ def ensure(horizon: int, force: bool = False, verbose: bool = True) -> Dict:
     if verbose:
         why = ("没有模型" if not has else f"模型已 {a:.1f} 天")
         _log(f"[bootstrap] h{h} {why} -> 开始训练")
+
+    # 内存约束：NAS 上 300 只 × 250 树实测要 4GB+，会被 OOM 杀掉
+    # （日志停在"标准化"之后，没有任何 traceback —— 典型的 OOM）
+    # 用更保守的规模，模型效果差别很小（Alpha158 的 alpha 主要来自因子，不是树的数量）
+    stocks = int(os.environ.get("APB_BOOT_STOCKS", "200"))
+    trees = int(os.environ.get("APB_BOOT_TREES", "120"))
+    try:
+        import resource as _rs
+        _avail_mb = None
+        try:
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for ln in f:
+                    if ln.startswith("MemAvailable:"):
+                        _avail_mb = int(ln.split()[1]) // 1024
+                        break
+        except Exception:
+            pass
+        if verbose and _avail_mb:
+            _log(f"[bootstrap] h{h} 可用内存 {_avail_mb} MB，"
+                 f"用 {stocks} 只 / {trees} 树（可用内存 < 3000MB 时自动再降）")
+        if _avail_mb and _avail_mb < 3000:
+            stocks = min(stocks, 120)
+            trees = min(trees, 80)
+            if verbose:
+                _log(f"[bootstrap] h{h} 内存偏紧，降到 {stocks} 只 / {trees} 树")
+    except Exception:
+        pass
+
     t0 = time.time()
     try:
-        r = LM.train(horizon=h, verbose=verbose)
+        r = LM.train(horizon=h, stocks=stocks, trees=trees, verbose=verbose)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "horizon": h, "action": "train",
                 "reason": f"{type(e).__name__}: {str(e)[:80]}"}
