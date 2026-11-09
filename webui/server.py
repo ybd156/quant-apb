@@ -466,6 +466,16 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/data/quality":
+            return self._api_data_quality()
+        if path == "/api/calendar":
+            return self._api_calendar(query)
+        if path == "/api/lot":
+            return self._api_lot(query)
+        if path == "/api/model/health":
+            return self._api_model_health()
+        if path == "/api/model/versions":
+            return self._api_model_versions()
         if path == "/api/session":
             return self._api_session(query)
         if path == "/api/transfer":
@@ -904,6 +914,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                                              "intraday": "09:30-15:00",
                                              "postclose": "15:05-17:00"}})
             which = cur
+        if which == "noon":
+            try:
+                from qcore import noon as NOON
+                return self._ok(NOON.predict(verbose=False))
+            except Exception as e:  # noqa: BLE001
+                return self._fail("noon_failed", 200, detail=str(e)[:160])
         if which not in ("premarket", "intraday", "postclose"):
             return self._fail("bad_param", 400,
                               hint="which 取 premarket|intraday|postclose|auto")
@@ -913,6 +929,108 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._ok(fn(verbose=False))
         except Exception as e:  # noqa: BLE001
             return self._fail("session_failed", 200, detail=str(e)[:160])
+
+    def _api_data_quality(self):
+        """最近一次数据清洗的汇总（data_quality.json）。"""
+        try:
+            from qcore import cleaning
+            d = cleaning.summary()
+            return self._ok(d) if d.get("n_input") is not None else self._fail(
+                "not_ready", 200, hint=d.get("hint", "先跑 qcore.cleaning"))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("quality_failed", 200, detail=str(e)[:160])
+
+    def _api_calendar(self, query):
+        """交易日历：今天是不是交易日 / 下一个交易日。query: date=YYYY-MM-DD"""
+        try:
+            from qcore import calendar_cn as CAL
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        d = ((query or {}).get("date") or [None])[0]
+        try:
+            return self._ok(CAL.summary(d))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("calendar_failed", 200, detail=str(e)[:160])
+
+    def _api_lot(self, query):
+        """
+        整手约束下的可成交性。query:
+          capital=100000      本金
+          market=CN|US|HK
+          mode=plan|scenarios|small   （默认 plan）
+        """
+        try:
+            from qcore import lot as L
+            import json as _j
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        try:
+            cap = float(((query or {}).get("capital") or ["100000"])[0])
+        except Exception:
+            return self._fail("bad_param", 400, hint="capital 必须是数字")
+        mkt = str(((query or {}).get("market") or ["CN"])[0]).upper()
+        mode = str(((query or {}).get("mode") or ["plan"])[0]).lower()
+
+        picks, _e = _read_json("picks.json")
+        rows = (picks or {}).get("rows") or []
+        if not rows:
+            return self._not_ready("picks.json", "还没有推荐，先生成 picks")
+        scores = {str(r.get("code", "")).zfill(6): float(r.get("score") or 0) for r in rows}
+        prices = {}
+        try:
+            from qcore import tick
+            snap = tick.snapshot(list(scores.keys()))
+            for x in (snap.get("rows") or []):
+                c = str(x.get("code", ""))
+                prices[c[2:] if c[:2] in ("sh", "sz", "bj") else c] = x.get("price")
+        except Exception:
+            for r in rows:
+                if r.get("close"):
+                    prices[str(r.get("code", "")).zfill(6)] = r.get("close")
+        if not prices:
+            return self._fail("no_price", 200, hint="取不到现价，无法计算整手约束")
+
+        if mode == "scenarios":
+            return self._ok(L.scenarios(scores, prices, mkt))
+        if mode == "small":
+            return self._ok(L.small_capital(cap, scores, prices, mkt))
+        n = len(scores) or 1
+        w = {c: 1.0 / n for c in scores}
+        return self._ok(L.plan(cap, w, prices, mkt))
+
+    def _api_model_health(self):
+        """模型失效判据：healthy / watch / degraded / failed。"""
+        try:
+            from qcore import model_health as MH
+            return self._ok(MH.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("health_failed", 200, detail=str(e)[:160])
+
+    def _api_model_versions(self):
+        """模型版本列表 + 备份列表。"""
+        try:
+            from qcore import versioning as V
+            return self._ok(V.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("versions_failed", 200, detail=str(e)[:160])
+
+    def _post_model_rollback(self):
+        """回滚到指定模型版本。body: {"version":"20261109-081500"}"""
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        ver = (body or {}).get("version") if isinstance(body, dict) else None
+        if not ver:
+            return self._fail("bad_param", 400, hint="需要 version")
+        try:
+            from qcore import versioning as V
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        r = V.rollback(str(ver))
+        if not r.get("ok"):
+            return self._fail(r.get("reason", "rollback_failed"), 400,
+                              available=r.get("available"))
+        return self._ok(r)
 
     def _api_transfer(self):
         """导出/导入能力清单。"""
@@ -995,6 +1113,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._post_trade()
         if path == "/api/run":
             return self._post_run()
+        if path == "/api/model/rollback":
+            return self._post_model_rollback()
         if path == "/api/import":
             return self._post_import()
         if path == "/api/watch":

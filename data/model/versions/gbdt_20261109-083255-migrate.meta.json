@@ -1,0 +1,11 @@
+{
+ "universe": "csi300",
+ "n_stocks": 300,
+ "n_factors": 300,
+ "n_trees": 250,
+ "train_end": "2019-12-31",
+ "train_n": 1,
+ "source": "migrate",
+ "saved_at": "2026-11-09T08:32:55+08:00",
+ "version": "20261109-083255-migrate"
+}

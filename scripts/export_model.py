@@ -99,8 +99,8 @@ def main(argv=None) -> int:
 
     # ---- 持久化模型（供 live_model / session 实时打分用）----
     try:
-        from qcore import live_model as LM
-        LM.save_model(model, {
+        from qcore import versioning as V
+        V.save(model, {
             "universe": a.universe, "n_stocks": len(codes),
             "n_factors": int(scores.shape[1]) if scores.ndim > 1 else 158,
             "n_trees": int(a.trees), "train_end": a.train_end,
