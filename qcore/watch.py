@@ -205,8 +205,11 @@ def _last_price(code: str) -> Optional[float]:
         return None
 
 
-def add(codes: Iterable[str], verbose: bool = True) -> Dict:
-    """添加标的：立刻打分 + 记录进场价。"""
+def add(codes: Iterable[str], group: str = "", verbose: bool = True) -> Dict:
+    """
+    添加标的：立刻打分 + 记录进场价。
+    group 是自定义分类（如「核心」「观察」「短线」），空串归到「未分类」。
+    """
     cur = load()
     items = cur.get("items") or []
     have = {it["code"] for it in items}
@@ -220,7 +223,8 @@ def add(codes: Iterable[str], verbose: bool = True) -> Dict:
     for c in new:
         px = _last_price(c)
         s = (sc.get("scores") or {}).get(c) or {}
-        it = {"code": c, "name": nm.get(c, ""), "added_at": _now(),
+        it = {"code": c, "name": nm.get(c, ""), "group": (group or "").strip()[:20],
+              "added_at": _now(),
               "added_price": px, "last_price": px,
               "entry_score": s.get("score"), "entry_rank_pct": s.get("rank_pct"),
               "score": s.get("score"), "rank_pct": s.get("rank_pct"),
@@ -234,6 +238,37 @@ def add(codes: Iterable[str], verbose: bool = True) -> Dict:
     _save(cur)
     return {"ok": True, "added": len(added), "items": added,
             "as_of": sc.get("as_of"), "n_pool": sc.get("n_pool")}
+
+
+def set_group(codes: Iterable[str], group: str) -> Dict:
+    """把已有标的改到指定分组。"""
+    cur = load()
+    want = {_bare(c) for c in codes}
+    g = (group or "").strip()[:20]
+    n = 0
+    for it in (cur.get("items") or []):
+        if it.get("code") in want:
+            it["group"] = g
+            it["updated_at"] = _now()
+            n += 1
+    if n:
+        _save(cur)
+    return {"ok": True, "updated": n, "group": g}
+
+
+def groups() -> Dict:
+    """按分组汇总：{分组名: [code...]}，空分组名统一显示为「未分类」。"""
+    cur = load()
+    out: Dict[str, List[str]] = {}
+    for it in (cur.get("items") or []):
+        g = (it.get("group") or "").strip() or "未分类"
+        out.setdefault(g, []).append(it.get("code"))
+    return {"ok": True,
+            "groups": [{"name": k, "codes": v, "n": len(v)}
+                       for k, v in sorted(out.items(),
+                                          key=lambda x: (-len(x[1]), x[0]))],
+            "n_groups": len(out),
+            "n_items": sum(len(v) for v in out.values())}
 
 
 def remove(codes: Iterable[str]) -> Dict:

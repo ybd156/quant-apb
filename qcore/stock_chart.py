@@ -78,6 +78,22 @@ def _pct(a: Optional[float], b: Optional[float]) -> Optional[float]:
     return round((a / b - 1.0) * 100.0, 3)
 
 
+def _name_from_eastmoney(code: str) -> Optional[str]:
+    """
+    从东财 kline 响应的 data.name 取股票名称。
+    A股/港股/美股都能拿到 —— tick 快照只支持 A 股，港美股得走这里。
+    """
+    try:
+        from . import us_data as U
+        secid = U.resolve_ticker(code)
+        url = U._kline_url(secid, 0, "20240101", "20500101", lmt=1)
+        d = U._get_json(url)
+        nm = (d.get("data") or {}).get("name")
+        return str(nm).strip() if nm else None
+    except Exception:
+        return None
+
+
 def _resample(df, period: str):
     """
     把日线聚合成周/月/季/半年/年线。
@@ -176,7 +192,8 @@ def build(code: str, period: str = "daily", count: int = 180,
         snap = tick.snapshot([code])
         row = (snap.get("rows") or [{}])[0] if snap.get("ok") else {}
         if row and row.get("price"):
-            quote = {"price": _f(row.get("price")),
+            quote = {"name": row.get("name"),
+                     "price": _f(row.get("price")),
                      "chg_pct": _f(row.get("chg_pct")),
                      "open": _f(row.get("open")),
                      "high": _f(row.get("high")),
@@ -215,14 +232,19 @@ def build(code: str, period: str = "daily", count: int = 180,
         if stats.get("vol_ma5") and stats.get("vol_ma20"):
             stats["vol_ratio"] = round(stats["vol_ma5"] / stats["vol_ma20"], 3)
 
-    name = None
-    try:
-        from . import names as NAMES
-        m = NAMES.load() or {}
-        rec = m.get(str(code)) or m.get(str(code).zfill(6)) or {}
-        name = rec.get("name") if isinstance(rec, dict) else (str(rec) if rec else None)
-    except Exception:
-        pass
+    # 名称：tick 快照三个市场都会返回 name，优先用它；
+    # names.json 只有 A 股，港美股会拿不到（之前就只显示代码）。
+    name = (quote or {}).get("name") if isinstance(quote, dict) else None
+    if not name:
+        try:
+            from . import names as NAMES
+            m = NAMES.load() or {}
+            rec = m.get(str(code)) or m.get(str(code).zfill(6)) or {}
+            name = rec.get("name") if isinstance(rec, dict) else (str(rec) if rec else None)
+        except Exception:
+            name = None
+    if not name:
+        name = _name_from_eastmoney(code)
 
     adjust_note = {0: "不复权（真实成交价，与券商软件一致）",
                    1: "前复权（历史连续，仅展示用）",

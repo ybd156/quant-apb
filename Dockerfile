@@ -38,6 +38,10 @@ WORKDIR /app
 # 先拷代码（数据目录由 volume 挂载，不烤进镜像）
 COPY qcore/ ./qcore/
 COPY webui/ ./webui/
+# scripts/ 里 benchmark_alpha158.py 是 live_model 和 watch 的依赖
+# （build_features 从这里加载），漏了它自选/训练都会 FileNotFoundError
+COPY scripts/ ./scripts/
+COPY tools/ ./tools/
 COPY docker/start.sh ./start.sh
 COPY VERSION README.md LICENSE ./
 

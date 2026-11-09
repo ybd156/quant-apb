@@ -42,7 +42,20 @@ from typing import Dict, Optional
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
 QLIB_DIR = os.path.join(DATA, "qlib")
-TARGET = os.path.join(QLIB_DIR, "x", "qlib_bin")
+
+
+def _target() -> str:
+    """
+    数据落地目录。**必须尊重 APB_QLIB_DIR** —— 否则用户指了别的数据目录，
+    这里还傻傻去下载 545MB（实测踩过：--skip-data 失效，明明有数据还下载）。
+    """
+    env = os.environ.get("APB_QLIB_DIR", "").strip()
+    if env:
+        return env
+    return os.path.join(QLIB_DIR, "x", "qlib_bin")
+
+
+TARGET = _target()
 STAMP = os.path.join(DATA, "state", "data_sync.json")
 TARBALL = os.path.join(QLIB_DIR, "qlib_bin.tar.gz")
 
@@ -75,7 +88,7 @@ def _load_stamp() -> Dict:
 
 def local_date() -> Optional[str]:
     """本地数据最后一天（从日历读）。"""
-    p = os.path.join(TARGET, "calendars", "day.txt")
+    p = os.path.join(_target(), "calendars", "day.txt")
     if not os.path.isfile(p):
         return None
     try:
@@ -126,7 +139,7 @@ def download(verbose: bool = True) -> Dict:
     t0 = time.time()
     mode_used = "none"
 
-    for attempt in range(3):
+    for attempt in range(6):
         # 先试直连再试代理（net.get 内部已有选路，但大文件要自己控制流式写盘）
         for mode, proxy in (("direct", None), ("proxy", net.discover_proxy())):
             if mode == "proxy" and not proxy:
@@ -160,7 +173,11 @@ def download(verbose: bool = True) -> Dict:
                 mode_used = mode
             except Exception as e:  # noqa: BLE001
                 if verbose:
-                    print(f"    {mode} 下载失败: {type(e).__name__}: {str(e)[:60]}", flush=True)
+                    print(f"    {mode} 下载失败(第{attempt+1}次): "
+                          f"{type(e).__name__}: {str(e)[:60]}", flush=True)
+                # RemoteDisconnected / IncompleteRead 是常见的瞬时断连，
+                # 等一下再试；有断点续传（Range）所以不会从头开始
+                time.sleep(2 + attempt * 2)
                 continue
         time.sleep(2)
     return {"ok": False, "reason": "download_failed", "bytes": have, "mode": mode_used}
@@ -174,7 +191,8 @@ def extract(verbose: bool = True) -> Dict:
     if free < MIN_FREE_GB:
         return {"ok": False, "reason": "insufficient_disk",
                 "free_gb": round(free, 1), "need_gb": MIN_FREE_GB}
-    new_dir = TARGET + ".new"
+    tgt = _target()
+    new_dir = tgt + ".new"
     if os.path.isdir(new_dir):
         shutil.rmtree(new_dir, ignore_errors=True)
     os.makedirs(new_dir, exist_ok=True)
@@ -187,22 +205,22 @@ def extract(verbose: bool = True) -> Dict:
     # tarball 顶层是 qlib_bin/
     inner = os.path.join(new_dir, "qlib_bin")
     src = inner if os.path.isdir(inner) else new_dir
-    if os.path.isdir(TARGET):
-        old = TARGET + ".old"
+    if os.path.isdir(tgt):
+        old = tgt + ".old"
         shutil.rmtree(old, ignore_errors=True)
         try:
-            os.rename(TARGET, old)
+            os.rename(tgt, old)
         except Exception:
             pass
-    os.makedirs(os.path.dirname(TARGET), exist_ok=True)
+    os.makedirs(os.path.dirname(tgt), exist_ok=True)
     try:
-        os.rename(src, TARGET)
+        os.rename(src, tgt)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "reason": f"swap_failed: {type(e).__name__}"}
     shutil.rmtree(new_dir, ignore_errors=True)
-    shutil.rmtree(TARGET + ".old", ignore_errors=True)
+    shutil.rmtree(tgt + ".old", ignore_errors=True)
     if verbose:
-        print(f"    解压完成 {time.time()-t0:.0f}s -> {TARGET}", flush=True)
+        print(f"    解压完成 {time.time()-t0:.0f}s -> {tgt}", flush=True)
     return {"ok": True, "seconds": round(time.time() - t0)}
 
 
@@ -258,8 +276,8 @@ def summary() -> Dict:
     return {"ok": True, "local_date": local_date(),
             "tarball_mb": round(os.path.getsize(TARBALL) / 1e6, 1)
             if os.path.isfile(TARBALL) else 0,
-            "data_dir": TARGET,
-            "exists": os.path.isdir(TARGET),
+            "data_dir": _target(),
+            "exists": os.path.isdir(_target()),
             "free_gb": round(_free_gb(QLIB_DIR), 1),
             "last_sync": s}
 

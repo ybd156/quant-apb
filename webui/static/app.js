@@ -557,6 +557,7 @@
     { id: 'overview', label: '总览', icon: 'overview', title: '总览', sub: '这台测量仪现在读数是多少' },
     { id: 'market', label: '市场', icon: 'market', title: '实时行情', sub: '指数 / 情绪温度 / 市场宽度' },
     { id: 'chart', label: '个股', icon: 'search', title: '个股行情', sub: 'K线 / 均线 / 成交量' },
+    { id: 'watch', label: '自选', icon: 'star', title: '自选股', sub: '分组跟踪 · 加进来就打分' },
       { id: 'signals', label: '信号', icon: 'signals', title: '信号权重', sub: '每个「信号 × 参数」专家当前权重' },
     { id: 'model', label: '模型', icon: 'model', title: '模型', sub: 'Alpha158 + GBDT · 当前推荐持仓' },
     { id: 'ledger', label: '预测台账', icon: 'ledger', title: '预测台账', sub: '先封存，后对账' },
@@ -1742,6 +1743,78 @@
     return '<div style="margin-bottom:14px">' + factorCard + '</div>' + legacyBlock;
   }
 
+  /* ============================== 自选股 ============================= */
+
+  async function pageWatch() {
+    const res = await apiCached('/api/watch', 4000);
+    const d = (res && res.ok && res.data) ? res.data : {};
+    const items = d.items || [];
+    const groups = d.groups || [];
+    const sum = d.summary || {};
+    setSub(items.length + ' 只 · ' + groups.length + ' 个分组');
+
+    const newGroupInput =
+      '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px">' +
+        '<label class="field" style="flex:1;min-width:200px"><span>添加代码（逗号或空格分隔）</span>' +
+          '<input id="w-codes" class="ck-input" placeholder="600519, 000001, 00700.HK" ' +
+          'style="text-transform:uppercase"></label>' +
+        '<label class="field" style="max-width:160px"><span>分组</span>' +
+          '<input id="w-group" placeholder="核心 / 观察 / 短线" maxlength="20"></label>' +
+        '<button type="button" class="btn" id="w-add">' + ICON('plus') + '加入自选</button>' +
+      '</div>';
+
+    if (!items.length) {
+      return card({
+        title: '自选股', sub: '加进来后会立刻打分并记录进场价',
+        body: newGroupInput + emptyBox('还没有自选',
+          '在「个股」页看到想跟踪的票，点「加自选」；也可以在上面直接输入代码。')
+      });
+    }
+
+    // 按分组渲染
+    const byGroup = {};
+    items.forEach((it) => {
+      const g = (it.group || '').trim() || '未分类';
+      (byGroup[g] = byGroup[g] || []).push(it);
+    });
+    const order = Object.keys(byGroup).sort((a, b) =>
+      (byGroup[b].length - byGroup[a].length) || a.localeCompare(b));
+
+    const groupCards = order.map((g) => {
+      const rows = byGroup[g];
+      const tbody = rows.map((it) => {
+        const ret = toNum(it.ret_since_add);
+        const tone = ret == null ? '' : (ret > 0 ? 'is-up' : ret < 0 ? 'is-down' : '');
+        const sc = toNum(it.score);
+        return '<tr>' +
+          '<td class="mono"><a class="link-btn" data-goto="' + esc(it.code) + '">' +
+            esc(it.code) + '</a></td>' +
+          '<td>' + esc(it.name || '—') + '</td>' +
+          '<td class="num">' + (it.last_price != null ? Number(it.last_price).toFixed(2) : '—') + '</td>' +
+          '<td class="num ' + tone + '">' + (ret == null ? '—' :
+            (ret > 0 ? '+' : '') + (ret * 100).toFixed(2) + '%') + '</td>' +
+          '<td class="num">' + (sc == null ? '—' : sc.toFixed(4)) + '</td>' +
+          '<td class="muted">' + esc(String(it.added_at || '').slice(5, 16)) + '</td>' +
+          '<td><button type="button" class="link-btn w-del" data-code="' + esc(it.code) +
+            '">移除</button></td>' +
+          '</tr>';
+      }).join('');
+      return card({
+        title: g, sub: rows.length + ' 只',
+        tools: '<button type="button" class="link-btn w-move" data-group="' + esc(g) +
+          '">整组改分组</button>',
+        body: '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+          '<th>代码</th><th>名称</th><th>现价</th><th>自加入</th><th>分数</th><th>加入时间</th><th></th>' +
+          '</tr></thead><tbody>' + tbody + '</tbody></table></div>'
+      });
+    }).join('<div style="height:14px"></div>');
+
+    return card({
+      title: '自选股', sub: '加进来后会立刻打分并记录进场价',
+      body: newGroupInput
+    }) + '<div style="height:14px"></div>' + groupCards;
+  }
+
   /* ============================== 个股行情 ============================= */
 
   /**
@@ -1881,6 +1954,7 @@
       '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">' +
         '<input id="ck-code" class="ck-input" placeholder="股票代码" value="' + esc(code) + '">' +
         '<button type="button" class="btn" id="ck-go">' + ICON('search') + '查询</button>' +
+        '<button type="button" class="btn ghost" id="ck-watch">' + ICON('plus') + '加自选</button>' +
         '<div class="segmented" id="ck-period">' + periods.map(([v, l]) =>
           '<button type="button" class="seg' + (period === v ? ' is-active' : '') +
           '" data-p="' + v + '">' + l + '</button>').join('') + '</div>' +
@@ -2773,6 +2847,7 @@
   const RENDERERS = {
     overview: pageOverview,
     chart: pageChart,
+    watch: pageWatch,
     market: pageMarket,
     signals: pageSignals,
     model: pageModel,
@@ -2864,6 +2939,62 @@
       }));
       $$('#ck-adjust .seg').forEach((b) => b.addEventListener('click', () => {
         S.chartAdjust = Number(b.getAttribute('data-a'));
+        navigate('chart', false);
+      }));
+      const cw = $('#ck-watch');
+      if (cw) cw.addEventListener('click', async () => {
+        if (!S.chartCode) { toast('先查一只股票', 'warn'); return; }
+        const g = window.prompt('加到哪个分组？（可留空）', '观察');
+        if (g === null) return;
+        const r = await api('/api/watch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ add: [S.chartCode], group: g || '' })
+        });
+        toast(r && r.ok ? '已加入自选' : ('失败：' + ((r && (r.error || r.hint)) || '未知')),
+              r && r.ok ? 'ok' : 'err');
+      });
+      return;
+    }
+    if (id === 'watch') {
+      const add = $('#w-add');
+      if (add) add.addEventListener('click', async () => {
+        const raw = (($('#w-codes') || {}).value || '').trim();
+        if (!raw) { toast('请输入代码', 'warn'); return; }
+        const codes = raw.split(/[,，\s]+/).map((x) => x.trim().toUpperCase()).filter(Boolean);
+        const g = (($('#w-group') || {}).value || '').trim();
+        add.disabled = true;
+        const r = await api('/api/watch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ add: codes, group: g })
+        });
+        add.disabled = false;
+        if (r && r.ok) { toast('已加入 ' + codes.length + ' 只', 'ok'); rerender(); }
+        else toast('失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+      });
+      $$('.w-del').forEach((b) => b.addEventListener('click', async () => {
+        const code = b.getAttribute('data-code');
+        const r = await api('/api/watch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ remove: [code] })
+        });
+        if (r && r.ok) { toast('已移除 ' + code, 'ok'); rerender(); }
+      }));
+      $$('.w-move').forEach((b) => b.addEventListener('click', async () => {
+        const g0 = b.getAttribute('data-group');
+        const g1 = window.prompt('把「' + g0 + '」整组改到哪个分组？', g0);
+        if (g1 === null) return;
+        const codes = $$('.w-del').map((x) => x.getAttribute('data-code'));
+        // 只改本组的：从表格里取
+        const rows = b.closest('.card') ? b.closest('.card').querySelectorAll('.w-del') : [];
+        const list = Array.prototype.map.call(rows, (x) => x.getAttribute('data-code'));
+        const r = await api('/api/watch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ set_group: list, group: g1 })
+        });
+        if (r && r.ok) { toast('已改分组', 'ok'); rerender(); }
+      }));
+      $$('[data-goto]').forEach((a) => a.addEventListener('click', () => {
+        S.chartCode = a.getAttribute('data-goto');
         navigate('chart', false);
       }));
       return;

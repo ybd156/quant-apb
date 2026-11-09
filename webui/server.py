@@ -82,7 +82,10 @@ MODEL_BUNDLE = "model.json"
 
 DEFAULT_VERSION = "0.0.0"
 
-MAX_BODY_BYTES = 64 * 1024
+# 请求体上限。原来 64KB —— 但模型 zip 有 67KB，base64 后 89KB，
+# 导致 /api/model/import 和 /api/sync/push **从来没成功过**（400）。
+# 16MB 足够放一个完整模型包（250 树约 260KB，base64 后 350KB，余量很大）。
+MAX_BODY_BYTES = 16 * 1024 * 1024
 MAX_TOP = 200
 MAX_DAYS = 500
 
@@ -358,7 +361,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
+            self._security_headers()
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
@@ -422,7 +425,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(blob)))
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("X-Content-Type-Options", "nosniff")
+            self._security_headers()
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(blob)
@@ -670,6 +673,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             cur = watch.load()
             return self._ok({"items": cur.get("items") or [],
                              "updated_at": cur.get("updated_at"),
+                             "groups": watch.groups().get("groups") or [],
                              "summary": watch.summary()})
         except Exception as e:  # noqa: BLE001
             return self._fail("watch_failed", 200, detail=str(e)[:160])
@@ -686,12 +690,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
         out = {}
+        grp = str(body.get("group") or "")[:20]
         if body.get("add"):
-            out["add"] = watch.add(body["add"])
+            out["add"] = watch.add(body["add"], group=grp)
         if body.get("remove"):
             out["remove"] = watch.remove(body["remove"])
+        if body.get("set_group"):
+            out["set_group"] = watch.set_group(body["set_group"], grp)
         if not out:
-            return self._fail("nothing_to_do", 400, hint="需要 add 或 remove")
+            return self._fail("nothing_to_do", 400,
+                              hint="需要 add / remove / set_group 之一")
         return self._ok(out)
 
     def _api_names(self):
@@ -1241,6 +1249,7 @@ f.addEventListener('submit',async(e)=>{
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self._security_headers()
             self.end_headers()
             try:
                 self.wfile.write(body)
@@ -1395,6 +1404,30 @@ f.addEventListener('submit',async(e)=>{
             return self._fail("host_not_allowed", 403, detail=why,
                               hint="把域名加进 APB_ALLOWED_HOSTS")
         return None
+
+    def _security_headers(self):
+        """
+        统一的安全响应头。缺这些会被浏览器当成"不设防的站点"：
+          X-Frame-Options      防点击劫持（别人用 iframe 套你的页面骗点击）
+          X-Content-Type-Options 防 MIME 嗅探（把 JSON 当脚本执行）
+          Referrer-Policy      不要把带 token 的 URL 泄漏给第三方
+          CSP                  限制可执行脚本来源，缓解 XSS
+          HSTS                 仅在 HTTPS 下加，强制后续走 HTTPS
+        """
+        try:
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+                "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+                "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'")
+            if self._is_https():
+                self.send_header("Strict-Transport-Security",
+                                 "max-age=31536000; includeSubDomains")
+        except Exception:
+            pass
 
     def _cors_apply(self):
         """把 CORS 头写进响应（只有白名单里的 Origin 才会拿到）。"""
