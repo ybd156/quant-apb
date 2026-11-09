@@ -10,10 +10,10 @@ echo   APB Training Daemon  (keeps running)
 echo ============================================================
 echo.
 echo   This machine becomes a training worker:
-echo     - checks for software updates every cycle
-echo     - picks up training tasks queued on the NAS
-echo     - trains, uploads, reports back
-echo     - repeats forever (Ctrl+C to stop)
+echo     1. checks which horizons are missing on the NAS
+echo     2. trains the missing ones, uploads them
+echo     3. then keeps running, picking up queued tasks
+echo     4. repeats forever (Ctrl+C to stop)
 echo.
 echo   Leave this window open. Closing it stops the worker.
 echo.
@@ -46,7 +46,7 @@ if errorlevel 1 (
     )
 )
 
-rem ---------- NAS url from apb_defaults.json ----------
+rem ---------- NAS url ----------
 set "NAS="
 for /f "usebackq delims=" %%u in (`%PY% -c "import sys,os;sys.path.insert(0,os.path.join(os.getcwd(),'tools'));import defaults;print(defaults.nas())" 2^>nul`) do set "NAS=%%u"
 if not defined NAS set "NAS=https://apbcdn.683868.xyz"
@@ -58,20 +58,31 @@ if not defined APB_TOKEN (
     set /p APB_TOKEN=Token: 
 )
 if not defined APB_TOKEN (
-    echo [!] No token. The NAS will reject write operations.
+    echo [!] No token. Uploading models will fail.
     echo     Set it with:  set APB_TOKEN=your-token
 )
 
 echo.
 echo Target NAS: %NAS%
-echo Interval  : 60 seconds
 echo.
-echo Starting worker...
+
+rem ---------- 1) train whatever is missing ----------
+echo ============================================================
+echo   Step 1: check which horizons are missing, train them
+echo ============================================================
+%PY% tools\train_missing.py --nas "%NAS%" --token "%APB_TOKEN%"
+echo.
+echo   (If every horizon already had a model, nothing is trained.)
+
+rem ---------- 2) then keep running as a worker ----------
+echo.
+echo ============================================================
+echo   Step 2: stay online, pick up queued tasks every 60s
+echo ============================================================
 echo.
 
 :LOOP
 %PY% tools\sync_agent.py --nas "%NAS%" --loop 60 --auto-update
-
 echo.
 echo [!] Worker exited (code %ERRORLEVEL%). Restarting in 30 seconds...
 echo     Press Ctrl+C now to stop, or wait to continue.
