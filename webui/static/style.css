@@ -1031,3 +1031,18 @@ select { cursor: pointer; }
 .legacy-archive > summary::before { content: '▸ '; color: var(--text-3, #6b7684); }
 .legacy-archive[open] > summary::before { content: '▾ '; }
 .legacy-archive > summary:hover { color: var(--text-1, #d5dae3); }
+
+/* 训练任务卡片 */
+.chip-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.chip-check { display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px;
+  border: 1px solid rgba(120,140,180,.28); border-radius: 8px; font-size: 12.5px;
+  cursor: pointer; user-select: none; color: var(--text-2, #9aa4b2); }
+.chip-check:hover { border-color: rgba(120,140,180,.5); color: var(--text-1, #d5dae3); }
+.chip-check input { margin: 0; accent-color: #4a7dff; }
+.tbl-wrap { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tbl th { text-align: left; padding: 8px 10px; font-weight: 500;
+  color: var(--text-3, #6b7684); border-bottom: 1px solid rgba(120,140,180,.18); }
+.tbl td { padding: 8px 10px; border-bottom: 1px solid rgba(120,140,180,.10); }
+.tbl td.num, .tbl td.mono { font-variant-numeric: tabular-nums; }
+.tbl .tag.is-active { background: rgba(74,125,255,.16); color: #6aa6ff; }

@@ -436,6 +436,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_GET(self):
+        _g = self._guard_request()
+        if _g is not None:
+            return
         t0 = time.perf_counter()
         status, size = 0, 0
         try:
@@ -494,6 +497,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_calendar(query)
         if path == "/api/lot":
             return self._api_lot(query)
+        if path == "/api/healthz":
+            return self._api_healthz()
+        if path == "/api/netguard":
+            return self._api_netguard()
         if path == "/api/sync":
             return self._api_sync_summary()
         if path == "/api/sync/task":
@@ -714,7 +721,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._fail("unauthorized", 403, hint="X-Token 不匹配")
         else:
             client = (self.client_address or ("", 0))[0]
-            if not _is_private_ip(client):
+            if not self._is_internal():
                 return self._fail("forbidden", 403, hint="未设 APB_TOKEN 时只允许内网修改")
         body, err = self._read_body()
         if err:
@@ -1139,10 +1146,69 @@ class ApiHandler(BaseHTTPRequestHandler):
                                   hint="X-APB-Token 与 APB_TOKEN 不匹配")
         else:
             client = (self.client_address or ("", 0))[0]
-            if not _is_private_ip(client):
+            if not self._is_internal():
                 return self._fail("forbidden", 403,
                                   hint="未设 APB_TOKEN 时只允许内网")
         return None
+
+    def _guard_request(self):
+        """
+        统一前置检查：Host 头（防 DNS rebinding）+ CORS 预检。
+        返回 None 表示放行；否则返回已经写好的响应。
+        """
+        try:
+            from qcore import net_guard as NG
+        except Exception:
+            return None
+        host = self.headers.get("Host") or ""
+        ok, why = NG.host_allowed(host)
+        if not ok:
+            return self._fail("host_not_allowed", 403, detail=why,
+                              hint="把域名加进 APB_ALLOWED_HOSTS")
+        return None
+
+    def _cors_apply(self):
+        """把 CORS 头写进响应（只有白名单里的 Origin 才会拿到）。"""
+        try:
+            from qcore import net_guard as NG
+            origin = self.headers.get("Origin") or ""
+            for k, v in (NG.cors_headers(origin) or {}).items():
+                self.send_header(k, v)
+        except Exception:
+            pass
+
+    def _is_internal(self) -> bool:
+        """
+        「是否内网请求」—— 写接口免 token 的唯一判断依据。
+        **必须走 net_guard**：反代之后 client_address 是 127.0.0.1，
+        直接用它判断会把外网请求当内网（真实安全洞）。
+        """
+        try:
+            from qcore import net_guard as NG
+            client = (self.client_address or ("", 0))[0]
+            hdrs = {k: v for k, v in (self.headers or {}).items()}
+            return NG.is_internal_request(client, hdrs)
+        except Exception:
+            client = (self.client_address or ("", 0))[0]
+            return _is_private_ip(client)
+
+    def _api_healthz(self):
+        """给反向代理/容器编排用的极简健康检查（不读任何状态文件）。"""
+        return self._ok({"status": "ok", "version": _read_version()})
+
+    def _api_netguard(self):
+        """反代配置自检：哪些没配好、能不能暴露公网。"""
+        try:
+            from qcore import net_guard as NG
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        st = NG.status()
+        client = (self.client_address or ("", 0))[0]
+        hdrs = {k: v for k, v in (self.headers or {}).items()}
+        st["your_ip"] = NG.real_ip(client, hdrs)
+        st["you_are_internal"] = NG.is_internal_request(client, hdrs)
+        st["host_header"] = self.headers.get("Host") or ""
+        return self._ok(st)
 
     def _api_sync_summary(self):
         try:
@@ -1388,7 +1454,23 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     # ---------------- 路由：POST ----------------
 
+    def do_OPTIONS(self):
+        """CORS 预检。只回白名单里的 Origin。"""
+        try:
+            from qcore import net_guard as NG
+        except Exception:
+            NG = None
+        self.send_response(204)
+        if NG is not None:
+            for k, v in (NG.cors_headers(self.headers.get("Origin") or "") or {}).items():
+                self.send_header(k, v)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
+        _g = self._guard_request()
+        if _g is not None:
+            return
         t0 = time.perf_counter()
         status, size = 0, 0
         try:
@@ -1513,7 +1595,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
         else:
             client = (self.client_address or ("", 0))[0]
-            if not _is_private_ip(client):
+            if not self._is_internal():
                 return self._fail("token_not_configured", 403,
                                   hint=f"未设 APB_TOKEN 时只允许内网触发（来源 {client}）")
 
@@ -1541,7 +1623,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
         else:
             client = (self.client_address or ("", 0))[0]
-            if not _is_private_ip(client):
+            if not self._is_internal():
                 return self._fail("token_not_configured", 403,
                                   hint=f"未设 APB_TOKEN 时只允许内网更新（来源 {client}）；"
                                        "如需公网访问请设置 APB_TOKEN")
@@ -1591,7 +1673,12 @@ class ApiHandler(BaseHTTPRequestHandler):
     def _access_log(self, status: int, size: int, t0: float):
         elapsed = (time.perf_counter() - t0) * 1000.0
         stamp = time.strftime("%H:%M:%S")
-        client = self.client_address[0] if self.client_address else "-"
+        try:
+            from qcore import net_guard as _NG
+            client = _NG.real_ip(self.client_address[0] if self.client_address else "",
+                                 {k: v for k, v in (self.headers or {}).items()}) or "-"
+        except Exception:
+            client = self.client_address[0] if self.client_address else "-"
         print(f"{stamp} {client} {self.command} {self.path} -> {status} "
               f"{size}B {elapsed:.0f}ms", flush=True)
 

@@ -2344,6 +2344,10 @@
   /* ================================ 设置 ============================== */
 
   async function pageSettings() {
+    try {
+      const sy = await apiCached('/api/sync', 3000);
+      S.sync = (sy && sy.ok && sy.data) ? sy.data : {};
+    } catch (e) { S.sync = {}; }
     const [verRes, healthRes, updRes] = await Promise.all([
       apiCached('/api/version', 0), apiCached('/api/health', 0), apiCached('/api/update', 0)
     ]);
@@ -2421,6 +2425,61 @@
         '</div><p class="muted" style="margin-top:10px">导出内容 = data/state 下已存在文件的原样拼接，不做任何加工。</p>'
     });
 
+    // ---- 训练任务：NAS 下发，训练机领取 ----
+    const SY = S.sync || {};
+    const tasks = SY.recent || SY.tasks || [];
+    const counts = SY.counts || {};
+    const stTone = { pending: 'pending', claimed: 'is-active', done: 'hit', failed: 'miss',
+                     expired: 'miss', cancelled: 'pending' };
+    const stLabel = { pending: '待领取', claimed: '训练中', done: '已完成',
+                      failed: '失败', expired: '超时', cancelled: '已取消' };
+
+    const taskRows = tasks.slice(0, 12).map((t) => {
+      const st = String(t.status || 'pending');
+      return '<tr>' +
+        '<td class="mono">' + esc(String(t.id || '').slice(0, 8)) + '</td>' +
+        '<td>' + (t.horizons || []).map((h) => '<span class="chip">h' + esc(h) + '</span>').join('') + '</td>' +
+        '<td class="num">' + esc(t.trees || '—') + '</td>' +
+        '<td><span class="tag ' + (stTone[st] || '') + '">' + (stLabel[st] || st) + '</span></td>' +
+        '<td class="muted">' + esc(t.claimed_by || '—') + '</td>' +
+        '<td class="muted">' + esc(String(t.created_at || '').slice(5, 16)) + '</td>' +
+        '</tr>';
+    }).join('');
+
+    const horizonChips = (S.horizonsList || [1, 3, 5, 10, 15]).map((h) =>
+      '<label class="chip-check"><input type="checkbox" class="tk-h" value="' + h + '"' +
+      (h === 1 || h === 5 ? ' checked' : '') + '> h' + h + '</label>').join('');
+
+    const trainCard = card({
+      title: '训练任务', sub: 'NAS 下发 → 训练机自动领取 → 训练完自动上传',
+      tools: '<button type="button" class="btn ghost sm" id="tk-refresh">' + ICON('refresh') + '刷新</button>',
+      body:
+        '<div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px">' +
+          '<div><div class="muted" style="margin-bottom:6px">周期</div>' +
+            '<div class="chip-row">' + horizonChips + '</div></div>' +
+          '<label class="field" style="max-width:110px"><span>树数</span>' +
+            '<input type="number" id="tk-trees" value="250" min="50" max="1000"></label>' +
+          '<label class="field" style="max-width:110px"><span>股票池</span>' +
+            '<input type="number" id="tk-stocks" value="300" min="50" max="800"></label>' +
+          '<button type="button" class="btn" id="tk-add">' + ICON('plus') + '排任务</button>' +
+        '</div>' +
+        '<div class="muted" style="margin-bottom:10px">' +
+          '队列：' + ['pending', 'claimed', 'done', 'failed', 'expired']
+            .filter((k) => counts[k]).map((k) => (stLabel[k] || k) + ' ' + counts[k]).join(' · ') +
+          (Object.keys(counts).length ? '' : '空') +
+        '</div>' +
+        (taskRows
+          ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
+            '<th>ID</th><th>周期</th><th>树</th><th>状态</th><th>执行机器</th><th>创建</th>' +
+            '</tr></thead><tbody>' + taskRows + '</tbody></table></div>'
+          : emptyBox('队列为空', '上面选好周期点「排任务」，训练机上跑 ' +
+              '<code>python tools/sync_agent.py --nas http://&lt;NAS&gt;:8765 --loop 60</code> 就会自动领活')) +
+        '<p class="muted" style="margin-top:10px">' +
+          '训练机命令：<code>python tools/sync_agent.py --nas http://你的NAS:8765 --once</code>；' +
+          '也可以在本机直接 <code>python tools/train_one_click.py</code>。' +
+        '</p>'
+    });
+
     const themeCard = card({
       title: '外观', sub: '存 localStorage，默认暗色',
       body: '<div class="segmented" id="set-theme">' +
@@ -2431,6 +2490,7 @@
 
     return '<div class="grid two" style="margin-bottom:14px">' + infoCard + filesCard + '</div>' +
       '<div style="margin-bottom:14px">' + updateCard(u) + '</div>' +
+      '<div style="margin-bottom:14px">' + trainCard + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + runCard + exportCard + '</div>' +
       themeCard;
   }
@@ -2627,6 +2687,33 @@
       const doUpd = $('#btn-do-update');
       if (doUpd) doUpd.addEventListener('click', openUpdateModal);
       $$('#set-theme .seg').forEach((b) => b.addEventListener('click', () => setTheme(b.getAttribute('data-t'))));
+
+      // ---- 训练任务 ----
+      const tkAdd = $('#tk-add');
+      if (tkAdd) {
+        tkAdd.addEventListener('click', async () => {
+          const hs = $$('.tk-h').filter((x) => x.checked).map((x) => Number(x.value));
+          if (!hs.length) { toast('至少选一个周期', 'warn'); return; }
+          const trees = Number(($('#tk-trees') || {}).value || 250);
+          const stocks = Number(($('#tk-stocks') || {}).value || 300);
+          tkAdd.disabled = true;
+          const r = await api('/api/sync/task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ horizons: hs, trees, stocks })
+          });
+          tkAdd.disabled = false;
+          if (r && r.ok) {
+            toast('已排任务：h' + hs.join('/h'), 'ok');
+            rerender();
+          } else {
+            toast('排任务失败：' + ((r && (r.error || r.hint)) || '未知'), 'err');
+          }
+        });
+      }
+      const tkRef = $('#tk-refresh');
+      if (tkRef) tkRef.addEventListener('click', () => rerender());
+
       refreshRunStatus();
     }
   }
