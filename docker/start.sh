@@ -238,7 +238,7 @@ HS.snapshot(verbose=True)
 fi
 
 # 5.8) 模拟盘自动调仓（每 2 小时一次，按最新 picks）
-# 默认**关**。实测事故：`ENABLE_PAPER_AUTO` 全仓库从未定义，空串 != "0" 恒真
+# 默认**关**。实测事故：ENABLE_PAPER_AUTO 全仓库从未定义，空串 != "0" 恒真
 # → 每 2 小时无条件调仓一次，2026-11-09 13:10 用周五收盘价成交 20 笔并记成周五。
 # 需要时显式开：-e APB_PAPER_AUTO=1（且 paper_auto 内部还有一道时间门禁）
 ENABLE_PAPER_AUTO="${APB_PAPER_AUTO:-0}"
@@ -304,8 +304,8 @@ if phase not in ('morning', 'afternoon'):
     print(f'[intraday] 非交易时段（{phase}），跳过')
 else:
     from qcore import intraday_online as IO
-    # 旧代码调 `IO.run_all_markets()` —— 这个函数**不存在**（实测 AttributeError），
-    # 而外层 `|| true` 把错误吞掉：每交易日静默崩约 78 次，零产出零告警。
+    # 旧代码调 IO.run_all_markets() —— 这个函数不存在（实测 AttributeError），
+    # 而外层 '|| true' 把错误吞掉：每交易日静默崩约 78 次，零产出零告警。
     IO.run_once(verbose=True)
 " 2>&1 | tail -6
             sleep 300

@@ -48,6 +48,9 @@ COPY audit/leak_scan.py ./audit/
 COPY tests/test_no_lookahead.py ./tests/
 COPY tools/ ./tools/
 COPY docker/start.sh ./start.sh
+# 构建期就校验入口脚本语法。实测事故：python -c "..." 块里的反引号被 sh
+# 当成命令替换，容器起来直接崩溃循环（Bad function name），而镜像构建是绿的。
+RUN sh -n /app/start.sh
 COPY VERSION README.md LICENSE ./
 
 RUN mkdir -p /app/data/state /app/data/raw /app/data/pred_ledger /app/logs \
