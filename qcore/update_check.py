@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
@@ -72,9 +73,26 @@ def _tags_from(registry: str) -> Tuple[bool, List[str], str]:
     try:
         if not token:
             return False, [], "no_token"
-        d = _get_json(f"https://{registry}/v2/{REPO}/tags/list",
-                      headers={"Authorization": f"Bearer {token}"})
-        return True, list(d.get("tags") or []), ""
+        # **必须分页**：GHCR 的 /tags/list 默认只给 100 个（按字典序）。
+        # 版本数超过 100 后，最新的 0.28.x 会落在第 2 页 ——
+        # 不分页时 check() 算出的「最新版本」停在 0.27.0，
+        # NAS 因此永远显示「已是最新」，训练机也就永远不更新。
+        # （实测：119 个 tag，前 100 个最高只到 0.27.0，0.28.0~0.28.2 在第 2 页。）
+        tags: List[str] = []
+        last = None
+        for _page in range(12):                 # 上限 1200 个 tag，够用很久
+            url = f"https://{registry}/v2/{REPO}/tags/list?n=100"
+            if last:
+                url += f"&last={urllib.parse.quote(str(last), safe='')}"
+            d = _get_json(url, headers={"Authorization": f"Bearer {token}"})
+            page_tags = list(d.get("tags") or [])
+            if not page_tags:
+                break
+            tags.extend(page_tags)
+            if len(page_tags) < 100:
+                break
+            last = page_tags[-1]
+        return True, tags, ""
     except Exception as e:  # noqa: BLE001
         return False, [], f"{type(e).__name__}: {e}"[:80]
 
@@ -106,8 +124,9 @@ def check(write: bool = True) -> Dict:
             k = _ver_key(t)
             if k and (best_key is None or k > best_key):
                 best_key, best_tag, used = k, t.lstrip("v"), reg
-        if best_tag:
-            break        # 拿到就不必再试下一个源
+        # 不在第一个源就 break：镜像源（如 ghcr.nju.edu.cn）可能滞后，
+        # 拿它当唯一真相会把「镜像没同步」误报成「没有新版本」。
+        # 继续问下一个源，最后取所有源里的最大 semver。
 
     cur_key = _ver_key(cur)
     has_update = bool(best_key and cur_key and best_key > cur_key)

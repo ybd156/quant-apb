@@ -49,6 +49,9 @@ jobs:
       - name: 检查器负控（注入违规必须 FAIL）
         run: python -m tests.test_invariants_negative
 
+      - name: 更新检查分页（否则最新版本永远停在第一页）
+        run: python -m tests.test_update_check
+
       - name: 增量=批量 parity（无本地行情时自动 SKIP）
         run: python -m tests.test_incremental_parity
 
