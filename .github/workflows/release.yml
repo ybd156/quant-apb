@@ -88,8 +88,9 @@ jobs:
       # 上一次成功、下一次失败（实测 v0.27.0 重试即过、v0.27.1 又失败）。
       #
       # 三个细节：
-      # 1) --label-file 而不是 --label：metadata-action 的 labels 是**多行**
-      #    的 k=v 列表，加引号会压成一个参数，标签全丢。
+      # 1) labels 是**多行** k=v 列表，`--label "$LABELS"` 会压成一个参数、
+      #    标签全丢；buildx build 也没有 --label-file（那是 bake 的特性），
+      #    所以要逐行转成 --label k=v 数组。
       # 2) 只对瞬时错误重试：Dockerfile 语法错、pip 404 重试 4 次只会
       #    把真因埋在 4 段同样的日志里。
       # 3) push 完用 imagetools 校验：否则 release job 会在镜像没上去的
@@ -110,15 +111,19 @@ jobs:
             [ -n "$t" ] && TAGARGS+=(-t "$t")
           done <<< "$TAGS"
 
-          # 多行 labels -> 临时文件（buildx 的 --label-file 支持逐行 k=v）
-          printf '%s\n' "$LABELS" | grep -v '^$' > /tmp/labels.txt || true
+          # 多行 labels -> 数组（buildx build **没有** --label-file，
+          # 那是 bake 的特性；只能逐行转成 --label k=v）
+          LABELARGS=()
+          while IFS= read -r l; do
+            [ -n "$l" ] && LABELARGS+=(--label "$l")
+          done <<< "$LABELS"
 
           for attempt in 1 2 3 4; do
             echo "=== 第 $attempt 次构建+推送 ==="
             if docker buildx build \
                  --platform linux/amd64,linux/arm64 \
                  "${TAGARGS[@]}" \
-                 --label-file /tmp/labels.txt \
+                 "${LABELARGS[@]}" \
                  --cache-from type=gha \
                  --cache-to type=gha,mode=max \
                  --push . 2>&1 | tee /tmp/build.log; then
