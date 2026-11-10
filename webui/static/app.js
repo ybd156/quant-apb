@@ -3754,8 +3754,20 @@
     const counts = SY.counts || {};
     const stTone = { pending: 'pending', claimed: 'is-active', done: 'hit', failed: 'miss',
                      expired: 'miss', cancelled: 'pending' };
-    const stLabel = { pending: '待领取', claimed: '训练中', done: '已完成',
-                      failed: '失败', expired: '超时', cancelled: '已取消' };
+    const stLabel = { pending: '待领取', claimed: '已领走', done: '已完成',
+                      failed: '失败', expired: '超时未回报', cancelled: '已取消' };
+
+    /** 已领走多久 —— 「claimed」不等于「在跑」。
+     *  实测：任务被领走 3 小时仍是 claimed，界面上写「训练中」会让人以为一切正常。 */
+    function claimedAge(t) {
+      if (String(t.status) !== 'claimed' || !t.claimed_at) return '';
+      const t0 = new Date(String(t.claimed_at));
+      if (isNaN(t0.getTime())) return '';
+      const min = Math.max(0, Math.round((Date.now() - t0.getTime()) / 60000));
+      const warn = min > 60;
+      return '<span class="muted"' + (warn ? ' style="color:var(--warn)"' : '') + '>' +
+        min + ' 分钟前' + (warn ? '（可能已中断）' : '') + '</span>';
+    }
 
     const taskRows = tasks.slice(0, 12).map((t) => {
       const st = String(t.status || 'pending');
@@ -3763,8 +3775,10 @@
         '<td class="mono">' + esc(String(t.id || '').slice(0, 8)) + '</td>' +
         '<td>' + (t.horizons || []).map((h) => '<span class="chip">h' + esc(h) + '</span>').join('') + '</td>' +
         '<td class="num">' + esc(t.trees || '—') + '</td>' +
-        '<td><span class="tag ' + (stTone[st] || '') + '">' + (stLabel[st] || st) + '</span></td>' +
-        '<td class="muted">' + esc(t.claimed_by || '—') + '</td>' +
+        '<td>' + (t.job && t.job !== 'train' ? '<span class="chip">' + esc(t.job) + '</span>' : '—') + '</td>' +
+        '<td><span class="tag ' + (stTone[st] || '') + '">' + (stLabel[st] || st) + '</span>' +
+          (t.retries ? ' <span class="muted">重试 ' + esc(t.retries) + '</span>' : '') + '</td>' +
+        '<td class="muted">' + esc(t.claimed_by || '—') + '<br>' + claimedAge(t) + '</td>' +
         '<td class="muted">' + esc(String(t.created_at || '').slice(5, 16)) + '</td>' +
         '</tr>';
     }).join('');
@@ -3898,7 +3912,7 @@
         '</div>' +
         (taskRows
           ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
-            '<th>ID</th><th>周期</th><th>树</th><th>状态</th><th>执行机器</th><th>创建</th>' +
+            '<th>ID</th><th>周期</th><th>树</th><th>类型</th><th>状态</th><th>执行机器</th><th>创建</th>' +
             '</tr></thead><tbody>' + taskRows + '</tbody></table></div>'
           : emptyBox('队列为空', '上面选好周期点「排任务」，训练机上跑 ' +
               '<code>python tools/sync_agent.py --nas http://&lt;NAS&gt;:8765 --loop 60</code> 就会自动领活')) +

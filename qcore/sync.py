@@ -46,6 +46,15 @@ TASKS = os.path.join(STATE, "sync_tasks.json")
 # 任务超过这么久没回传就算过期（分钟）
 EXPIRE_MIN = 240
 
+#: 按任务类型设领取超时（分钟）。一刀切 4 小时的问题：
+#: pipeline 只要 20 分钟，卡 4 小时才标过期 → 用户看到「已领走」以为在跑，
+#: 实际早就死了（实测 98ac761c229d 卡了 3 小时还是 claimed）。
+EXPIRE_MIN_BY_JOB = {"train": 240, "pipeline": 90, "prewarm": 90}
+
+#: 失败/超时后允许重领的次数。没有它，一条任务挂掉就是永久废掉，
+#: 用户只能重新排一条 —— 队列里 6 条 expired 就是这么堆出来的。
+MAX_RETRIES = 2
+
 
 def _now() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
@@ -78,20 +87,37 @@ def _save(d: Dict) -> None:
 
 
 def _expire(d: Dict) -> int:
-    """把领取超时的任务标成 expired。"""
+    """把领取超时的任务标成 expired；还有重试次数的退回 pending。
+
+    返回被处理的任务数。
+    """
     n = 0
-    cutoff = datetime.now().astimezone() - timedelta(minutes=EXPIRE_MIN)
+    now = datetime.now().astimezone()
     for t in d.get("tasks", []):
         if t.get("status") != "claimed":
             continue
+        job = str(t.get("job") or "train")
+        win = int(EXPIRE_MIN_BY_JOB.get(job, EXPIRE_MIN))
         try:
             at = datetime.fromisoformat(str(t.get("claimed_at")))
         except Exception:
             continue
-        if at < cutoff:
+        if at >= now - timedelta(minutes=win):
+            continue
+        tries = int(t.get("retries") or 0)
+        if tries < MAX_RETRIES:
+            # 退回队列重领，而不是直接判死 —— 一次网络抖动不该废掉整条任务
+            t["status"] = "pending"
+            t["retries"] = tries + 1
+            t["claimed_by"] = None
+            t["claimed_at"] = None
+            t["last_expired_at"] = _now()
+            t["last_expire_reason"] = f"claimed 超过 {win} 分钟未回报（第 {tries + 1} 次重试）"
+        else:
             t["status"] = "expired"
             t["expired_at"] = _now()
-            n += 1
+            t["expire_reason"] = f"已重试 {tries} 次仍未回报"
+        n += 1
     return n
 
 
@@ -120,7 +146,7 @@ def create_task(horizons: List[int], trees: int = 250, stocks: int = 300,
         "note": str(note)[:200],
         "created_by": created_by, "created_at": _now(),
         "status": "pending", "claimed_by": None, "claimed_at": None,
-        "finished_at": None, "result": None,
+        "finished_at": None, "result": None, "retries": 0,
     }
     d.setdefault("tasks", []).append(task)
     _save(d)
@@ -169,7 +195,9 @@ def list_tasks(limit: int = 30) -> Dict:
         counts[t.get("status")] = counts.get(t.get("status"), 0) + 1
     return {"ok": True, "tasks": ts, "counts": counts,
             "total": len(d.get("tasks", [])),
-            "expire_min": EXPIRE_MIN}
+            "expire_min": EXPIRE_MIN,
+            "expire_min_by_job": EXPIRE_MIN_BY_JOB,
+            "max_retries": MAX_RETRIES}
 
 
 def cancel_task(task_id: str) -> Dict:
