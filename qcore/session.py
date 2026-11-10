@@ -44,7 +44,9 @@ os.makedirs(STATE, exist_ok=True)
 
 
 def _now() -> datetime:
-    return datetime.now()
+    # 必须 aware：naive 的「现在」在 UTC 机器与东八区机器上差 8 小时，
+    # 而时段判断完全依赖它（实测 CI 跑在 UTC，本地过、CI 红）。
+    return datetime.now().astimezone()
 
 
 def _iso(dt: Optional[datetime] = None) -> str:
@@ -373,6 +375,9 @@ def _market_now(now: Optional[datetime], market: str) -> datetime:
     try:
         from zoneinfo import ZoneInfo
         if n.tzinfo is None:
+            # naive 按**本机时区**解释。注意这意味着「同一串 naive 时间
+            # 在 UTC 机器与东八区机器上代表不同时刻」——
+            # 调用方（尤其测试）应当传 tz-aware 的 datetime。
             n = n.astimezone()
         return n.astimezone(ZoneInfo(tzname))
     except Exception:  # noqa: BLE001
