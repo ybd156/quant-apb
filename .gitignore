@@ -71,3 +71,7 @@ data/state/
 
 # 改前备份（本地快照，不入库）
 .backup/
+
+# 外部数据缓存（可再生）
+data/events/ext/
+.tmp_audit/
