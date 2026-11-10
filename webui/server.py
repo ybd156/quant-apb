@@ -2367,9 +2367,21 @@ f.addEventListener('submit',async(e)=>{
 
         # 机器访问：X-APB-Token（训练机同步代理用）
         expected = os.environ.get("APB_TOKEN", "")
-        given = self.headers.get("X-APB-Token") or ""
+        given = (self.headers.get("X-APB-Token")
+                 or self.headers.get("X-Token") or "")
         if expected and given and hmac.compare_digest(given, expected):
             return None
+        # **管理令牌**（每台训练机一把，可单独吊销）。
+        # 实测漏了这里：`_sync_auth` 已认管理令牌，但请求在更早的这道全局
+        # 网关就被 401 login_required 挡住，根本走不到端点。
+        if given:
+            try:
+                from qcore import tokens as TK
+                ok_t, _rec = TK.verify(given)
+                if ok_t:
+                    return None
+            except Exception:  # noqa: BLE001
+                pass
 
         sid = self._cookie("apb_session")
         if sid and AUTH.verify_session(sid):
