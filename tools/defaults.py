@@ -25,6 +25,28 @@ _ROOTS = [
 ]
 
 
+def token() -> str:
+    """NAS 的 APB_TOKEN（写进 apb_defaults.json 或环境变量）。"""
+    v = os.environ.get("APB_TOKEN", "").strip()
+    if v:
+        return v
+    return str((_load_file() or {}).get("token") or "").strip()
+
+
+def password() -> str:
+    """NAS 的登录密码 —— 没有 token 时用它换会话 cookie 上传。
+
+    为什么需要：`/api/sync/push` 要求鉴权。训练机如果只配了 NAS 地址、
+    没配 token，上传就会 `login_required`（实测训练机日志：
+    「上传失败 login_required」，模型训好了但永远传不回来）。
+    用密码登录换 cookie 是最省事的：用户本来就知道这个密码。
+    """
+    v = os.environ.get("APB_PASSWORD", "").strip()
+    if v:
+        return v
+    return str((_load_file() or {}).get("password") or "").strip()
+
+
 def _load_file() -> Dict:
     for root in _ROOTS:
         p = os.path.join(root, "apb_defaults.json")

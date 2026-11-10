@@ -162,7 +162,8 @@ def ensure_data(skip: bool = False) -> dict:
 
 # ---------------------------------------------------------------- 3. 训练
 def train_horizons(horizons, trees: int, stocks: int, verbose: bool = True,
-                   nas: str = "", token: str = "", upload: bool = True) -> list:
+                   nas: str = "", token: str = "", upload: bool = True,
+                   password: str = "") -> list:
     from qcore import live_model as LM
     from qcore import horizons as HZ
 
@@ -185,7 +186,7 @@ def train_horizons(horizons, trees: int, stocks: int, verbose: bool = True,
             # 训完立刻上传，不攒到最后打包
             if upload and nas:
                 say(f"    -> 上传到 {nas} ...")
-                up = _push_one(nas, token, h)
+                up = _push_one(nas, token, h, password=password)
                 item["uploaded"] = bool(up.get("ok"))
                 item["upload_detail"] = up
                 if up.get("ok"):
@@ -201,7 +202,40 @@ def train_horizons(horizons, trees: int, stocks: int, verbose: bool = True,
 
 
 # ---------------------------------------------------------------- 3.5 实时上传
-def _push_one(nas: str, token: str, horizon: int, timeout: int = 180) -> dict:
+_SESSION = {"cookie": ""}
+
+
+def _login_cookie(nas: str, password: str, timeout: int = 20) -> str:
+    """用 NAS 密码登录，拿会话 cookie。失败返回空串。"""
+    if _SESSION["cookie"]:
+        return _SESSION["cookie"]
+    if not password:
+        return ""
+    try:
+        import urllib.error
+        import urllib.request
+        payload = json.dumps({"password": password}).encode("utf-8")
+        req = urllib.request.Request(
+            nas.rstrip("/") + "/api/login", data=payload, method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": _BROWSER_UA})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.headers.get("Set-Cookie") or ""
+            body = r.read().decode("utf-8", "replace")
+        if not raw:
+            return ""
+        # 只取 apb_session=... 那一段
+        for part in raw.split(","):
+            kv = part.split(";")[0].strip()
+            if kv.startswith("apb_session="):
+                _SESSION["cookie"] = kv
+                return kv
+        return ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _push_one(nas: str, token: str, horizon: int, timeout: int = 180,
+              password: str = "") -> dict:
     """
     训完一个周期就立刻传上去 —— 不用先打包。
     失败就返回错误，由调用方决定要不要留 zip 兜底。
@@ -227,6 +261,11 @@ def _push_one(nas: str, token: str, horizon: int, timeout: int = 180) -> dict:
                "User-Agent": _BROWSER_UA}
     if token:
         headers["X-APB-Token"] = token
+    else:
+        # 没有 token 就登录换 cookie —— 否则永远 login_required
+        ck = _login_cookie(nas, password)
+        if ck:
+            headers["Cookie"] = ck
     req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -361,8 +400,11 @@ def main(argv=None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="只检查环境，不训练")
     ap.add_argument("--nas", default="",
                     help="训练完直接传到这个地址（默认读 apb_defaults.json）")
-    ap.add_argument("--token", default=os.environ.get("APB_TOKEN", ""),
-                    help="NAS 的 APB_TOKEN（也可用环境变量 APB_TOKEN）")
+    ap.add_argument("--token", default=(_DEF.token() if _DEF else os.environ.get("APB_TOKEN", "")),
+                    help="NAS 的 APB_TOKEN（也可用环境变量 APB_TOKEN 或 apb_defaults.json）")
+    ap.add_argument("--password", default=(_DEF.password() if _DEF else os.environ.get("APB_PASSWORD", "")),
+                    help="NAS 登录密码；没有 token 时用它换会话上传"
+                         "（也可用环境变量 APB_PASSWORD 或 apb_defaults.json）")
     ap.add_argument("--no-upload", action="store_true",
                     help="只训练不上传（模型留在 dist/models/）")
     a = ap.parse_args(argv)
@@ -437,7 +479,8 @@ def main(argv=None) -> int:
     if env.get("gpu") and a.gpu:
         say(f"  {WARN('GPU 可用')}，但本项目的 GBDT 直方图是内存受限的，"
             f"实测独显约 6× 加速、核显反而更慢")
-    res = train_horizons(hs, a.trees, a.stocks, nas=nas, token=token, upload=upload)
+    res = train_horizons(hs, a.trees, a.stocks, nas=nas, token=token, upload=upload,
+                         password=a.password)
     ok_n = sum(1 for r in res if r["ok"])
     up_n = sum(1 for r in res if r.get("uploaded"))
 

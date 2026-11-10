@@ -80,6 +80,9 @@ cat > "$KIT/apb_defaults.json" <<'JSON'
 {
   "nas_url": "https://apbcdn.683868.xyz",
   "note": "训练完把模型推到这个地址。改这里或命令行 --nas 覆盖。",
+  "token": "",
+  "password": "",
+  "auth_note": "上传模型需要鉴权。填 token（NAS 的 APB_TOKEN）或 password（NAS 登录密码）任意一个即可；两个都空会报 login_required —— 模型训好了却传不回来。",
   "default_horizons": [1, 3, 5, 10, 15],
   "default_trees": 250,
   "default_stocks": 300
