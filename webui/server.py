@@ -1335,25 +1335,67 @@ class ApiHandler(BaseHTTPRequestHandler):
         })
 
     def _api_session(self, query):
-        """
-        三段式时段数据。query: which=premarket|intraday|postclose|auto
-        auto 按当前时间判断；不在任何窗口内返回 outside_session。
+        """三段式时段数据。query: which=premarket|intraday|postclose|auto&market=CN|HK|US
+
+        ## 为什么必须带 market
+
+        原来窗口文案与 phase 映射全写死 A 股。美股传 market=US 时，
+        `in_window` 返回 "overnight"/"regular" 这些新段名，
+        落到 `which not in (premarket,intraday,postclose)` 分支 → 400，
+        前端拿到 data=null（实测）。
+
+        现在：窗口与映射都从 `session.MARKET_SESSIONS` 读，
+        phase 按市场映射回三段式词汇；非 A 股市场不跑 A 股 session 作业
+        （那是 A 股口径的东西），只回时段信息。
         """
         which = str(((query or {}).get("which") or ["auto"])[0]).lower()
+        mkt = str(((query or {}).get("market") or ["CN"])[0]).upper()
         try:
             from qcore import session as S
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
+
+        cfg = S.MARKET_SESSIONS.get(mkt) or S.MARKET_SESSIONS["CN"]
+        # 按市场真实分段生成窗口文案。
+        # 必须按**段名精确映射**，不能「可成交的算 intraday、其余算 postclose」——
+        # 那样 A 股午休会被标成盘后、美股夜盘会占掉盘前的位置（实测）。
+        win = {}
+        for name, a, b, ok in (cfg.get("segments") or []):
+            rng = f"{a[0]:02d}:{a[1]:02d}-{b[0]:02d}:{b[1]:02d}"
+            if ok:
+                win["intraday"] = (win.get("intraday") + " / " + rng) if win.get("intraday") else rng
+            elif name in ("premarket", "overnight", "lunch", "auction_open", "auction_close"):
+                win[name] = rng
+            else:
+                win["postclose"] = rng
+
         if which == "auto":
-            _mk = str((query.get("market") or ["CN"])[0]).upper()
-            cur = S.in_window(market=_mk)
-            if cur == "closed":
-                return self._ok({"session": "closed",
-                                 "note": "不在任何交易时段窗口内",
-                                 "windows": {"premarket": "08:30-09:30",
-                                             "intraday": "09:30-15:00",
-                                             "postclose": "15:05-17:00"}})
-            which = cur
+            seg = S.segment(None, mkt)
+            phase = seg.get("phase")
+            # 新段名 -> 三段式词汇
+            alias = {"morning": "intraday", "afternoon": "intraday",
+                     "regular": "intraday",
+                     "premarket": "premarket", "auction_open": "premarket",
+                     "postclose": "postclose", "afterhours": "postclose",
+                     "auction_close": "postclose"}
+            if phase in ("closed", "lunch", "overnight"):
+                return self._ok({"session": phase, "market": mkt,
+                                 "label": cfg.get("label", mkt),
+                                 "tradable": False,
+                                 "local_time": seg["local"].isoformat(timespec="seconds"),
+                                 "note": f"{cfg.get('label', mkt)}当前不在连续竞价（{phase}）",
+                                 "windows": win})
+            which = alias.get(phase, "intraday")
+            if not seg.get("tradable"):
+                # 延长时段：只报状态，不触发作业
+                return self._ok({"session": phase, "market": mkt,
+                                 "label": cfg.get("label", mkt),
+                                 "tradable": False,
+                                 "local_time": seg["local"].isoformat(timespec="seconds"),
+                                 "note": f"{cfg.get('label', mkt)}处于延长时段（{phase}），"
+                                         f"流动性薄，默认不用于成交",
+                                 "windows": win})
+
         if which == "noon":
             try:
                 from qcore import noon as NOON
@@ -1363,10 +1405,24 @@ class ApiHandler(BaseHTTPRequestHandler):
         if which not in ("premarket", "intraday", "postclose"):
             return self._fail("bad_param", 400,
                               hint="which 取 premarket|intraday|postclose|auto")
+        if mkt != "CN":
+            # 三个 session 作业都是 A 股口径（政策日历、龙虎榜、北向等），
+            # 对港股/美股跑它们只会产出无意义数字 —— 明确拒绝而不是给假结果。
+            return self._ok({"session": which, "market": mkt,
+                             "label": cfg.get("label", mkt),
+                             "tradable": S.segment(None, mkt).get("tradable", False),
+                             "note": f"{cfg.get('label', mkt)}没有对应的时段作业"
+                                     f"（premarket/intraday/postclose 是 A 股口径）",
+                             "windows": win})
         fn = {"premarket": S.premarket, "intraday": S.intraday,
               "postclose": S.postclose}[which]
         try:
-            return self._ok(fn(verbose=False))
+            out = fn(verbose=False)
+            if isinstance(out, dict):
+                out.setdefault("market", mkt)
+                out.setdefault("windows", win)
+                out.setdefault("tradable", True)
+            return self._ok(out)
         except Exception as e:  # noqa: BLE001
             return self._fail("session_failed", 200, detail=str(e)[:160])
 
