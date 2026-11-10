@@ -79,7 +79,7 @@ def build_regime(index_df: pd.DataFrame, dates: np.ndarray,
 
 
 # ------------------------------------------------------------------ build
-def external_loader(code: str):
+def external_loader(code: str, cache_only: bool = True):
     """把「资金流 + 事件」合并成一张按日索引的外部数据表，供 compute_signals 用。
 
     三者都是**外部数据**，取不到就返回 None（对应信号族输出 0，绝不报错）。
@@ -88,7 +88,17 @@ def external_loader(code: str):
     frames = []
     try:
         from . import flow_factor as FF
-        raw = FF.fetch_flow(code)
+        # 资金流：cache_only 时只用磁盘缓存（读不到就跳过，绝不联网）。
+        raw = None
+        if cache_only:
+            try:
+                raw = FF._cache_read(code)
+            except Exception:  # noqa: BLE001
+                raw = None
+            if raw is not None and len(raw):
+                raw = raw[FF.PUBLIC_COLUMNS].copy()
+        else:
+            raw = FF.fetch_flow(code)
         if raw is not None and len(raw):
             f = raw.copy()
             f["date"] = pd.to_datetime(f["date"]).dt.normalize()
@@ -100,7 +110,9 @@ def external_loader(code: str):
         pass
     try:
         from . import event_data as ED
-        e = ED.load_events(code)
+        # cache_only=True：**回测不联网**。没缓存就返回空表（信号族输出 0）。
+        # 需要更新缓存时用 `python -m qcore.event_data --refresh` 或定时任务。
+        e = ED.load_events(code, cache_only=cache_only)
         if e is not None and len(e):
             e = e.copy()
             e["date"] = pd.to_datetime(e["date"]).dt.normalize()
@@ -108,7 +120,24 @@ def external_loader(code: str):
                                            "bb_net_ratio", "mg_net_ratio",
                                            "mg_bal_ratio", "mg_short_ratio")
                                if c in e.columns]
-            frames.append(e[keep])
+            e = e[keep]
+            # 两融/大宗/龙虎榜都是 **T+1 披露**（T 日盘后公布 T 日数据，
+            # 但你在 T 日盘中拿不到）。信号在 t 日只能用 t-1 及更早的值，
+            # 否则就是用明天的数据做今天的决策（INV-1）。
+            # 做法：把这些列的日期整体后移 1 个交易日，让「数据日」变成「可用日」。
+            _lag = [c for c in keep if c != "date"]
+            if _lag:
+                _d = pd.to_datetime(e["date"]).dt.normalize()
+                try:
+                    from . import calendar_cn as _CAL
+                    _shift = {d: pd.Timestamp(_CAL.next_trading_day(d.date()))
+                              for d in _d.dropna().unique()}
+                    e = e.copy()
+                    e["date"] = _d.map(_shift)
+                except Exception:  # noqa: BLE001
+                    e = e.copy()
+                    e["date"] = _d + pd.Timedelta(days=1)
+            frames.append(e)
     except Exception:  # noqa: BLE001
         pass
     # 散户情绪：只读已落盘快照（绝不联网）。没有快照时为空，信号族输出 0。

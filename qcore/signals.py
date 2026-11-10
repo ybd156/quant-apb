@@ -1017,6 +1017,81 @@ def _f_event(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
     return np.nan_to_num(d, nan=0.0), s
 
 
+def _f_holder(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """股东增减持信号族（产业资本）。
+
+    数据：`event_data.fetch_holder_change`（实测 147,394 条 / 1994 起 / 32 年）。
+    按 **NOTICE_DATE 公告日**对齐 —— 那是信息可得日。
+    净增持看多(+1)，净减持看空(-1)。稀疏事件，无公告日输出 0。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    raw = view.flow.get("hold_net_ratio")
+    if raw is None:
+        return d, s
+    v = np.nan_to_num(np.asarray(raw, dtype=np.float64), nan=0.0)
+    win = int(params.get("win", 20))
+    if win > 1:
+        v = _roll_mean(v, win)
+    th = float(params.get("th", 0.0))
+    with np.errstate(invalid="ignore"):
+        d = np.where(v > th, 1.0, np.where(v < -th, -1.0, 0.0))
+        s = np.clip(np.abs(v) / 1.0, 0.0, 1.0)
+    return d, s
+
+
+def _f_lift(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """限售解禁信号族。
+
+    数据：`event_data.fetch_lift`（实测 31,820 条 / 2010 起，含未来计划）。
+    解禁日是**事前已知**的，所以按 FREE_DATE 对齐不构成未来函数。
+    解禁压力大 -> 看空(-1)。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    raw = view.flow.get("fc_lift_ratio")
+    if raw is None:
+        return d, s
+    v = np.nan_to_num(np.asarray(raw, dtype=np.float64), nan=0.0)
+    th = float(params.get("th", 10.0))
+    with np.errstate(invalid="ignore"):
+        d = np.where(v >= th, -1.0, 0.0)
+        s = np.clip(v / (th * 3.0), 0.0, 1.0)
+    return d, s
+
+
+def _f_forecast(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """业绩预告信号族（预期修正）。
+
+    数据：`event_data.fetch_forecast`（实测 191,446 条 / 2003 起 / 23 年）。
+    **按 NOTICE_DATE 公告日对齐**，绝不能用 REPORT_DATE（那是报告期，早于公告日）。
+    预告上调看多(+1)，下调看空(-1)。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    raw = view.flow.get("eps_revision")
+    if raw is None:
+        return d, s
+    v = np.nan_to_num(np.asarray(raw, dtype=np.float64), nan=0.0)
+    win = int(params.get("win", 20))
+    if win > 1:
+        v = _roll_mean(v, win)
+    th = float(params.get("th", 0.0))
+    with np.errstate(invalid="ignore"):
+        d = np.where(v > th, 1.0, np.where(v < -th, -1.0, 0.0))
+        s = np.clip(np.abs(v) / 3.0, 0.0, 1.0)
+    return d, s
+
+
 _IMPL: Dict[str, Callable[[Any, dict], Tuple[np.ndarray, np.ndarray]]] = {
     "ma_cross": _f_ma_cross,
     "ma_slope": _f_ma_slope,
@@ -1039,6 +1114,9 @@ _IMPL: Dict[str, Callable[[Any, dict], Tuple[np.ndarray, np.ndarray]]] = {
     "margin": _f_margin,
     "sentiment": _f_sentiment,
     "event": _f_event,
+    "holder": _f_holder,
+    "lift": _f_lift,
+    "forecast": _f_forecast,
 }
 
 _KIND = {
@@ -1052,6 +1130,9 @@ _KIND = {
     "margin": "flow",
     "sentiment": "sentiment",
     "event": "event",
+    "holder": "event",
+    "lift": "event",
+    "forecast": "event",
 }
 
 # 需要"可信 OHLC"的族（加性除息污染区置 0）
@@ -1215,6 +1296,21 @@ def _table() -> List[tuple]:
               "政策/新闻事件方向（level>=1）直接作为信号"))
     t.append(("event", {"min_level": 2.0}, "evt_dir_2",
               "只认强事件（level>=2）的方向"))
+    # ---- holder (2)：股东增减持。32 年历史，产业资本方向。
+    t.append(("holder", {"win": 1, "th": 0.0}, "hold_net_1",
+              "公告当日净增持(+1) / 净减持(-1)"))
+    t.append(("holder", {"win": 20, "th": 0.0}, "hold_net_20",
+              "20 日累计净增持(+1) / 净减持(-1)：产业资本中期方向"))
+    # ---- lift (2)：限售解禁。已知利空，解禁日看空。
+    t.append(("lift", {"th": 10.0}, "lift_pressure",
+              "解禁压力（解禁股数对数）超 10 -> 看空(-1)"))
+    t.append(("lift", {"th": 14.0}, "lift_pressure_big",
+              "只认大额解禁（对数 >14，约 120 万股以上）-> 看空(-1)"))
+    # ---- forecast (2)：业绩预告修正。23 年历史。
+    t.append(("forecast", {"win": 1, "th": 0.0}, "fcst_rev_1",
+              "业绩预告中值上修(+1) / 下修(-1)"))
+    t.append(("forecast", {"win": 20, "th": 0.0}, "fcst_rev_20",
+              "20 日预告修正均值 >0(+1) / <0(-1)"))
     return t
 
 

@@ -43,7 +43,8 @@ _BASE = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 
 #: 对外承诺的列（信号族只读这些）
 COLUMNS = ["date", "bt_shares_ratio", "bt_premium", "bb_net_ratio",
-           "mg_net_ratio", "mg_bal_ratio", "mg_short_ratio"]
+           "mg_net_ratio", "mg_bal_ratio", "mg_short_ratio",
+           "hold_net_ratio", "fc_lift_ratio", "eps_revision"]
 
 
 def _get_json(url: str, timeout: int = 20) -> Dict:
@@ -172,20 +173,110 @@ def fetch_margin(code: str) -> pd.DataFrame:
     return df[cols].sort_values("date").reset_index(drop=True)
 
 
+def fetch_holder_change(code: str) -> pd.DataFrame:
+    """股东增减持 -> 按公告日 [date, hold_net_ratio]。
+
+    实测 `RPT_SHARE_HOLDER_INCREASE` **147,394 条 / 1994-08-10 起（32 年）**。
+    hold_net_ratio : 当日公告的净增持数量 / 流通股本（%）。正=增持。
+    **必须按 NOTICE_DATE（公告日）对齐** —— 那是信息可得日。
+    """
+    raw = _datacenter("RPT_SHARE_HOLDER_INCREASE", code, sort="NOTICE_DATE")
+    cols = ["date", "hold_net_ratio"]
+    if raw.empty:
+        return pd.DataFrame(columns=cols)
+    sign = raw.get("CHANGE_NUM_SYMBOL")
+    num = pd.to_numeric(raw.get("CHANGE_NUM"), errors="coerce")
+    # 符号：接口用 1/-1 或 "增持"/"减持" 表示方向
+    if sign is not None:
+        sgn = pd.to_numeric(sign, errors="coerce")
+        if sgn.isna().all():
+            sgn = sign.astype(str).str.contains("增").map({True: 1.0, False: -1.0})
+        num = num * sgn.fillna(0.0)
+    rate = pd.to_numeric(raw.get("CHANGE_RATE"), errors="coerce")
+    df = pd.DataFrame({
+        "date": pd.to_datetime(raw.get("NOTICE_DATE"), errors="coerce").dt.normalize(),
+        "net_num": num,
+        "rate": rate,
+    }).dropna(subset=["date"])
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    # 优先用接口给的 CHANGE_RATE（已是比例），没有就用数量求和当强度
+    g = df.groupby("date", as_index=False).agg(
+        net_num=("net_num", "sum"), rate=("rate", "sum"))
+    g["hold_net_ratio"] = g["rate"].where(g["rate"].notna(), g["net_num"])
+    return g[["date", "hold_net_ratio"]].sort_values("date").reset_index(drop=True)
+
+
+def fetch_lift(code: str) -> pd.DataFrame:
+    """限售解禁 -> 按解禁日 [date, fc_lift_ratio]。
+
+    实测 `RPT_LIFT_STAGE` **31,820 条 / 2010-01-04 起（含未来计划）**。
+    fc_lift_ratio : 解禁市值 / 流通市值（%）。解禁是已知利空。
+    解禁日是**事前已知**的，所以用 FREE_DATE 对齐不构成未来函数。
+    """
+    raw = _datacenter("RPT_LIFT_STAGE", code, sort="FREE_DATE")
+    cols = ["date", "fc_lift_ratio"]
+    if raw.empty:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame({
+        "date": pd.to_datetime(raw.get("FREE_DATE"), errors="coerce").dt.normalize(),
+        "shares": pd.to_numeric(raw.get("CURRENT_FREE_SHARES"), errors="coerce"),
+        "cap": pd.to_numeric(raw.get("LIFT_MARKET_CAP"), errors="coerce"),
+    }).dropna(subset=["date"])
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    g = df.groupby("date", as_index=False).agg(shares=("shares", "sum"), cap=("cap", "sum"))
+    # 没有流通市值时用解禁股数做相对强度（对数压缩，避免量纲爆炸）
+    import numpy as _np
+    g["fc_lift_ratio"] = _np.log1p(g["shares"].abs().fillna(0.0))
+    return g[["date", "fc_lift_ratio"]].sort_values("date").reset_index(drop=True)
+
+
+def fetch_forecast(code: str) -> pd.DataFrame:
+    """业绩预告 -> 按公告日 [date, eps_revision]。
+
+    实测 `RPT_PUBLIC_OP_NEWPREDICT` **191,446 条 / 2003-04-12 起（23 年）**。
+    eps_revision : 预告净利润上下限中值（对数压缩）。
+    **必须按 NOTICE_DATE 对齐**，不能用 REPORT_DATE（后者是报告期，早于公告日
+    → 用报告期对齐就是未来函数）。
+    """
+    raw = _datacenter("RPT_PUBLIC_OP_NEWPREDICT", code, sort="NOTICE_DATE")
+    cols = ["date", "eps_revision"]
+    if raw.empty:
+        return pd.DataFrame(columns=cols)
+    lo = pd.to_numeric(raw.get("PREDICT_AMT_LOWER"), errors="coerce")
+    hi = pd.to_numeric(raw.get("PREDICT_AMT_UPPER"), errors="coerce")
+    mid = (lo + hi) / 2.0
+    import numpy as _np
+    df = pd.DataFrame({
+        "date": pd.to_datetime(raw.get("NOTICE_DATE"), errors="coerce").dt.normalize(),
+        "rev": _np.sign(mid) * _np.log1p(mid.abs()),
+    }).dropna(subset=["date"])
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    g = df.groupby("date", as_index=False).agg(eps_revision=("rev", "mean"))
+    return g.sort_values("date").reset_index(drop=True)
+
+
 def _cache_path(code: str) -> str:
     return os.path.join(EXT_DIR, f"{str(code).zfill(6)}.csv")
 
 
 def load_events(code: str, refresh: bool = False,
-                max_age_hours: float = 12.0) -> pd.DataFrame:
+                max_age_hours: float = 12.0,
+                cache_only: bool = False) -> pd.DataFrame:
     """读该票的事件数据（大宗交易 + 龙虎榜），带磁盘缓存。
 
     返回 DataFrame[date, bt_shares_ratio, bt_premium, bb_net_ratio]。
     任何失败都返回**空表**（信号族会输出 0），绝不抛异常中断主流程。
     """
     path = _cache_path(code)
-    if (not refresh) and os.path.isfile(path):
-        if (time.time() - os.path.getmtime(path)) / 3600.0 < max_age_hours:
+    if os.path.isfile(path):
+        # cache_only 时忽略过期时间：**回测绝不允许联网**。
+        # 实测事故：external_loader 在 build_dataset 里逐票调 5 个接口，
+        # 300 只 = 1500 次请求，pipeline 卡在 [1/7] data 十几分钟不动。
+        fresh = (time.time() - os.path.getmtime(path)) / 3600.0 < max_age_hours
+        if cache_only or ((not refresh) and fresh):
             try:
                 df = pd.read_csv(path, parse_dates=["date"])
                 for c in COLUMNS:
@@ -194,11 +285,16 @@ def load_events(code: str, refresh: bool = False,
                 return df[COLUMNS]
             except Exception:  # noqa: BLE001
                 pass
+    if cache_only:
+        return pd.DataFrame(columns=COLUMNS)
     try:
         bt = fetch_block_trade(code)
         bb = fetch_billboard(code)
         mg = fetch_margin(code)
-        parts = [x for x in (bt, bb, mg) if x is not None and len(x)]
+        hc = fetch_holder_change(code)
+        lf = fetch_lift(code)
+        fc = fetch_forecast(code)
+        parts = [x for x in (bt, bb, mg, hc, lf, fc) if x is not None and len(x)]
         if not parts:
             out = pd.DataFrame(columns=COLUMNS)
         else:
@@ -226,7 +322,10 @@ def available(code: str) -> Dict:
             "last": str(df["date"].iloc[-1].date()),
             "n_block": int(df["bt_shares_ratio"].notna().sum()),
             "n_billboard": int(df["bb_net_ratio"].notna().sum()),
-            "n_margin": int(df["mg_net_ratio"].notna().sum())}
+            "n_margin": int(df["mg_net_ratio"].notna().sum()),
+            "n_holder": int(df["hold_net_ratio"].notna().sum()),
+            "n_lift": int(df["fc_lift_ratio"].notna().sum()),
+            "n_forecast": int(df["eps_revision"].notna().sum())}
 
 
 if __name__ == "__main__":
