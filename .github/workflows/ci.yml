@@ -52,6 +52,9 @@ jobs:
       - name: 更新检查分页（否则最新版本永远停在第一页）
         run: python -m tests.test_update_check
 
+      - name: 版本号唯一真源（防止 webui/VERSION 复活）
+        run: python -m tests.test_version_sources
+
       - name: 增量=批量 parity（无本地行情时自动 SKIP）
         run: python -m tests.test_incremental_parity
 

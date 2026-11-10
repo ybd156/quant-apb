@@ -44,7 +44,13 @@ from urllib.parse import parse_qs, urlparse
 WEBUI_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = WEBUI_DIR.parent
 STATIC_DIR = WEBUI_DIR / "static"
-VERSION_FILE = WEBUI_DIR / "VERSION"
+# 版本号的唯一真源是**仓库根**的 VERSION（与 qcore.__version__、CI 的
+# release.yml 校验、训练 kit 打包用的是同一个文件）。
+# `webui/VERSION` 是历史遗留的第二份，实测长期停在旧值：
+# 容器跑 0.28.3 却对外报 0.27.8 → NAS「检查更新」永远说已是最新，
+# 训练机也就永远拿不到新 kit。现在它只作为兜底，且已删除。
+VERSION_FILE = WEBUI_DIR / "VERSION"                 # 旧路径，仅兜底
+ROOT_VERSION_FILE = PROJECT_ROOT / "VERSION"         # 唯一真源
 
 # 这些由 main() 在启动时赋值（单进程，无需下发到 handler 实例）
 STATE_DIR: Path = PROJECT_ROOT / "data" / "state"
@@ -191,18 +197,24 @@ def _static_stamp() -> str:
 
 
 def _read_version() -> str:
-    """版本号唯一真源：webui/VERSION。前端不硬编码，只显示这里读到的值。"""
-    try:
-        text = VERSION_FILE.read_text(encoding="utf-8").strip()
-    except OSError:
-        return DEFAULT_VERSION
-    return text or DEFAULT_VERSION
+    """版本号唯一真源：仓库根 VERSION（回退 webui/VERSION 兼容老镜像）。
+
+    前端不硬编码，只显示这里读到的值。
+    """
+    for path in (ROOT_VERSION_FILE, VERSION_FILE):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text
+    return DEFAULT_VERSION
 
 
 def _build_time() -> str | None:
     """构建时间 = 前端静态资源 + VERSION 里最新的 mtime（文件元数据，非计算结果）。"""
     newest = 0.0
-    for path in (VERSION_FILE, STATIC_DIR / "index.html",
+    for path in (ROOT_VERSION_FILE, VERSION_FILE, STATIC_DIR / "index.html",
                  STATIC_DIR / "app.js", STATIC_DIR / "style.css"):
         try:
             newest = max(newest, path.stat().st_mtime)
