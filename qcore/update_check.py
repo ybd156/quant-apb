@@ -133,9 +133,30 @@ def check(write: bool = True) -> Dict:
     # 远端比本地旧时明确标记，避免 UI 把降级当升级推销
     behind = bool(best_key and cur_key and best_key < cur_key)
 
+    # 所有源都取不到 tag 时（限流/网络抖动），**不要把已知的最新版本擦成 None**。
+    # 实测：容器内 CLI 查出 0.28.6，紧接着网页点「检查更新」撞上限流 →
+    # 把 update.json 的 latest_version 覆写成 null，界面从「已是最新」变成「未知」。
+    # 取不到就沿用上一次的已知值，并显式标 checked_ok=False 让人知道这次没查成。
+    _prev = {}
+    try:
+        _p = os.path.join(STATE_DIR, "update.json")
+        if os.path.isfile(_p):
+            with open(_p, encoding="utf-8") as f:
+                _prev = json.load(f) or {}
+    except Exception:  # noqa: BLE001
+        _prev = {}
+    checked_ok = best_tag is not None
+    if best_tag is None and isinstance(_prev.get("latest_version"), str):
+        best_tag = _prev.get("latest_version")
+        _prev_key = _ver_key(best_tag)
+        if _prev_key and cur_key:
+            has_update = bool(_prev_key > cur_key)
+            behind = bool(_prev_key < cur_key)
+
     out = {
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "current": cur,
+        "checked_ok": checked_ok,
         "latest_version": best_tag,
         "registry": used,
         "has_update": has_update,
