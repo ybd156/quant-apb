@@ -157,6 +157,73 @@ def _price(code: str, date: Optional[str] = None) -> Optional[float]:
         return None
 
 
+def _norm6(code) -> str:
+    """`sz000988` / `000988.SZ` / `000988` → `000988`。"""
+    t = str(code or "").strip().lower()
+    for pre in ("sh", "sz", "bj"):
+        if t.startswith(pre):
+            t = t[len(pre):]
+    return t.split(".")[0].zfill(6)
+
+
+def _live_quotes(codes) -> Dict[str, Dict]:
+    """批量取**实时**价。返回 {6位代码: {price, as_of, stale, source, latency_s}}。
+
+    盘中调仓必须用这个，不能拿 as_of 那天的收盘价成交 ——
+    实测事故：周一 13:10 用周五收盘价成交 20 笔（每笔虚增约 2.2%）。
+    取不到实时价的票由调用方跳过（或显式 allow_backfill 才回退旧收盘价）。
+    """
+    codes = [str(c) for c in codes if c]
+    if not codes:
+        return {}
+    try:
+        from . import tick as T
+        r = T.snapshot(codes)
+    except Exception:  # noqa: BLE001
+        return {}
+    if not r.get("ok"):
+        return {}
+    out: Dict[str, Dict] = {}
+    for row in (r.get("rows") or []):
+        px = row.get("price")
+        try:
+            px = float(px)
+        except (TypeError, ValueError):
+            continue
+        if not (px > 0):
+            continue
+        out[_norm6(row.get("code"))] = {
+            "price": px, "as_of": r.get("as_of"), "stale": bool(r.get("stale")),
+            "source": r.get("source"), "latency_s": r.get("latency_s"),
+        }
+    return out
+
+
+def _px_for(code: str, as_of: str, live: Optional[Dict[str, Dict]] = None,
+            allow_backfill: bool = False) -> Tuple[Optional[float], str, Optional[str]]:
+    """决定这一笔用哪个价：返回 (price, basis, price_as_of)。
+
+    优先级：
+      1. 实时价（盘中）—— basis="live"，price_as_of 是报价时刻
+      2. as_of 当天收盘价 —— basis="close"（只用于 dry_run 试算；
+         真实成交不会走这条路，因为盘前盘后已被门禁拒绝）
+      3. allow_backfill 时才回退「最新一根收盘」（**默认禁止**，那是未来价）
+    """
+    c6 = _norm6(code)
+    if live:
+        q = live.get(c6)
+        if q and q.get("price"):
+            return float(q["price"]), "live", str(q.get("as_of") or "")
+    px = _price(code, as_of)
+    if px:
+        return float(px), "close", str(as_of)
+    if allow_backfill:
+        px = _price(code)
+        if px:
+            return float(px), "latest_close_backfill", None
+    return None, "none", None
+
+
 def _lot(code: str, market: str = "CN") -> int:
     try:
         from .lot import _lot_for
@@ -238,7 +305,9 @@ def _assert_tradable(as_of_hint=None, dry_run: bool = False,
          —— 陈旧信号不许成交，否则就是拿三天前的判断下单
       ③ 执行时刻必须落在「as_of 收盘之后、下一交易日开盘之前」
          —— 盘中执行时 as_of 的收盘价是过去的价格，拿它成交等于回填。
-         实测窗口：15:05–17:00（盘后）或 次日 08:30–09:30（盘前）。
+         **成交只能发生在盘中**（09:30–11:30 / 13:00–15:00）。
+         A 股收盘价在 15:00 那一刻就定了，15:05 下单拿不到那个价 ——
+         所以盘前/盘后一律拒绝（dry_run 试算除外），不存在「收盘后调仓」。
 
     `dry_run=True` 时跳过 ③（回放/试算不落盘，允许在任意时刻演练）。
     `allow_backfill=True` 显式越过 ③，但会在返回体里留痕 `"backfilled": True`。
@@ -289,19 +358,32 @@ def _assert_tradable(as_of_hint=None, dry_run: bool = False,
         return {"ok": False, "reason": "stale_picks", "as_of": as_of, "lag": lag,
                 "hint": f"picks 落后 {lag} 个交易日，先刷新预测再调仓"}
 
-    # ③ 执行窗口：as_of 收盘之后、下一交易日开盘之前
-    if not dry_run and not allow_backfill:
-        try:
-            from . import session as _S
-            phase = _S.in_window(now)
-        except Exception:  # noqa: BLE001
-            phase = "unknown"
-        if phase in ("morning", "lunch", "afternoon"):
-            return {"ok": False, "reason": "in_session", "as_of": as_of,
+    # ③ 取价方式：盘中用**实时价**；盘前/盘后不能成交（dry_run 才允许按收盘价试算）。
+    # 旧实现是「盘中一律拒绝」，用户的反问很对：盘中有实时价，为什么要拦？
+    # 真正的问题从来不是「能不能交易」，而是「拿什么价成交」。
+    try:
+        from . import session as _S
+        phase = _S.in_window(now)
+    except Exception:  # noqa: BLE001
+        phase = "unknown"
+    if phase in ("morning", "afternoon", "lunch"):
+        # 盘中（含午休，最新价停在 11:30）用**实时价**成交。
+        price_mode = "live"
+    else:
+        # 盘前 / 盘后 / 非交易时段：A 股**不能成交**。
+        # 收盘价在 15:00 那一刻就定了，15:05 下单拿不到那个价 ——
+        # 旧提示「请在 15:05–17:00 用收盘价调仓」是错的（用户当场指出）。
+        # 唯一诚实的做法：拒绝，让人在盘中调，或排队到次日开盘。
+        if dry_run:
+            price_mode = "close"      # 试算不落盘，允许用收盘价演练
+        else:
+            return {"ok": False, "reason": "market_closed", "as_of": as_of,
                     "phase": phase, "now": now.isoformat(timespec="seconds"),
-                    "hint": f"盘中（{phase}）不能拿 {as_of} 的收盘价成交；"
-                            f"请在 15:05–17:00 或次日开盘前调仓"}
-    return {"ok": True, "as_of": as_of, "lag": 0,
+                    "hint": f"A股已收盘（{phase}），盘后不能成交。"
+                            f"请在交易日 09:30–11:30 / 13:00–15:00 调仓；"
+                            f"盘中会用实时价成交，不是收盘价"}
+    return {"ok": True, "as_of": as_of, "lag": 0, "phase": phase,
+            "price_mode": price_mode,
             "backfilled": bool(allow_backfill)}
 
 
@@ -341,7 +423,7 @@ def _infer_market(code: str) -> str:
 def rebalance(picks: Optional[Dict] = None, market: str = "CN",
               top_k: Optional[int] = None, dry_run: bool = False,
               verbose: bool = True, horizon: int = 1,
-              force: bool = False) -> Dict:
+              force: bool = False, allow_backfill: bool = False) -> Dict:
     """
     按 picks 调仓。返回 {orders, filled, skipped, account}。
 
@@ -399,7 +481,8 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     # ---- 时间门禁（实测事故：2026-11-09 周一 13:10 用周五收盘价成交 20 笔并记成周五）----
     # ① as_of 是交易日 ② as_of 是「最近已收盘交易日」（陈旧信号不许成交）
     # ③ 执行时刻落在「as_of 收盘之后、下一交易日开盘之前」（盘中不许拿旧收盘价成交）
-    _gate = _assert_tradable(as_of_hint=picks, dry_run=dry_run)
+    _gate = _assert_tradable(as_of_hint=picks, dry_run=dry_run,
+                             allow_backfill=allow_backfill)
     if not _gate["ok"]:
         return {**_gate, "market": market, "horizon": h}
 
@@ -542,6 +625,20 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
             return {'items': [], 'total': v, 'bps': cost_bps / 2,
                     'source': 'fallback'}
 
+    # 盘中（含午休）：预取一次实时价，全部用同一个时刻的报价成交。
+    # 必须放在 pos / want 都算好之后 —— 早一版写在前面，`pos` 还没赋值，
+    # 直接 UnboundLocalError（陷阱 20：const/变量先用后定义）。
+    _price_mode = str(_gate.get("price_mode") or "close")
+    _live: Dict[str, Dict] = {}
+    if _price_mode == "live":
+        _need = list(pos.keys()) + list(want)
+        _live = _live_quotes(_need)
+        if not _live:
+            return {"ok": False, "reason": "no_live_price", "market": market,
+                    "horizon": h, "phase": _gate.get("phase"),
+                    "hint": "盘中取不到实时价（行情源不可达），稍后重试。"
+                            "注意：A股收盘后不能成交，不存在「盘后用收盘价调仓」"}
+
     orders, filled, skipped = [], [], []
 
     # ---- 1) 卖出：掉出 top-k 的（T+1：今天建的仓不卖）----
@@ -554,11 +651,12 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
         if _open_day == as_of:
             skipped.append({"code": code, "why": "T+1，今日建仓不可卖"})
             continue
-        # 只用 as_of 当天的价。旧代码 `or _price(code)` 会退回「最新一根」，
-        # 那是相对 as_of 的**未来价** —— 相当于用后视镜成交。
-        px = _price(code, as_of)
+        # 盘中用实时价；dry_run 时用 as_of 收盘价（见 _px_for）。
+        # 旧代码 `or _price(code)` 会退回「最新一根」—— 那是相对 as_of 的未来价。
+        px, _basis, _px_asof = _px_for(code, as_of, _live, allow_backfill)
         if not px:
-            skipped.append({"code": code, "why": "as_of 当日无成交价（停牌或数据未到）"})
+            skipped.append({"code": code,
+                            "why": "取不到可成交价（停牌 / 盘中无实时报价）"})
             continue
         qty = int(p.get("qty") or 0)
         if qty <= 0:
@@ -576,7 +674,8 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
                        "net": round(net, 2), "reason": "掉出 top-k"})
         if not dry_run:
             cash += net
-            _append({"date": as_of, "signal_as_of": as_of, "price_as_of": as_of,
+            _append({"date": as_of, "signal_as_of": as_of,
+                     "price_as_of": _px_asof or as_of, "price_basis": _basis,
                      "market": market, "horizon": h,
                      "code": code, "side": "sell",
                      "price": px, "qty": qty, "amount": round(gross, 2),
@@ -594,9 +693,9 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
         # 目标等权，但受现金与整手约束
         per = cash / max(len(new), 1) if new else 0
         for code in new:
-            px = _price(code, as_of)
+            px, _basis, _px_asof = _px_for(code, as_of, _live, allow_backfill)
             if not px:
-                skipped.append({"code": code, "why": "取不到价格"})
+                skipped.append({"code": code, "why": "取不到可成交价"})
                 continue
             lot = _lot(code, market)
             budget = min(per, cash)
@@ -633,7 +732,8 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
                              "open_trade_date": as_of,
                              "score": score_of.get(code, 0),
                              "fee_paid": round(fee_amt, 4)}
-                _append({"date": as_of, "signal_as_of": as_of, "price_as_of": as_of,
+                _append({"date": as_of, "signal_as_of": as_of,
+                         "price_as_of": _px_asof or as_of, "price_basis": _basis,
                          "market": market, "horizon": h,
                          "code": code, "side": "buy",
                          "price": px, "qty": qty, "amount": round(gross, 2),
@@ -646,10 +746,11 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     # ---- 3) 估值 ----
     mv = 0.0
     for code, p in pos.items():
-        px = _price(code, as_of)
+        px, _vbasis, _vasof = _px_for(code, as_of, _live, allow_backfill)
         if px:
             p["last_price"] = round(float(px), 4)
-            p["last_price_source"] = "close_as_of"
+            p["last_price_source"] = _vbasis
+            p["last_price_as_of"] = _vasof
         else:
             # 取不到就用成本价，但**必须留痕**：旧代码这里用最新价，
             # 导致持仓市值永远等于成本（20/20 last_price==cost），

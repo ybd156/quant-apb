@@ -146,6 +146,8 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
               f"抓 {len(codes)} 只 ...", flush=True)
 
     bars: Dict[str, Dict] = {}
+    errs: List[str] = []
+    skipped_no_bar = 0
     ok_n = 0
     for i, c in enumerate(codes, 1):
         df = _fetch_recent(c)
@@ -158,6 +160,7 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
         cur = rows.iloc[-1]
         prev = rows.iloc[-2]
         if str(pd.Timestamp(cur["date"]).date()) != day:
+            skipped_no_bar += 1
             continue                      # 没有目标日的数据
         pc = float(prev["close"])
         if pc <= 0:
@@ -166,7 +169,7 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
             bars[str(c).lower()] = {
                 # 记下「这根比值是相对哪一天」—— 下游要用它校验连续性，
                 # 否则断档日会被静默吞掉（实测 11-09 缺一天，+5% 直接消失）
-                "prev": str(_pd.Timestamp(prev["date"]).date()),
+                "prev": str(pd.Timestamp(prev["date"]).date()),
                 "oo": round(float(cur["open"]) / pc, 8),
                 "oc": round(float(cur["close"]) / pc, 8),
                 "ol": round(float(cur["low"]) / pc, 8),
@@ -175,15 +178,22 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
                 "amount": float(cur.get("amount") or 0),
             }
             ok_n += 1
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            # 不再静默 continue。实测：这里曾因为 `_pd` 未定义（NameError）
+            # 让**每一只**票都被跳过，最终只报一句「no_bars_fetched」，
+            # 于是 overlay 机制从来没有成功运行过一次，也没人发现。
+            errs.append(f"{c}: {type(e).__name__}: {str(e)[:60]}")
             continue
         if verbose and i % 100 == 0:
             print(f"  ... {i}/{len(codes)}（已拿到 {ok_n}）", flush=True)
 
     if not bars:
         return {"ok": False, "reason": "no_bars_fetched", "target": day,
-                "last_local": last_local,
-                "hint": "东财还没出当日数据，或全部停牌"}
+                "last_local": last_local, "n_codes": len(codes),
+                "n_skipped_no_bar": skipped_no_bar,
+                "n_errors": len(errs), "errors": errs[:5],
+                "hint": ("处理阶段抛异常，见 errors（不是行情没出）" if errs
+                         else "东财还没出当日数据，或全部停牌")}
 
     payload = {"date": day, "generated_at": _now(),
                "last_local": last_local, "n": len(bars), "bars": bars}

@@ -192,6 +192,14 @@ def load_kline(code: str, adjust: int = ADJUST, refresh: bool = False,
             _now = now or _dt.datetime.now()
             if last is not None and last == _now.date() and (_now.hour, _now.minute) >= (15, 5):
                 df = None          # 强制重取，拿真正的收盘 bar
+            # 数据落后于交易日历（缺整个交易日）→ **必须重取**，不能只是标注。
+            # 旧行为只标 stale 不动作，于是缓存永远停在 11-06，
+            # 下游 picks 也只能停在 11-06，调仓全被判「陈旧」。
+            # 加 30 分钟节流，避免每次读盘都打一次接口。
+            if df is not None:
+                _df_probe = _annotate_freshness(_strip_forming_bar(df, _now), _now)
+                if _df_probe.attrs.get("stale") and (time.time() - os.path.getmtime(path)) > 1800:
+                    df = None
     if df is None:
         df = fetch_kline(code, adjust=adjust)
         df.to_csv(path, index=False, encoding="utf-8")

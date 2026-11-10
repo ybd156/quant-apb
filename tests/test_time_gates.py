@@ -81,17 +81,30 @@ def main() -> int:
         ({"as_of": "2027-01-04"}, datetime(2026, 11, 10, 10, 0), False, "as_of_in_future", "未来"),
         ({}, datetime(2026, 11, 10, 10, 0), False, "no_as_of", "缺 as_of"),
         ({"as_of": "2026-11-06"}, datetime(2026, 11, 10, 10, 0), False, "stale_picks", "陈旧 1 日"),
-        ({"as_of": "2026-11-09"}, datetime(2026, 11, 10, 10, 0), False, "in_session",
-         "盘中拿旧收盘价成交（本次事故）"),
+        # 盘中现在**允许**成交，但取价方式必须是实时价（price_mode="live"）——
+        # 旧设计是「盘中一律拒绝」，用户反问「盘中有实时价为什么不给」是对的。
+        ({"as_of": "2026-11-09"}, datetime(2026, 11, 10, 10, 0), True, None,
+         "盘中放行（走实时价）"),
         # 16:00 已收盘 → 11-10 的收盘价已可得，11-09 就成了「落后 1 日」
         ({"as_of": "2026-11-09"}, datetime(2026, 11, 10, 16, 0), False, "stale_picks",
          "盘后：11-09 已落后 1 日"),
-        ({"as_of": "2026-11-10"}, datetime(2026, 11, 10, 16, 0), True, None, "当日盘后放行"),
+        # A 股收盘价 15:00 就定了，盘后不能成交 —— 不存在「收盘后调仓」
+        ({"as_of": "2026-11-10"}, datetime(2026, 11, 10, 16, 0), False, "market_closed",
+         "当日盘后：不能成交"),
     ]
     for pk, now, ok_exp, reason_exp, note in gate_cases:
         r = PA._assert_tradable(as_of_hint=pk, dry_run=False, now=now)
         good = (r["ok"] == ok_exp) and (r.get("reason") == reason_exp)
         check(f"{note}", good, f"ok={r['ok']} reason={r.get('reason')}")
+
+    # 盘中放行时必须给出 live 取价方式（否则又会拿旧收盘价成交）
+    r = PA._assert_tradable(as_of_hint={"as_of": "2026-11-09"},
+                            dry_run=False, now=datetime(2026, 11, 10, 14, 0))
+    check("盘中取价方式是实时价", r["ok"] and r.get("price_mode") == "live",
+          f"ok={r['ok']} mode={r.get('price_mode')}")
+    r = PA._assert_tradable(as_of_hint={"as_of": "2026-11-10"},
+                            dry_run=True, now=datetime(2026, 11, 10, 16, 0))
+    check("dry_run 盘后允许试算", r["ok"] is True, f"reason={r.get('reason')}")
 
     # dry_run 不受执行窗口限制（回放/试算不落盘）
     r = PA._assert_tradable(as_of_hint={"as_of": "2026-11-09"},
