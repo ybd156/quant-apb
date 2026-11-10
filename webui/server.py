@@ -595,6 +595,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_tokens(query)
         if path == "/api/data/version":
             return self._api_data_version()
+        if path == "/api/data/append":
+            return self._post_data_append()
         if path == "/api/data/qlib":
             return self._api_data_qlib()
         if path == "/api/train/kit/download":
@@ -1570,9 +1572,80 @@ class ApiHandler(BaseHTTPRequestHandler):
             d = DS.local_date()
         except Exception as e:  # noqa: BLE001
             return self._fail("data_version_failed", 200, detail=str(e)[:120])
-        return self._ok({"date": d, "universe": "csi300",
-                         "source": "nas-local",
-                         "note": "qlib 日历最后一天；训练机用它判断是否需要更新"})
+        out = {"date": d, "universe": "csi300", "source": "nas-local",
+               "note": "有效最后一天 = max(qlib 日历, overlay)；训练机据此判断是否需要更新"}
+        # 交易日历口径：数据该到哪天、落后几天
+        try:
+            import datetime as _dt
+            from qcore import calendar_cn as CAL
+            today = _dt.date.today()
+            expect = CAL.prev_trading_day(today)
+            # 收盘后（15:05 以后）当天就该有数据
+            if (today.weekday() < 5 and CAL.is_trading_day_bool(today)
+                    and (_dt.datetime.now().hour, _dt.datetime.now().minute) >= (15, 5)):
+                expect = today
+            out["expected_date"] = str(expect)
+            if d:
+                _lag = 0
+                _cur = _dt.date.fromisoformat(str(d)[:10])
+                while _cur < expect and _lag < 30:
+                    _cur = CAL.next_trading_day(_cur)
+                    _lag += 1
+                out["lag_trading_days"] = _lag
+                out["stale"] = _lag > 0
+        except Exception:  # noqa: BLE001
+            pass
+        # 最后一次补数的结果（成功/失败/为什么）
+        try:
+            import json as _json
+            _p = os.path.join(str(PROJECT_ROOT), "data", "state", "daily_append.json")
+            if os.path.isfile(_p):
+                with open(_p, encoding="utf-8") as _f:
+                    out["last_append"] = _json.load(_f)
+        except Exception:  # noqa: BLE001
+            pass
+        # overlay 列表（训练机据此知道能不能直接用）
+        try:
+            from qcore import daily_append as _DA
+            out["overlays"] = _DA.list_overlays()[-5:]
+        except Exception:  # noqa: BLE001
+            pass
+        return self._ok(out)
+
+    def _post_data_append(self):
+        """POST /api/data/append —— 立刻补当日 K 线到 overlay。
+
+        为什么需要手动入口：调度只在 15:05–17:00 触发，
+        容器一重启日志就没了，用户看不出昨天补没补、为什么没补。
+        数据落后时应该能一键补，而不是等下一个窗口。
+
+        body: {"day": "YYYY-MM-DD"}（可选，默认自动判断目标日）
+        """
+        denied = self._write_allowed()
+        if denied is not None:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        day = str(body.get("day") or "").strip() or None
+        try:
+            from qcore import daily_append as DA
+            r = DA.append_day(target_day=day, verbose=False)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("append_failed", 200, detail=str(e)[:200])
+        # 顺手把 status.json 的数据日期刷新，UI 立刻能看到
+        try:
+            from qcore import store as _store
+            st = _store.read_json("status", default={}) or {}
+            _d = r.get("target") or r.get("last_local")
+            if _d and str(st.get("data_to") or "") < str(_d):
+                st["data_to"] = str(_d)
+                st["data_to_source"] = "api_append"
+                _store.write_json("status", st)
+        except Exception:  # noqa: BLE001
+            pass
+        return self._ok(r)
 
     def _api_data_qlib(self):
         """
@@ -2769,6 +2842,38 @@ f.addEventListener('submit',async(e)=>{
                                        job=str(body.get("job") or "train"),
                                        params=dict(body.get("params") or {})))
 
+    def _post_sync_progress(self):
+        """POST /api/sync/progress —— 训练机回报进度。
+
+        解决「训练到哪都不知道」：原来任务领走后界面只剩 claimed，
+        用户看不出训到第几个周期、还剩多久。
+
+        body: {"id","phase","horizon","done","total","note","eta_s"}
+        进度写失败**不影响任务本身**，所以这里永远 200。
+        """
+        denied = self._sync_auth(allow_session=True)
+        if denied is not None:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        tid = str(body.get("id") or "")
+        if not tid:
+            return self._fail("bad_param", 400, hint="需要 id")
+        try:
+            from qcore import sync as SY
+            r = SY.set_progress(tid,
+                                phase=str(body.get("phase") or ""),
+                                horizon=body.get("horizon"),
+                                done=body.get("done"),
+                                total=body.get("total"),
+                                note=str(body.get("note") or ""),
+                                eta_s=body.get("eta_s"))
+        except Exception as e:  # noqa: BLE001
+            return self._ok({"ok": False, "reason": f"{type(e).__name__}: {str(e)[:80]}"})
+        return self._ok(r)
+
     def _post_sync_result(self):
         # 同样允许会话：训练机可能只配了密码
         denied = self._sync_auth(allow_session=True)
@@ -3039,6 +3144,8 @@ f.addEventListener('submit',async(e)=>{
             return self._post_tokens()
         if path == "/api/sync/task":
             return self._post_sync_task()
+        if path == "/api/sync/progress":
+            return self._post_sync_progress()
         if path == "/api/sync/result":
             return self._post_sync_result()
         if path == "/api/sync/push":

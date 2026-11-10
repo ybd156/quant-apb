@@ -107,6 +107,41 @@ def _fetch_recent(code: str, days: int = 8) -> Optional[pd.DataFrame]:
     return df.tail(days)
 
 
+def _write_state(**kw) -> None:
+    """把每次运行的结果写进 data/state/daily_append.json。
+
+    ## 为什么需要
+
+    这个调度块只在 15:05–17:00 触发，容器每次部署都会重启 ——
+    日志随之清空。于是「昨天到底补没补」完全无从判断：
+    实测 qlib 停在 11-06、overlay 只有 11-09、11-10 根本没有，
+    而没有任何地方记录原因（用户原话：「数据也不是最新的」）。
+
+    现在每次运行（含跳过/失败）都留一条，UI 与 `/api/data/version`
+    可以据此回答「最后一次补数是什么时候、成功没有、为什么没成」。
+    """
+    try:
+        import datetime as _dt
+        p = os.path.join(ROOT, "data", "state", "daily_append.json")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        old = {}
+        try:
+            with open(p, encoding="utf-8") as f:
+                old = json.load(f) or {}
+        except Exception:  # noqa: BLE001
+            old = {}
+        rec = dict(old)
+        rec.update(kw)
+        rec["at"] = _dt.datetime.now().astimezone().isoformat(timespec="seconds")
+        rec["runs"] = int(old.get("runs") or 0) + 1
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, p)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = None,
                verbose: bool = True) -> Dict:
     """
@@ -119,6 +154,7 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
     day = target_day or date.today().isoformat()
     cal = QD.load_calendar()
     if cal is None or len(cal) == 0:
+        _write_state(ok=False, action="failed", reason="no_calendar", target="")
         return {"ok": False, "reason": "no_calendar"}
     last_local = str(pd.Timestamp(cal[-1]).date())
 
@@ -188,6 +224,8 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
             print(f"  ... {i}/{len(codes)}（已拿到 {ok_n}）", flush=True)
 
     if not bars:
+        _write_state(ok=False, action="failed", reason="no_bars_fetched",
+                     target=day, last_local=last_local, n=0)
         return {"ok": False, "reason": "no_bars_fetched", "target": day,
                 "last_local": last_local, "n_codes": len(codes),
                 "n_skipped_no_bar": skipped_no_bar,
@@ -217,6 +255,8 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
         pass
     if verbose:
         print(f"[daily] 写入 {len(bars)} 只的当日比值 -> {overlay_path(day)}", flush=True)
+    _write_state(ok=True, action="written", target=day, last_local=last_local,
+                 n=len(bars), reason="")
     return {"ok": True, "action": "written", "target": day,
             "last_local": last_local, "n": len(bars)}
 

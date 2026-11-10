@@ -153,6 +153,49 @@ def create_task(horizons: List[int], trees: int = 250, stocks: int = 300,
     return {"ok": True, "task": task}
 
 
+def set_progress(task_id: str, phase: str = "", horizon=None, done=None,
+                 total=None, note: str = "", eta_s=None) -> Dict:
+    """更新任务进度。**只写进度字段，不改状态机**。
+
+    ## 为什么需要它
+
+    原来任务只有 pending/claimed/done/expired 五个状态，
+    训练机领走之后界面上就只剩「claimed」—— 用户完全不知道
+    训到第几个周期、还剩多久（用户原话：「训练到哪都不知道」）。
+
+    进度是**可观测性**数据，不是状态：写失败也不能影响任务本身，
+    所以这里永远返回 dict，不抛异常给调用方。
+    """
+    try:
+        d = _load()
+        now = _now()
+        for t in d.get("tasks", []):
+            if t.get("id") != task_id:
+                continue
+            p = t.get("progress") or {}
+            p.update({"updated_at": now})
+            if phase:
+                p["phase"] = str(phase)[:40]
+            if horizon is not None:
+                p["horizon"] = int(horizon)
+            if done is not None:
+                p["done"] = int(done)
+            if total is not None:
+                p["total"] = int(total)
+            if note:
+                p["note"] = str(note)[:200]
+            if eta_s is not None:
+                p["eta_s"] = int(eta_s)
+            if p.get("total"):
+                p["pct"] = round(100.0 * float(p.get("done") or 0) / p["total"], 1)
+            t["progress"] = p
+            _save(d)
+            return {"ok": True, "progress": p}
+        return {"ok": False, "reason": "not_found", "id": task_id}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:80]}"}
+
+
 def claim_task(worker: str = "unknown") -> Dict:
     """领一个待办任务（FIFO）。没有就返回 pending=0。"""
     d = _load()

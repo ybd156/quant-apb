@@ -87,21 +87,44 @@ def _load_stamp() -> Dict:
         return {}
 
 
-def local_date() -> Optional[str]:
-    """本地数据最后一天（从日历读）。"""
+def local_date(include_overlay: bool = True) -> Optional[str]:
+    """本地数据**有效**最后一天。
+
+    ## 为什么不能只读日历
+
+    `daily_append` 把当日 K 线写成 `data/qlib/overlay/<日期>.json`，
+    `qlib_data` 在**读取时**把这些行追加到序列末尾 —— 日历文件本身不变。
+
+    于是「日历最后一天」比「实际能用的数据」旧。实测（2026-11-11）：
+    overlay 已有 2026-11-09，日历却还停在 2026-11-06，
+    `/api/data/version` 因此告诉训练机「我只有 11-06」，
+    训练机据此判断不需要更新 —— 数据永远差一截。
+
+    现在取 max(日历, 所有 overlay 日期)。
+    """
     p = os.path.join(_target(), "calendars", "day.txt")
-    if not os.path.isfile(p):
-        return None
-    try:
-        last = None
-        with open(p, encoding="utf-8") as f:
-            for line in f:
-                s = line.strip()
-                if s:
-                    last = s
-        return last
-    except Exception:
-        return None
+    last = None
+    if os.path.isfile(p):
+        try:
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    s = line.strip()
+                    if s:
+                        last = s
+        except Exception:  # noqa: BLE001
+            last = None
+    if include_overlay:
+        try:
+            from . import daily_append as DA
+            ovs = DA.list_overlays()
+            if ovs:
+                # list_overlays 返回 'YYYY-MM-DD'
+                latest = max(str(x)[:10] for x in ovs)
+                if last is None or latest > str(last)[:10]:
+                    last = latest
+        except Exception:  # noqa: BLE001
+            pass
+    return last
 
 
 def remote_tag(timeout: int = 20) -> Optional[str]:

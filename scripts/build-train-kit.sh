@@ -61,8 +61,12 @@ cp "$ROOT/tools/bootstrap.ps1" "$KIT/tools/"
 cp "$ROOT/tools/kit_selftest.py" "$KIT/tools/"
 cp "$ROOT/tools/agent_daemon.py" "$KIT/tools/"
 cp "$ROOT/tools/kit_setup.py" "$KIT/tools/"
-cp "$ROOT/start_agent.bat" "$ROOT/start_agent_hidden.vbs" "$KIT/" 2>/dev/null || true
-cp "$ROOT/setup.bat" "$KIT/" 2>/dev/null || true
+cp "$ROOT/tools/kit_status.py" "$KIT/tools/"
+cp "$ROOT/tools/kit_menu.py" "$KIT/tools/"
+# 根目录只留**一个**入口 APB.bat（菜单式，含一屏状态）。
+# 旧的多入口（start_agent.bat / start_agent_hidden.vbs / setup.bat / daemon.bat）
+# 全部不再打包 —— 用户原话：「那么多文件，都不知点哪个」。
+cp "$ROOT/APB.bat" "$KIT/" 2>/dev/null || true
 cp "$ROOT/scripts/kit_manifest.py" "$KIT/scripts/"
 cp "$ROOT/scripts/benchmark_alpha158.py" "$KIT/scripts/"
 cp "$ROOT/requirements.txt" "$KIT/"

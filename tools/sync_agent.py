@@ -175,6 +175,26 @@ def _run_prewarm(params: dict, verbose: bool = True) -> dict:
                 "error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
+def _progress(nas: str, tid: str, token: str, **kw) -> None:
+    """回报进度。**失败不影响训练** —— 只是可观测性，不是状态机。"""
+    if not tid:
+        return
+    try:
+        import urllib.error
+        import urllib.request
+        body = dict(kw)
+        body["id"] = tid
+        req = urllib.request.Request(
+            nas.rstrip("/") + "/api/sync/progress",
+            data=json.dumps(body).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": "apb-agent",
+                     "X-APB-Token": token or ""})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            r.read()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
     """执行一个任务：按 job 类型分派 → 上传 → 回报。
 
@@ -190,6 +210,8 @@ def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
         if verbose:
             print(f"  任务 {tid}: job={_job} params={_params}", flush=True)
         _journal({"event": "claimed", "task": tid, "job": _job, "params": _params})
+        _progress(nas, tid, token, phase=f"{_job}_running", done=0, total=1,
+                  note=f"{_job} 执行中")
         res = (_run_pipeline(_params, verbose) if _job == "pipeline"
                else _run_prewarm(_params, verbose))
         _journal({"event": _job, "task": tid, **res})
@@ -211,8 +233,20 @@ def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
     _journal({"event": "claimed", "task": tid, "horizons": hs,
               "trees": trees, "stocks": stocks})
     results = []
-    for h in hs:
+    _total = len(hs)
+    _t_start = time.time()
+    for _i, h in enumerate(hs):
         t0 = time.time()
+        # 回报进度：让 NAS / UI 能看到「第几个周期、还剩多久」
+        _eta = None
+        if _i > 0:
+            _per = (time.time() - _t_start) / _i
+            _eta = int(_per * (_total - _i))
+        _progress(nas, tid, token, phase="training", horizon=int(h),
+                  done=_i, total=_total,
+                  note=f"训练 h={h}（{_i + 1}/{_total}）", eta_s=_eta)
+        if verbose:
+            print(f"  [{_i + 1}/{_total}] h={h} 开始", flush=True)
         try:
             r = LM.train(horizon=int(h), trees=trees, stocks=stocks, verbose=verbose)
         except Exception as e:  # noqa: BLE001

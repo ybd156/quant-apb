@@ -69,6 +69,9 @@ ENTRIES: List[str] = [
     "tools/agent_daemon.py",
     # --- 配置向导：窗口填令牌 / 测连接 / 保存
     "tools/kit_setup.py",
+    # --- 唯一入口：一屏状态 + 菜单
+    "tools/kit_status.py",
+    "tools/kit_menu.py",
 ]
 
 #: 无论闭包是否覆盖，都必须打包的（`__init__` 是包本身）

@@ -76,6 +76,9 @@ jobs:
       - name: 配置向导（令牌探测 / 保留其它字段 / 脚本编码）
         run: python -m tests.test_kit_setup
 
+      - name: 可观测性（训练进度 / 数据新鲜度 / 一屏状态 / 单一入口）
+        run: python -m tests.test_observability
+
       # 必须跑导入层（不要 --no-import）：AST 看不见 importlib/字符串 import
       # 这类动态依赖，只有真 import 一遍才能证明「训练机接得住所有任务」。
       - name: 训练机套件闭包完整性（文件层 + 导入层）

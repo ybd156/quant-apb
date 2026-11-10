@@ -3773,6 +3773,36 @@
         min + ' 分钟前' + (warn ? '（可能已中断）' : '') + '</span>';
     }
 
+    // 进度单元格：训练机回报的 progress（phase/done/total/pct/eta）
+    function progressCell(t) {
+      const p = t.progress || null;
+      if (!p) {
+        if (String(t.status) === 'claimed') {
+          return '<span class="muted">等待回报…</span>';
+        }
+        return '<span class="muted">—</span>';
+      }
+      const pct = Number(p.pct);
+      const has = Number.isFinite(pct);
+      const bar = has
+        ? '<div style="height:4px;border-radius:2px;background:var(--line,#2a3446);margin-top:4px">' +
+          '<div style="height:4px;border-radius:2px;width:' + Math.max(0, Math.min(100, pct)) +
+          '%;background:var(--accent,#4a9eff)"></div></div>'
+        : '';
+      const bits = [];
+      if (p.phase === 'training' && p.horizon != null) bits.push('h' + esc(p.horizon));
+      if (p.done != null && p.total) bits.push(esc(p.done) + '/' + esc(p.total));
+      if (Number.isFinite(Number(p.eta_s)) && Number(p.eta_s) > 0) {
+        bits.push('约 ' + Math.round(Number(p.eta_s) / 60) + ' 分');
+      }
+      const when = String(p.updated_at || '').slice(11, 16);
+      return '<div style="min-width:88px">' +
+        '<div>' + (bits.join(' · ') || esc(p.phase || '进行中')) + '</div>' +
+        bar +
+        (when ? '<div class="muted" style="font-size:11px">' + esc(when) + ' 更新</div>' : '') +
+        '</div>';
+    }
+
     const taskRows = tasks.slice(0, 12).map((t) => {
       const st = String(t.status || 'pending');
       return '<tr>' +
@@ -3782,6 +3812,7 @@
         '<td>' + (t.job && t.job !== 'train' ? '<span class="chip">' + esc(t.job) + '</span>' : '—') + '</td>' +
         '<td><span class="tag ' + (stTone[st] || '') + '">' + (stLabel[st] || st) + '</span>' +
           (t.retries ? ' <span class="muted">重试 ' + esc(t.retries) + '</span>' : '') + '</td>' +
+        '<td>' + progressCell(t) + '</td>' +
         '<td class="muted">' + esc(t.claimed_by || '—') + '<br>' + claimedAge(t) + '</td>' +
         '<td class="muted">' + esc(String(t.created_at || '').slice(5, 16)) + '</td>' +
         '</tr>';
@@ -3978,7 +4009,7 @@
         '</div>' +
         (taskRows
           ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
-            '<th>ID</th><th>周期</th><th>树</th><th>类型</th><th>状态</th><th>执行机器</th><th>创建</th>' +
+            '<th>ID</th><th>周期</th><th>树</th><th>类型</th><th>状态</th><th>进度</th><th>执行机器</th><th>创建</th>' +
             '</tr></thead><tbody>' + taskRows + '</tbody></table></div>'
           : emptyBox('队列为空', '上面选好周期点「排任务」，训练机上跑 ' +
               '<code>python tools/sync_agent.py --nas http://&lt;NAS&gt;:8765 --loop 60</code> 就会自动领活')) +
