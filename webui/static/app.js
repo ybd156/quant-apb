@@ -623,7 +623,9 @@
     const age = toNum(res.data.data_age_days);
     const missing = (res.data.missing_files || []).length;
     if (missing) setHealth('down', '缺 ' + missing + ' 文件');
-    else if (age !== null && age > 1) setHealth('stale', '陈旧 ' + age.toFixed(0) + ' 天');
+    // 后端 _age_days 返回的是**交易日**数，不是自然日 —— 写成「天」会夸大
+    // （周五→周一差 3 个自然日，只隔 1 个交易日）。
+    else if (age !== null && age > 1) setHealth('stale', '落后 ' + age.toFixed(0) + ' 个交易日');
     else setHealth('ok');
     const asof = res.data.as_of || '—';
     $('#chip-asof').textContent = '数据 ' + asof;
@@ -962,6 +964,47 @@
 
   /* ------------------------- 设置页：检查更新卡片 ---------------------- */
 
+  /**
+   * 「远端最新」这个标签不能直接显示缓存值。
+   *
+   * 实测：页面上写着「远端最新 v0.0.5」，而当前版本是 v0.28.4 ——
+   * 那是 update.json 里一个过期的占位值。把「比当前还旧/无法解析」的值
+   * 标成「最新」，比不显示更糟：用户会以为服务端只到 0.0.5。
+   */
+  /**
+   * 把成交时刻标成「盘中 / 盘前 / 盘后 / 非交易日」。
+   *
+   * 只做字符串到标签的映射，不判断「现在」—— 交易时段规则由后端
+   * `qcore/session.py` 唯一定义，这里只解释一个**已发生的时刻**。
+   * 目的很具体：让「盘中用收盘价成交」这种异常一眼可见。
+   */
+  function _sessionTag(iso) {
+    const s0 = String(iso || '');
+    const m = s0.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+    if (!m) return '';
+    const d = new Date(m[1] + '-' + m[2] + '-' + m[3] + 'T00:00:00');
+    if (isNaN(d.getTime())) return '';
+    const wd = d.getDay();
+    if (wd === 0 || wd === 6) return '非交易日';
+    const hm = Number(m[4]) * 60 + Number(m[5]);
+    if (hm < 9 * 60 + 30) return '盘前';
+    if (hm <= 11 * 60 + 30) return '盘中';
+    if (hm < 13 * 60) return '午休';
+    if (hm <= 15 * 60) return '盘中';
+    if (hm <= 17 * 60) return '盘后';
+    return '非交易时段';
+  }
+
+  function latestLabel(latest, cur) {
+    if (!latest) return '未知（未成功检查）';
+    const ok = /^v?\d+\.\d+\.\d+$/.test(String(latest));
+    if (!ok) return '未知（服务端返回非法版本号 ' + latest + '）';
+    if (cmpVersion(latest, cur) < 0) {
+      return 'v' + latest + '（比当前旧，已忽略）';
+    }
+    return 'v' + latest;
+  }
+
   function updateCard(u) {
     const cur = (u && u.current) || (S.version && S.version.version) || '—';
     const latest = u && u.latest;
@@ -978,7 +1021,7 @@
       title: '版本与更新', sub: '来自 /api/update',
       body: kv([
         kvItem('当前版本', 'v' + cur),
-        kvItem('远端最新', latest ? 'v' + latest : '未知'),
+        kvItem('远端最新', latestLabel(latest, cur)),
         kvItem('最近检查', (u && u.checked_at) || '未检查'),
         '<div class="item"><span class="k">状态</span><span class="v">' + stateTag + '</span></div>'
       ]) +
@@ -1485,7 +1528,9 @@
       kpi({ k: '夏普', v: pending ? '—' : num(bt.sharpe, 2), tone: pending ? 'neutral' : 'brand' }),
       kpi({ k: '最大回撤', v: pending ? '—' : pct(bt.mdd), tone: pending ? 'neutral' : 'warn' }),
       kpi({ k: '平均换手', v: pending ? '—' : pct(bt.turnover), tone: pending ? 'neutral' : 'brand' }),
-      kpi({ k: '回测持有期', v: num(bt.hold_days, 0) + ' 日', sm: true,
+      kpi({ k: '回测持有期', v: num(bt.hold_days, 0) + ' 日' +
+          (num(bt.hold_days, 0) === Number(H) ? '' : '（该回测按 h=' +
+            num(bt.hold_days, 0) + ' 跑，与当前所选 h=' + Number(H) + ' 不同）'), sm: true,
            tone: 'neutral',
            title: '这是模型训练/回测时用的持有天数，不是上面选中的周期' }),
       kpi({ k: '持仓数', v: num(bt.top_k, 0) + ' 只', sm: true, tone: 'neutral' })
@@ -1904,11 +1949,28 @@
     return TEMP_LEVELS['过热'];
   }
 
-  /** 从 ISO 时间戳取 HH:MM:SS（字符串切片，不做时区换算） */
+  /** 从 ISO 时间戳取 MM-DD HH:MM（字符串切片，不做时区换算）。
+   *
+   * 旧实现只返回 HH:MM:SS —— 实测把「2026-11-08 周日 18:48」渲染成
+   * 「采集于 18:48:08 · 每 60 秒自动刷新」，用户以为那是今天刚采的。
+   * 时间必须带日期，否则「几点的」这件事无法判断。
+   */
   function clockOf(iso) {
     const str = String(iso || '');
-    const m = str.match(/T(\d{2}:\d{2}:\d{2})/);
-    return m ? m[1] : (str || '—');
+    if (!str) return '—';
+    const m = str.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+    if (m) return m[2] + '-' + m[3] + ' ' + m[4];
+    const only = str.match(/T(\d{2}:\d{2}:\d{2})/);
+    return only ? only[1] : str;
+  }
+
+  /** 采集时刻 + 它离最近交易日有多远 —— 单看时刻会被误读成「刚刚」。 */
+  function collectedText(iso, lagDays) {
+    const base = clockOf(iso);
+    const lag = toNum(lagDays);
+    if (lag === null) return '采集于 ' + base;
+    if (lag <= 0) return '采集于 ' + base;
+    return '采集于 ' + base + '（落后 ' + lag + ' 个交易日）';
   }
 
   function indexCard(it) {
@@ -1950,7 +2012,7 @@
     const tone = tempTone(sent.level, tempOk ? tempVal : null);
     const width = tempOk ? Math.max(0, Math.min(100, tempVal)) : 0;
 
-    setSub('采集于 ' + clockOf(d.as_of) +
+    setSub(collectedText(d.as_of, d.data_age_days) +
       (toNum(d.elapsed_ms) !== null ? ' · 耗时 ' + num(d.elapsed_ms, 0) + 'ms' : '') +
       ' · 每 60 秒自动刷新');
 
@@ -2046,8 +2108,10 @@
 
     /* --- 采集脚注 --- */
     const foot = '<div class="market-foot">' +
-      '<span>as_of ' + esc(d.as_of || '—') + '</span>' +
-      '<span>最后更新 ' + esc(clockOf(d.as_of)) + '</span>' +
+      '<span>采集时刻 ' + esc(clockOf(d.as_of)) + '</span>' +
+      '<span>行情数据日 ' + (d.data_date
+        ? esc(dataAsOf(d.data_date, d.data_age_days))
+        : '<span title="market.json 未写 data_date（旧产物）">未标注</span>') + '</span>' +
       (toNum(d.elapsed_ms) !== null ? '<span>耗时 ' + esc(num(d.elapsed_ms, 0)) + ' ms</span>' : '') +
       (missing.length ? '<span style="color:var(--warn)">缺 ' + esc(missing.join(', ')) + '</span>' : '<span>数据完整</span>') +
       '</div>';
@@ -3032,7 +3096,13 @@
                 esc(r.label || ('h' + r.horizon)) + '</a></td>' +
               '<td>' + (noData ? '<span class="tag pending">未建仓</span>'
                                : '<span class="tag hit">在跑</span>') + '</td>' +
-              '<td class="num">' + (r.equity == null ? '—' : fmtMoney(r.equity)) + '</td>' +
+              '<td class="num">' + (r.equity == null ? '—' : fmtMoney(r.equity)) +
+                (r.capital_mismatch
+                  ? '<span class="tag warn" style="margin-left:6px" title="账户本金 ' +
+                    esc(fmtMoney(r.account_capital)) + '，而「各周期本金」配置是 ' +
+                    esc(fmtMoney(r.capital_configured)) +
+                    '。点「清空重设」可按配置本金重开">本金不符</span>'
+                  : '') + '</td>' +
               '<td class="num ' + tone + '">' + (tr == null ? '—' :
                 (tr > 0 ? '+' : '') + (tr * 100).toFixed(2) + '%') + '</td>' +
               '<td class="num">' + (r.n_positions == null ? '—' : r.n_positions) + '</td>' +
@@ -3055,7 +3125,7 @@
 
     const autoCard = card({
       title: '自动交易账户 · ' + curLabel,
-      sub: '按该周期推荐自动下单（不是回测，是真在记账）',
+      sub: '模拟盘自动记账（不下真实委托）· 按该周期推荐',
       tools: '<div class="segmented" id="pa-bucket">' +
         [['day', '按日'], ['week', '按周'], ['month', '按月']].map(([v, l]) =>
           '<button type="button" class="seg' + ((S.paBucket || 'day') === v ? ' is-active' : '') +
@@ -3078,9 +3148,16 @@
         : '') +
         (auTrades.length
           ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
-            '<th>日期</th><th>方向</th><th>名称（代码）</th><th>数量</th><th>价格</th><th>金额</th><th>费用</th><th>原因</th>' +
+            '<th>成交日</th><th>成交时刻</th><th>方向</th><th>名称（代码）</th>' +
+            '<th>数量</th><th>价格</th><th>金额</th><th>费用</th><th>原因</th>' +
             '</tr></thead><tbody>' + auTrades.slice().reverse().slice(0, 20).map((t) =>
               '<tr><td class="mono">' + esc(String(t.date || '').slice(5)) + '</td>' +
+              // `at` 是真实执行时刻（写入时一直有），旧表只渲染 date → 用户
+              // 看不出这笔是盘中还是盘后成交，才会问「不在交易时间怎么也能交易」。
+              '<td class="mono">' + (t.at
+                ? esc(String(t.at).replace('T', ' ').slice(0, 19)) +
+                  '<span class="muted" style="margin-left:4px">' + esc(_sessionTag(t.at)) + '</span>'
+                : '<span class="muted" title="该笔为历史记录，写入时未记录执行时刻">无时刻</span>') + '</td>' +
               '<td class="' + (t.side === 'buy' ? 'is-up' : 'is-down') + '">' +
                 (t.side === 'buy' ? '买入' : '卖出') + '</td>' +
               '<td><a class="link-btn" data-goto="' + esc(t.code) + '">' +
@@ -4266,6 +4343,10 @@
         const _acc = S.paperAcct || {};
         const curNav = (_acc.equity != null) ? _acc.equity
                      : (_acc.initial_capital || 0);
+        // 重投的默认本金必须来自「各周期本金」配置，不是当前净值 ——
+        // 旧实现预填 curNav，用户设了 20 万、净值 19.8 万，点确认就变成 19.8 万。
+        const _cfgCap = Number(_acc.capital_configured || _acc.initial_capital || 0);
+        const _cfgExplicit = _acc.capital_explicit != null;
         const hzLabel = ({ 1: 'T+1 短线', 3: 'T+3 中短线', 5: '1 周 中线',
                            10: '2 周', 15: '15 天 中长线' })[hzNow] || ('h' + hzNow);
         openModal({
@@ -4277,8 +4358,12 @@
             '会删除该账户的全部成交记录（其他市场/周期不受影响），' +
             '并备份到 <code>data/paper/backup/</code>。</p>' +
             '<label class="field" style="margin-top:14px"><span>新的本金</span>' +
-            '<input type="number" id="rs-cap" step="1000" value="' +
-            esc(String(Math.round(Number(curNav) || 5000))) + '"></label>' +
+            '<input type="number" id="rs-cap" step="1000" value="" placeholder="' +
+            esc(String(Math.round(Number(_cfgCap) || 5000))) + '"></label>' +
+            '<p class="muted" style="margin-top:4px">留空 = 用该周期配置本金 <b>' +
+            esc(fmtMoney(_cfgCap || 5000)) + '</b>' +
+            (_cfgExplicit ? '（你在「各周期本金」里设过）' : '（未单独设置，取市场默认本金）') +
+            '</p>' +
             '<p class="form-msg" id="rs-msg"></p>',
           foot: '<button class="btn ghost" type="button" data-close="1">取消</button>' +
                 '<button class="btn primary" type="button" id="rs-go">' +

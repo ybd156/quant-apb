@@ -51,9 +51,30 @@ def _family_map() -> Dict[str, str]:
     return {s.sid: s.family for s in signal_zoo()}
 
 
+def _latest_closed_trading_day() -> pd.Timestamp:
+    """最近一个**已收盘**的交易日 —— 由墙钟 + 交易日历决定。
+
+    旧实现取 `load_index("000300")` 的最后一根，而这份缓存有 5 天 mtime 容忍度。
+    实测事故：缓存最后一根是 2026-11-06，于是 `as_of=11-06`，
+    而 `last_processed` 也是 11-06 → `last >= as_of` 成立 → 返回
+    `{"ok": True, "skipped": True}`。**系统因此看不见自己落后一整个交易日**：
+    判定基准与被检对象同源，永远自洽。
+    """
+    import datetime as _dt
+    now = _dt.datetime.now()
+    try:
+        from . import calendar_cn as CAL
+        today = now.date()
+        after_close = (now.hour, now.minute) >= (15, 5)
+        d = today if (after_close and CAL.is_trading_day_bool(today)) else CAL.prev_trading_day(today)
+        return pd.Timestamp(d)
+    except Exception:  # noqa: BLE001
+        return pd.Timestamp(load_index("000300")["date"].max())
+
+
 def _latest_index_date() -> pd.Timestamp:
-    ix = load_index("000300")
-    return pd.Timestamp(ix["date"].max())
+    """兼容旧名（内部已改为按交易日历取）。"""
+    return _latest_closed_trading_day()
 
 
 # ------------------------------------------------------------------ 全量重建
@@ -99,8 +120,18 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
         _log("no state found -> run --rebuild first")
         return {"ok": False, "reason": "not_initialized", "hint": "python -m qcore.live --rebuild"}
 
-    as_of_ts = pd.Timestamp(as_of) if as_of else _latest_index_date()
+    as_of_ts = pd.Timestamp(as_of) if as_of else _latest_closed_trading_day()
     if pd.Timestamp(last) >= as_of_ts:
+        # 「不用再往前跑」≠「已经是最新」。状态日落后于最近已收盘交易日时必须报错，
+        # 否则 NAS 停一天、一周，都只会得到一句 ok:True/skipped:True。
+        ref = _latest_closed_trading_day()
+        if pd.Timestamp(last) < ref:
+            gap = int(np.busday_count(pd.Timestamp(last).date(), ref.date()))
+            _log(f"stale state: last_processed={last} < latest closed {ref.date()} "
+                 f"(~{gap} trading days behind)")
+            return {"ok": False, "reason": "stale_state", "last_processed": last,
+                    "expected": str(ref.date()), "missing_trading_days": gap,
+                    "hint": "数据/状态落后于最近已收盘交易日；先补齐行情再跑 --once"}
         _log(f"already up to date ({last})")
         return {"ok": True, "skipped": True, "last_processed": last}
 
@@ -117,8 +148,15 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     t_from = int(np.searchsorted(dates.values, np.datetime64(pd.Timestamp(last)), side="right"))
     t_from = max(t_from, 0)
     if len(dates) - t_from > max_catchup:
-        _log(f"catch-up capped: {len(dates) - t_from} days -> {max_catchup} (consider --rebuild)")
-        t_from = len(dates) - max_catchup
+        # 旧实现：只打一行日志，仍返回 ok:True，并把 last_processed 推到最新日
+        # → 中间那些交易日**永不入账**，且事后看起来是连续的。宁可报错也不静默丢样本。
+        _log(f"catch-up capped: {len(dates) - t_from} days > {max_catchup} "
+             f"-> refuse (run --rebuild)")
+        return {"ok": False, "reason": "catchup_exceeded",
+                "pending_days": int(len(dates) - t_from), "max_catchup": int(max_catchup),
+                "last_processed": last,
+                "hint": f"积压 {len(dates) - t_from} 个交易日 > 上限 {max_catchup}，"
+                        f"请跑 python -m qcore.live --rebuild（否则中间样本会被静默丢弃）"}
     if t_from >= len(dates):
         return {"ok": True, "skipped": True, "last_processed": last}
 
@@ -145,8 +183,17 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     store.export_ui_bundle(res, p3d, family_of=fam)
 
     st = store.read_json("status", default={}) or {}
-    st["last_processed"] = str(dates[-1].date())
-    st["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    # `last_processed` 必须是「**已封存**到的最后一天」，不是「数据到哪天」。
+    # 台账按 INV-2 只封存能对账的决策（尾部 lag+h 天不能入账），
+    # 旧代码却把游标推到 dates[-1] → 台账最后一根 2026-10-29 而状态写 11-06，
+    # 缺口 6 天 = lag+h，且下一次增量从 11-07 起跑，那 6 天**永久丢失**。
+    _sealed = max(len(dates) - 1 - int(cfg.exec_lag) - int(horizon), -1)
+    _sealed_day = str(dates[_sealed].date()) if _sealed >= 0 else None
+    st["last_processed"] = _sealed_day or str(dates[-1].date())
+    st["data_through"] = str(dates[-1].date())
+    st["sealed_through"] = _sealed_day
+    st["pending_tail_days"] = int(int(cfg.exec_lag) + int(horizon))
+    st["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     st["new_predictions"] = len(new_rows)
     store.write_json("status", st)
 

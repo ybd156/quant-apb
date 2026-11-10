@@ -1015,10 +1015,19 @@ class ApiHandler(BaseHTTPRequestHandler):
         return self._ok(new)
 
     def _api_market(self):
-        """实时行情与市场情绪 —— 只读 data/state/market.json，本层不做任何计算。"""
+        """实时行情与市场情绪 —— 只读 data/state/market.json。
+
+        只补两个**派生展示字段**（与 /api/health 的 data_age_days 同一实现，
+        不在前端算）：`data_age_days`（按交易日）与 `data_date`（数据日）。
+        `as_of` 是采集时刻，两者语义不同，UI 必须能分开显示。
+        """
         data, sent = self._load_or_not_ready("market")
         if sent is not None:
             return sent
+        if isinstance(data, dict):
+            d = dict(data)
+            d["data_age_days"] = _age_days(d.get("data_date") or d.get("as_of"))
+            return self._ok(d)
         return self._ok(data)
 
     def _api_update_progress(self):

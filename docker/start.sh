@@ -238,7 +238,11 @@ HS.snapshot(verbose=True)
 fi
 
 # 5.8) 模拟盘自动调仓（每 2 小时一次，按最新 picks）
-if [ "$ENABLE_PAPER_AUTO" != "0" ]; then
+# 默认**关**。实测事故：`ENABLE_PAPER_AUTO` 全仓库从未定义，空串 != "0" 恒真
+# → 每 2 小时无条件调仓一次，2026-11-09 13:10 用周五收盘价成交 20 笔并记成周五。
+# 需要时显式开：-e APB_PAPER_AUTO=1（且 paper_auto 内部还有一道时间门禁）
+ENABLE_PAPER_AUTO="${APB_PAPER_AUTO:-0}"
+if [ "$ENABLE_PAPER_AUTO" = "1" ] || [ "$ENABLE_PAPER_AUTO" = "true" ]; then
     (
         sleep 120
         while true; do
@@ -293,15 +297,17 @@ if [ "$ENABLE_INTRADAY_TRAIN" != "0" ]; then
 from datetime import datetime
 now = datetime.now()
 hm = now.hour * 60 + now.minute
-trading = (9*60+35 <= hm <= 11*60+30) or (13*60+5 <= hm <= 14*60+55)
-if now.weekday() >= 5:
-    print('[intraday] 周末，跳过')
-elif not trading:
-    print('[intraday] 非交易时段，跳过')
+from qcore import calendar_cn as CAL
+from qcore import session as S
+phase = S.in_window(now)
+if phase not in ('morning', 'afternoon'):
+    print(f'[intraday] 非交易时段（{phase}），跳过')
 else:
     from qcore import intraday_online as IO
-    IO.run_all_markets(verbose=True)
-" 2>&1 | tail -6 || true
+    # 旧代码调 `IO.run_all_markets()` —— 这个函数**不存在**（实测 AttributeError），
+    # 而外层 `|| true` 把错误吞掉：每交易日静默崩约 78 次，零产出零告警。
+    IO.run_once(verbose=True)
+" 2>&1 | tail -6
             sleep 300
         done
     ) &

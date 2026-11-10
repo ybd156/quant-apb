@@ -112,18 +112,91 @@ def _cache_path(code: str, adjust: int) -> str:
     return os.path.join(KLINE_DIR, f"{code}_h{adjust}.csv")
 
 
+def _latest_closed_trading_day(now=None):
+    """最近一个「已收盘」的交易日。盘中/盘前 = 上一交易日；盘后 = 今天。"""
+    import datetime as _dt
+    now = now or _dt.datetime.now()
+    try:
+        from . import calendar_cn as CAL
+        today = now.date()
+        after_close = (now.hour, now.minute) >= (15, 5)
+        if after_close and CAL.is_trading_day_bool(today):
+            return today
+        return CAL.prev_trading_day(today)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _strip_forming_bar(df: pd.DataFrame, now=None) -> pd.DataFrame:
+    """丢掉**尚未收盘**的当日 bar。
+
+    实测事故：`000988_h0.csv` 在 2026-11-10 09:41 被写入，
+    含 `11-10 close=66.20 volume=52,770`（正常日 25–33 万），
+    而 `max_age_days=5` 让这份**盘中快照**被当成「11-10 的收盘价」缓存到 11-15。
+    —— 这是「数据不精准」最直接的来源：信号会在一个假的收盘价上计算。
+
+    规则：最后一根 bar 的日期 == 今天 且 现在 < 15:05 → 丢弃（它是未完成的）。
+    """
+    if df is None or not len(df) or "date" not in df.columns:
+        return df
+    import datetime as _dt
+    now = now or _dt.datetime.now()
+    try:
+        last = pd.Timestamp(df["date"].iloc[-1]).date()
+    except Exception:  # noqa: BLE001
+        return df
+    if last == now.date() and (now.hour, now.minute) < (15, 5):
+        out = df.iloc[:-1].copy()
+        out.attrs["forming_bar_dropped"] = True
+        return out
+    return df
+
+
+def _annotate_freshness(df: pd.DataFrame, now=None) -> pd.DataFrame:
+    """给 DataFrame 打上数据日期与新鲜度（供上层判断，不改变数值）。"""
+    try:
+        last = pd.Timestamp(df["date"].iloc[-1]).date() if len(df) else None
+    except Exception:  # noqa: BLE001
+        last = None
+    ref = _latest_closed_trading_day(now)
+    df.attrs["data_last_date"] = str(last) if last else None
+    df.attrs["expected_last_date"] = str(ref) if ref else None
+    df.attrs["stale"] = bool(last is not None and ref is not None and last < ref)
+    return df
+
+
 def load_kline(code: str, adjust: int = ADJUST, refresh: bool = False,
-               max_age_days: float = 5.0) -> pd.DataFrame:
+               max_age_days: float = 5.0, now=None) -> pd.DataFrame:
+    """读日线。返回的 DataFrame 带 attrs：
+      `data_last_date` 最后一根 bar 的日期｜`expected_last_date` 最近已收盘交易日
+      `stale` 数据是否落后于交易日历｜`forming_bar_dropped` 是否丢弃了未收盘 bar
+
+    新鲜度判据是**数据日期 vs 交易日历**，不是文件 mtime。
+    实测事故：缓存 mtime 2026-11-08（判「新鲜」）而最后一根 bar 是 11-06，
+    缺 2026-11-09 一整个已收盘交易日 —— mtime 永远发现不了这种缺口。
+    """
     code = str(code).zfill(6)
     path = _cache_path(code, adjust)
+    df = None
     if (not refresh) and os.path.exists(path):
         if (time.time() - os.path.getmtime(path)) / 86400 < max_age_days:
             df = pd.read_csv(path, parse_dates=["date"])
             df["code"] = code
-            return df
-    df = fetch_kline(code, adjust=adjust)
-    df.to_csv(path, index=False, encoding="utf-8")
-    return df
+            # 缓存里若含「今天未收盘」的 bar，说明它是盘中写进去的快照。
+            # 收盘后再读必须重取一次，否则会把 09:41 的部分 bar 当成当日收盘价。
+            try:
+                last = pd.Timestamp(df["date"].iloc[-1]).date() if len(df) else None
+            except Exception:  # noqa: BLE001
+                last = None
+            import datetime as _dt
+            _now = now or _dt.datetime.now()
+            if last is not None and last == _now.date() and (_now.hour, _now.minute) >= (15, 5):
+                df = None          # 强制重取，拿真正的收盘 bar
+    if df is None:
+        df = fetch_kline(code, adjust=adjust)
+        df.to_csv(path, index=False, encoding="utf-8")
+    df = _strip_forming_bar(df, now)
+    return _annotate_freshness(df, now)
 
 
 # ---------------------------------------------------------------- universe
@@ -202,13 +275,24 @@ def fetch_index(code: str = "000300") -> pd.DataFrame:
     return df
 
 
-def load_index(code: str = "000300") -> pd.DataFrame:
+def load_index(code: str = "000300", now=None) -> pd.DataFrame:
     path = os.path.join(INDEX_DIR, f"{code}.csv")
+    df = None
     if os.path.exists(path) and (time.time() - os.path.getmtime(path)) / 86400 < 5:
-        return pd.read_csv(path, parse_dates=["date"])
-    df = fetch_index(code)
-    df.to_csv(path, index=False, encoding="utf-8")
-    return df
+        df = pd.read_csv(path, parse_dates=["date"])
+        import datetime as _dt
+        _now = now or _dt.datetime.now()
+        try:
+            last = pd.Timestamp(df["date"].iloc[-1]).date() if len(df) else None
+        except Exception:  # noqa: BLE001
+            last = None
+        if last is not None and last == _now.date() and (_now.hour, _now.minute) >= (15, 5):
+            df = None
+    if df is None:
+        df = fetch_index(code)
+        df.to_csv(path, index=False, encoding="utf-8")
+    df = _strip_forming_bar(df, now)
+    return _annotate_freshness(df, now)
 
 
 # ---------------------------------------------------------------- panel

@@ -176,29 +176,133 @@ def _lot(code: str, market: str = "CN") -> int:
 HORIZON_TOP_K = {1: 2, 3: 3, 5: 5, 10: 8, 15: 10}
 
 
-def lag_trading_days(as_of: str) -> Optional[int]:
-    """
-    as_of 相对「最新交易日」落后几个交易日。
+def lag_trading_days(as_of: str, now: Optional[datetime] = None) -> Optional[int]:
+    """`as_of` 相对「最近**已收盘**交易日」落后几个交易日。0 = 就是最近已收盘那天。
 
-    用真实交易日历算（qlib calendar），不是数周一~周五 ——
-    否则国庆/春节会被算成「落后 7 天」，而实际只差 1 天。
-    返回 None 表示算不出来（没有日历/日期非法）。
+    实测踩过的坑：旧实现以 **qlib 日历的最后一根** 为基准，
+    而本机 qlib 日历最后一根就停在 2026-11-06 —— 于是 `as_of=11-06` 恒返回 0，
+    「picks 陈旧」这道闸门永远不触发（陈旧检测等于没有）。
+
+    正确基准是**墙钟 + 交易日历**推出来的「最近已收盘交易日」：
+      · 盘中/盘前 → 上一交易日
+      · 盘后 15:05 之后（且今天是交易日）→ 今天
+    返回 None 表示算不出来（日历不可用 / 日期非法 / 落在非交易日）。
     """
     if not as_of:
         return None
+    import datetime as _dt
     try:
-        import pandas as pd
-        from . import qlib_data as QD
-        cal = QD.load_calendar()
-        if cal is None or not len(cal):
-            return None
-        days = [str(pd.Timestamp(x).date()) for x in cal]
-        d = str(as_of)[:10]
-        if d not in days:
-            return None
-        return len(days) - 1 - days.index(d)
-    except Exception:
+        from . import calendar_cn as CAL
+    except Exception:  # noqa: BLE001
         return None
+    try:
+        target = _dt.date.fromisoformat(str(as_of)[:10])
+    except Exception:  # noqa: BLE001
+        return None
+    if not CAL.is_trading_day_bool(target):
+        return None
+
+    now = now or datetime.now()
+    today = now.date()
+    phase = None
+    try:
+        from . import session as _S
+        phase = _S.in_window(now)
+    except Exception:  # noqa: BLE001
+        phase = None
+
+    if phase == "postclose" and CAL.is_trading_day_bool(today):
+        ref = today                      # 今天已收盘，今天的收盘价就是最新的
+    elif CAL.is_trading_day_bool(today) and phase in ("morning", "lunch", "afternoon"):
+        ref = CAL.prev_trading_day(today)
+    else:
+        ref = CAL.prev_trading_day(today)
+
+    n, cur = 0, ref
+    while cur > target and n < 250:
+        cur = CAL.prev_trading_day(cur)
+        n += 1
+    return n if cur == target else None
+
+
+def _assert_tradable(as_of_hint=None, dry_run: bool = False,
+                     now: Optional[datetime] = None,
+                     allow_backfill: bool = False) -> Dict:
+    """交易时间门禁 —— 全项目唯一实现。
+
+    实测事故（2026-11-09）：周一 13:10 用**周五收盘价**成交 20 笔，并记成周五。
+    三个条件缺一不可：
+
+      ① `as_of` 必须是交易日（用 calendar_cn，不是数周一~周五）
+      ② `as_of` 必须是「最近已收盘交易日」（`lag_trading_days == 0`）
+         —— 陈旧信号不许成交，否则就是拿三天前的判断下单
+      ③ 执行时刻必须落在「as_of 收盘之后、下一交易日开盘之前」
+         —— 盘中执行时 as_of 的收盘价是过去的价格，拿它成交等于回填。
+         实测窗口：15:05–17:00（盘后）或 次日 08:30–09:30（盘前）。
+
+    `dry_run=True` 时跳过 ③（回放/试算不落盘，允许在任意时刻演练）。
+    `allow_backfill=True` 显式越过 ③，但会在返回体里留痕 `"backfilled": True`。
+    """
+    import datetime as _dt
+    now = now or datetime.now()
+    picks = as_of_hint or {}
+    as_of = str((picks or {}).get("as_of") or "")[:10]
+    if not as_of:
+        return {"ok": False, "reason": "no_as_of",
+                "hint": "picks 缺 as_of，无法判定交易日"}
+
+    # ① 交易日
+    try:
+        from . import calendar_cn as CAL
+        is_td, basis = CAL.is_trading_day(_dt.date.fromisoformat(as_of))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": "calendar_unavailable", "detail": str(e)[:120]}
+    if not is_td:
+        return {"ok": False, "reason": "not_trading_day", "as_of": as_of,
+                "hint": f"{as_of} 不是交易日（依据 {basis}），不能成交"}
+
+    # ② 不许是未来 / 不许是「今天还没收盘」/ 不许陈旧
+    target = _dt.date.fromisoformat(as_of)
+    if target > _dt.date.today():
+        return {"ok": False, "reason": "as_of_in_future", "as_of": as_of}
+    # 最近**已收盘**交易日：盘后（且今天是交易日）就是今天，否则是上一交易日
+    try:
+        from . import session as _S2
+        _ph = _S2.in_window(now)
+    except Exception:  # noqa: BLE001
+        _ph = None
+    if _ph == "postclose" and CAL.is_trading_day_bool(now.date()):
+        _ref = now.date()
+    else:
+        _ref = CAL.prev_trading_day(now.date())
+    if target > _ref:
+        return {"ok": False, "reason": "not_closed_yet", "as_of": as_of,
+                "latest_closed": str(_ref),
+                "hint": f"{as_of} 还没收盘（最近已收盘交易日是 {_ref}），不能成交"}
+    # 注意必须把 now 传进去：旧写法用真实时钟，注入的 now 只影响 ③，
+    # 于是 ② 和 ③ 会基于两个不同的「现在」，测试与实际行为不一致。
+    lag = lag_trading_days(as_of, now)
+    if lag is None:
+        return {"ok": False, "reason": "stale_unknown", "as_of": as_of,
+                "hint": "算不出 as_of 落后几个交易日（日历不可用），拒绝成交"}
+    if lag != 0:
+        return {"ok": False, "reason": "stale_picks", "as_of": as_of, "lag": lag,
+                "hint": f"picks 落后 {lag} 个交易日，先刷新预测再调仓"}
+
+    # ③ 执行窗口：as_of 收盘之后、下一交易日开盘之前
+    if not dry_run and not allow_backfill:
+        try:
+            from . import session as _S
+            phase = _S.in_window(now)
+        except Exception:  # noqa: BLE001
+            phase = "unknown"
+        if phase in ("morning", "lunch", "afternoon"):
+            return {"ok": False, "reason": "in_session", "as_of": as_of,
+                    "phase": phase, "now": now.isoformat(timespec="seconds"),
+                    "hint": f"盘中（{phase}）不能拿 {as_of} 的收盘价成交；"
+                            f"请在 15:05–17:00 或次日开盘前调仓"}
+    return {"ok": True, "as_of": as_of, "lag": 0,
+            "backfilled": bool(allow_backfill)}
 
 
 def default_top_k(horizon: int, market: str = "CN") -> int:
@@ -292,6 +396,13 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     # picks 文件里带 market 就必须匹配。
     # 实测踩过：美股账户读到 A 股 picks_h5.json，用 500 美元买了
     # 601229（上海银行）2 股 —— 跨市场串仓，对账全废。
+    # ---- 时间门禁（实测事故：2026-11-09 周一 13:10 用周五收盘价成交 20 笔并记成周五）----
+    # ① as_of 是交易日 ② as_of 是「最近已收盘交易日」（陈旧信号不许成交）
+    # ③ 执行时刻落在「as_of 收盘之后、下一交易日开盘之前」（盘中不许拿旧收盘价成交）
+    _gate = _assert_tradable(as_of_hint=picks, dry_run=dry_run)
+    if not _gate["ok"]:
+        return {**_gate, "market": market, "horizon": h}
+
     _pm = str((picks or {}).get("market") or "").upper()
     if _pm and _pm != market:
         return {"ok": False, "reason": "market_mismatch",
@@ -437,12 +548,17 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     for code, p in list(pos.items()):
         if code in want:
             continue
-        if str(p.get("opened_at", ""))[:10] == as_of:
+        # T+1 必须用**数据日**比数据日。旧代码拿 opened_at（墙钟）比 as_of（数据日），
+        # 在回填场景下会失效 —— 实测出现过「11-09 建仓、被 as_of=11-07 的调仓卖出」。
+        _open_day = str(p.get("open_trade_date") or str(p.get("opened_at", ""))[:10])
+        if _open_day == as_of:
             skipped.append({"code": code, "why": "T+1，今日建仓不可卖"})
             continue
-        px = _price(code, as_of) or _price(code)
+        # 只用 as_of 当天的价。旧代码 `or _price(code)` 会退回「最新一根」，
+        # 那是相对 as_of 的**未来价** —— 相当于用后视镜成交。
+        px = _price(code, as_of)
         if not px:
-            skipped.append({"code": code, "why": "取不到价格"})
+            skipped.append({"code": code, "why": "as_of 当日无成交价（停牌或数据未到）"})
             continue
         qty = int(p.get("qty") or 0)
         if qty <= 0:
@@ -460,7 +576,8 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
                        "net": round(net, 2), "reason": "掉出 top-k"})
         if not dry_run:
             cash += net
-            _append({"date": as_of, "market": market, "horizon": h,
+            _append({"date": as_of, "signal_as_of": as_of, "price_as_of": as_of,
+                     "market": market, "horizon": h,
                      "code": code, "side": "sell",
                      "price": px, "qty": qty, "amount": round(gross, 2),
                      "cost": round(fee_amt, 4),
@@ -477,7 +594,7 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
         # 目标等权，但受现金与整手约束
         per = cash / max(len(new), 1) if new else 0
         for code in new:
-            px = _price(code, as_of) or _price(code)
+            px = _price(code, as_of)
             if not px:
                 skipped.append({"code": code, "why": "取不到价格"})
                 continue
@@ -513,9 +630,11 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
             if not dry_run:
                 cash -= net
                 pos[code] = {"qty": qty, "cost": px, "opened_at": _now(),
+                             "open_trade_date": as_of,
                              "score": score_of.get(code, 0),
                              "fee_paid": round(fee_amt, 4)}
-                _append({"date": as_of, "market": market, "horizon": h,
+                _append({"date": as_of, "signal_as_of": as_of, "price_as_of": as_of,
+                         "market": market, "horizon": h,
                          "code": code, "side": "buy",
                          "price": px, "qty": qty, "amount": round(gross, 2),
                          "cost": round(fee_amt, 4),
@@ -527,9 +646,17 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     # ---- 3) 估值 ----
     mv = 0.0
     for code, p in pos.items():
-        px = _price(code, as_of) or _price(code) or p.get("cost") or 0
-        p["last_price"] = round(float(px), 4)
-        p["market_value"] = round(float(px) * int(p.get("qty") or 0), 2)
+        px = _price(code, as_of)
+        if px:
+            p["last_price"] = round(float(px), 4)
+            p["last_price_source"] = "close_as_of"
+        else:
+            # 取不到就用成本价，但**必须留痕**：旧代码这里用最新价，
+            # 导致持仓市值永远等于成本（20/20 last_price==cost），
+            # 账户收益结构性地恒等于「只亏手续费」。
+            p["last_price"] = round(float(p.get("cost") or 0), 4)
+            p["last_price_source"] = "cost_fallback"
+        p["market_value"] = round(float(p["last_price"]) * int(p.get("qty") or 0), 2)
         mv += p["market_value"]
 
     acc.update({"cash": round(cash, 2), "positions": pos,
@@ -585,11 +712,20 @@ def reset(market: str = "CN", horizon: int = 1,
     old_acc = load_account(m, h)
     old_trades = load_trades(m, h)
 
-    # 金额：显式传入 > 原账户本金 > 配置默认
+    # 金额优先级（实测踩过两个相反方向的 bug，最终定这个顺序）：
+    #   ① 显式传入的 capital
+    #   ② **用户在各周期本金里显式设过的值**  ← 必须是它，否则「设置不生效」
+    #   ③ 旧账户的 initial_capital          ← 保证「沿用原值」不会把 80 万变 5000
+    #   ④ 配置兜底 capital_for
+    # 曾经 ②③ 顺序颠倒：用户把 h=5 设成 20 万后点清空重投，本金变成旧账户净值 ——
+    # 界面上明明设了，重投却不跟随。
     if capital is None:
-        # 优先级：显式传入 > 旧账户本金 > 配置里该周期本金。
-        # 之前先取 capital_for（它永远有返回值），导致「沿用原值」变成死代码，
-        # 一次「清空重设」会把 80 万本金静默改成 5000。
+        try:
+            from . import account_config as AC
+            capital = AC.capital_explicit(m, h)
+        except Exception:  # noqa: BLE001
+            capital = None
+    if capital is None:
         capital = float((old_acc or {}).get("initial_capital") or 0) or None
     if capital is None:
         try:
@@ -687,6 +823,13 @@ def summary(market: str = "CN", horizon: int = 1) -> Dict:
     m = str(market or "CN").upper()
     h = int(horizon or 1)
     acc = load_account(m, h)
+    _cfg_cap = None
+    try:
+        from . import account_config as AC
+        _cfg_cap = float(AC.capital_for(m, h) or 0) or None
+        _cfg_explicit = AC.capital_explicit(m, h)
+    except Exception:  # noqa: BLE001
+        _cfg_explicit = None
     if not acc:
         return {"ok": False, "reason": "not_initialized", "market": m,
                 "horizon": h,
@@ -709,7 +852,16 @@ def summary(market: str = "CN", horizon: int = 1) -> Dict:
         if init > 0:
             acc["total_return"] = round(acc["equity"] / init - 1.0, 6)
     trades = load_trades(m, h)
+    # 账户实际本金与「各周期本金」配置不一致时必须显式说出来。
+    # 实测：界面写「A股 80万」，五个周期账户却是 100万/100万/100万/100万/30万 ——
+    # 用户以为设置生效了，实际每个账户都在用别的数跑。
+    _acc_cap = float(acc.get("initial_capital") or 0)
+    _mismatch = bool(_cfg_cap and _acc_cap
+                     and abs(_acc_cap - float(_cfg_cap)) > 1.0)
     return {"ok": True, "market": m, "horizon": h, "account": acc,
+            "capital_configured": _cfg_cap, "capital_explicit": _cfg_explicit,
+            "account_capital": _acc_cap or None,
+            "capital_mismatch": _mismatch,
             "n_trades": len(trades),
             "recent_trades": trades[-20:],
             "note": "模拟盘自动成交，与手工录入的 live_trades 完全分开"}
@@ -734,6 +886,10 @@ def summary_all() -> Dict:
             grid[m][h] = {
                 "ok": bool(r.get("ok")),
                 "reason": r.get("reason"),
+                # 账户本金 vs 配置本金：不一致必须随行透出，否则用户以为设置生效了
+                "account_capital": r.get("account_capital"),
+                "capital_configured": r.get("capital_configured"),
+                "capital_mismatch": bool(r.get("capital_mismatch")),
                 "equity": (r.get("account") or {}).get("equity"),
                 "cash": (r.get("account") or {}).get("cash"),
                 "n_positions": (r.get("account") or {}).get("n_positions"),
@@ -886,6 +1042,11 @@ def by_horizon(market: str = "CN") -> Dict:
             "fee_total": fs.get("total"),
             "fee_avg_bps": fs.get("avg_bps"),
             "as_of": a.get("as_of"),
+            # 账户本金 vs「各周期本金」配置：不一致必须随行透出，
+            # 否则用户以为设了 80 万，五个周期其实各跑 100 万/30 万。
+            "account_capital": r.get("account_capital"),
+            "capital_configured": r.get("capital_configured"),
+            "capital_mismatch": bool(r.get("capital_mismatch")),
         })
     # 排名：只算真正交易过的账户。
     # 没成交的账户收益率恒为 0，会排在亏损账户前面 —— 那是假象，
@@ -931,18 +1092,42 @@ if __name__ == "__main__":
         horizon = 1
 
     if "--init" in sys.argv:
-        cap = float(_arg("capital", "1000000"))
+        # 不再默认 100 万。实测：界面上「A股 80万」，五个周期账户却各自是
+        # 100万/100万/100万/100万/30万 —— 既不是配置本金，彼此也不一致，
+        # 用户看到的「各周期本金」设置等于没生效。
+        _cap_arg = _arg("capital", "")
+        cap = float(_cap_arg) if str(_cap_arg).strip() else None
         if "--all-horizons" in sys.argv:
             try:
                 from . import horizons as HZ
                 hs = [h for h in HZ.all_horizons() if h > 0]
             except Exception:
                 hs = [1, 3, 5, 10, 15]
-            out = [init_account(cap, market, h) for h in hs]
+            try:
+                from . import account_config as _AC
+            except Exception:  # noqa: BLE001
+                _AC = None
+            out = []
+            for h in hs:
+                _c = cap
+                if _c is None:
+                    try:
+                        _c = float(_AC.capital_for(market, h) or 0) or 5_000.0
+                    except Exception:  # noqa: BLE001
+                        _c = 5_000.0
+                out.append(init_account(_c, market, h))
             print(json.dumps({"ok": True, "market": market,
                               "initialized": [o["horizon"] for o in out],
-                              "capital_each": cap}, ensure_ascii=False, indent=1))
+                              "capital_each": {o["horizon"]: o["initial_capital"]
+                                               for o in out}},
+                             ensure_ascii=False, indent=1))
         else:
+            if cap is None:
+                try:
+                    from . import account_config as _AC2
+                    cap = float(_AC2.capital_for(market, horizon) or 0) or 5_000.0
+                except Exception:  # noqa: BLE001
+                    cap = 5_000.0
             print(json.dumps(init_account(cap, market, horizon),
                              ensure_ascii=False, indent=1))
     elif "--all" in sys.argv:

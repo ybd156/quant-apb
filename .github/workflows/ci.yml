@@ -55,6 +55,9 @@ jobs:
       - name: 版本号唯一真源（防止 webui/VERSION 复活）
         run: python -m tests.test_version_sources
 
+      - name: 时间门禁（交易日/时段/成交价所属日）
+        run: python -m tests.test_time_gates
+
       - name: 增量=批量 parity（无本地行情时自动 SKIP）
         run: python -m tests.test_incremental_parity
 

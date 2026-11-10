@@ -452,8 +452,17 @@ def refresh(write: bool = True) -> Dict:
         by_market = {"CN": {"market": "CN", "ok": False,
                             "reason": str(_e)[:60]}}
 
+    # `as_of` 是**采集时刻**，不是数据日 —— 实测 market.json 的 as_of 是
+    # 「2026-11-08 周日 18:48」，而里面的指数是 11-06 收盘价。
+    # 两个时点必须分开写，否则 UI 只能把采集时刻当数据日展示。
+    try:
+        from .data import _latest_closed_trading_day as _lcd
+        _data_date = str(_lcd())
+    except Exception:  # noqa: BLE001
+        _data_date = None
     payload = {
         "as_of": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "data_date": _data_date,
         "indices": idx.get("rows", []),
         "sentiment_by_market": by_market,
         "breadth": {"up": up, "down": down, "flat": br.get("flat", 0),

@@ -312,18 +312,45 @@ def postclose(verbose: bool = True) -> Dict:
 
 # ------------------------------------------------------------------ 调度
 def in_window(now: Optional[datetime] = None) -> str:
-    """判断当前处于哪个时段。返回 premarket|intraday|postclose|closed"""
+    """判断当前处于哪个时段。返回 premarket|morning|lunch|afternoon|intraday|postclose|closed
+
+    两处历史缺陷（实测，2026-11-10）：
+      1. 只判 `weekday() >= 5`，**不含节假日** —— 2026-10-01 10:00 返回 "intraday"，
+         而 `calendar_cn.is_trading_day` 说 False。国庆/春节期间调度器照常跑盘中逻辑。
+      2. `(9,30) <= hm <= (15,0)` 一整段 —— **午休 11:30–13:00 被判成盘中**，
+         于是 `python -m qcore.session` 在 11:47 也会执行 intraday()。
+
+    修法：交易日交给 `calendar_cn`（唯一真源），时段拆成上午/午休/下午三段。
+    返回值保留 "intraday"（上午或下午），另增 "morning"/"lunch"/"afternoon"
+    供需要细分的调用方使用 —— 旧调用方拿到的语义不变（午休不再被算作 intraday）。
+    """
     n = now or _now()
-    if n.weekday() >= 5:
-        return "closed"
+    try:
+        from . import calendar_cn as CAL
+        if not CAL.is_trading_day_bool(n.date()):
+            return "closed"
+    except Exception:  # noqa: BLE001
+        # 日历不可用时退回周末判断（宁严勿宽：不确定就按休市处理会更危险，
+        # 所以这里保留旧行为，但**只作为兜底**）
+        if n.weekday() >= 5:
+            return "closed"
     hm = (n.hour, n.minute)
     if (8, 30) <= hm < (9, 30):
         return "premarket"
-    if (9, 30) <= hm <= (15, 0):
-        return "intraday"
+    if (9, 30) <= hm <= (11, 30):
+        return "morning"
+    if (11, 30) < hm < (13, 0):
+        return "lunch"
+    if (13, 0) <= hm <= (15, 0):
+        return "afternoon"
     if (15, 5) <= hm <= (17, 0):
         return "postclose"
     return "closed"
+
+
+def in_session(now: Optional[datetime] = None) -> bool:
+    """是否处于连续竞价（上午或下午）。午休/盘前/盘后/节假日一律 False。"""
+    return in_window(now) in ("morning", "afternoon")
 
 
 def run(session: str = "auto", verbose: bool = True) -> Dict:
@@ -333,7 +360,7 @@ def run(session: str = "auto", verbose: bool = True) -> Dict:
         s = in_window()
     if s == "premarket":
         return premarket(verbose=verbose)
-    if s == "intraday":
+    if s in ("intraday", "morning", "afternoon"):
         return intraday(verbose=verbose)
     if s == "postclose":
         return postclose(verbose=verbose)

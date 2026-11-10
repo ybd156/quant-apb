@@ -114,8 +114,18 @@ def _migrate(raw: Dict) -> Dict:
         out = _blank()
         for m in MARKETS:
             if isinstance(raw["markets"].get(m), dict):
+                src = raw["markets"][m]
                 out["markets"][m].update(
-                    {k: v for k, v in raw["markets"][m].items() if k in DEFAULTS[m]})
+                    {k: v for k, v in src.items() if k in DEFAULTS[m]})
+                # horizon_capital 不在 DEFAULTS 里（见上面的注释：故意不预填），
+                # 所以旧代码这一行会把用户设的「各周期本金」**整段丢掉** ——
+                # 实测：设了 h=5 20 万，读回来 `cfg["horizon_capital"]` 是 None，
+                # `capital_for()` 永远回落到 initial_capital，设置形同虚设。
+                hc = src.get("horizon_capital")
+                if isinstance(hc, dict) and hc:
+                    out["markets"][m]["horizon_capital"] = {
+                        str(int(k)): v for k, v in hc.items()
+                        if str(k).lstrip("-").isdigit()}
         dm = raw.get("default_market")
         if dm in MARKETS:
             out["default_market"] = dm
@@ -254,6 +264,45 @@ def save(payload: Dict, market: str = "CN") -> Tuple[Optional[Dict], Optional[st
         json.dump(cfg, f, ensure_ascii=False, indent=1)
     os.replace(tmp, PATH)
     return load(m), None
+
+
+def capital_explicit(market: str = "CN", horizon: int = 1) -> Optional[float]:
+    """该 (市场, 周期) **用户显式设过**的本金；没设过返回 None。
+
+    为什么需要它（实测事故）：用户在「各周期本金」里把 h=5 设成 20 万，
+    然后点「清空重投」，结果本金变成旧账户的净值 —— 设置完全不生效。
+    根因是 `capital_for()` **永远**有返回值（拿不到就用 initial_capital 兜底），
+    于是调用方无法区分「用户设过」和「只是默认值」。
+
+    这里只读**用户写进文件**的 horizon_capital，不合并 DEFAULTS。
+    """
+    try:
+        with open(PATH, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(raw, dict):
+        return None
+    # 支持两种结构：新（markets.CN.horizon_capital）与旧（顶层 horizon_capital）
+    hc = None
+    if isinstance(raw.get("markets"), dict) and isinstance(raw["markets"].get(market), dict):
+        hc = raw["markets"][market].get("horizon_capital")
+    if not isinstance(hc, dict):
+        hc = raw.get("horizon_capital")
+    if not isinstance(hc, dict):
+        hc = {}
+    v = None
+    try:
+        v = hc.get(str(int(horizon)), hc.get(int(horizon)))
+    except (TypeError, ValueError):
+        v = None
+    if v is None:
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
 
 
 def capital_for(market: str = "CN", horizon: int = 1) -> float:

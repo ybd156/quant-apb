@@ -276,7 +276,11 @@ def snapshot(codes: Iterable[str]) -> Dict:
     missing = [c for c in codes if _norm(c) not in rows]
     return {"ok": True, "source": used, "n": len(rows),
             "rows": list(rows.values()),
-            "as_of": datetime.fromtimestamp(newest).isoformat(timespec="seconds")
+            # 必须 .astimezone()：`fromtimestamp()` 返回 naive，
+            # 而同一个 dict 里的 `fetched_at` 是 aware —— 同一 payload 两种口径，
+            # 下游 `as_of or fetched_at` 再切字符串就依赖「两者恰好都是本地」这个
+            # 没写下来的约定。server.py:225 同样的操作是写对的，这里照抄。
+            "as_of": datetime.fromtimestamp(newest).astimezone().isoformat(timespec="seconds")
             if newest else None,
             "latency_s": round(latency, 1) if latency is not None else None,
             "stale": (latency is not None and latency > 15),

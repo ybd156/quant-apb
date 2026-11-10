@@ -33,6 +33,7 @@ import os
 import socket
 import sys
 import time
+from datetime import datetime
 import urllib.error
 import urllib.request
 
@@ -90,6 +91,50 @@ def push_models(nas: str, horizons, token: str) -> dict:
             "pushed": pushed}
 
 
+def _journal(rec: dict) -> None:
+    """训练机本地流水（JSONL）。服务端看不到机器，出了事只能靠这本账。"""
+    try:
+        import os as _os
+        d = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                          "data", "state")
+        _os.makedirs(d, exist_ok=True)
+        rec = {"at": datetime.now().astimezone().isoformat(timespec="seconds"), **rec}
+        with open(_os.path.join(d, "train_journal.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False, default=str) + chr(10))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _report(nas: str, tid, ok: bool, detail: dict, token: str,
+            retries: int = 3, verbose: bool = True) -> bool:
+    """把结果回报给服务端 —— **必须送达**。
+
+    实测事故：任务 11-09 19:01 被领走，模型 19:14 已上传成功，
+    但 `finished_at` 一直是 null、状态最后变 `expired`。
+    服务端因此「根本不知道训练机训了什么」。
+    旧实现只在上传成功后顺序调用一次 `_req`，任何异常/网络抖动都会让回报丢失，
+    而 `_one()` 的 `except` 只打印一行就继续下一轮。
+    """
+    payload = {"id": tid, "ok": bool(ok), "worker": _worker_name(), "detail": detail or {}}
+    for i in range(max(1, retries)):
+        try:
+            r = _req(f"{nas}/api/sync/result", "POST", payload, token, timeout=60)
+            if r.get("ok"):
+                _journal({"event": "reported", "task": tid, "ok": bool(ok), "attempt": i + 1})
+                return True
+            if verbose:
+                print(f"    回报被拒：{r.get('error') or r.get('detail')}", flush=True)
+        except Exception as e:  # noqa: BLE001
+            if verbose:
+                print(f"    回报失败（第 {i+1}/{retries} 次）：{type(e).__name__}: {str(e)[:60]}",
+                      flush=True)
+        time.sleep(min(2 ** i, 8))
+    _journal({"event": "report_failed", "task": tid, "ok": bool(ok), "detail": detail})
+    if verbose:
+        print(f"    ⚠ 结果未能回传服务端（已写入 data/state/train_journal.jsonl）", flush=True)
+    return False
+
+
 def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
     """执行一个任务：训练 → 上传 → 回报。"""
     from qcore import live_model as LM
@@ -101,6 +146,8 @@ def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
     if verbose:
         print(f"  任务 {tid}: horizons={hs} trees={trees} stocks={stocks}", flush=True)
 
+    _journal({"event": "claimed", "task": tid, "horizons": hs,
+              "trees": trees, "stocks": stocks})
     results = []
     for h in hs:
         t0 = time.time()
@@ -109,9 +156,16 @@ def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
         except Exception as e:  # noqa: BLE001
             r = {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:80]}"}
         dt = time.time() - t0
-        results.append({"horizon": int(h), "ok": bool(r.get("ok")),
-                        "seconds": round(dt, 1),
-                        "reason": r.get("reason")})
+        # 服务端排的规模 vs 实际训出来的规模：不一致必须显式记录，
+        # 否则「排 300 只、训 200 只」这种事在产物里看不出来（实测已发生）。
+        _got = r.get("n_stocks")
+        rec = {"horizon": int(h), "ok": bool(r.get("ok")),
+               "seconds": round(dt, 1), "reason": r.get("reason"),
+               "requested_stocks": int(stocks), "n_stocks": _got}
+        if r.get("ok") and _got is not None and int(_got) < int(stocks):
+            rec["stocks_shortfall"] = int(stocks) - int(_got)
+        results.append(rec)
+        _journal({"event": "trained", **rec})
         if verbose:
             mark = "OK" if r.get("ok") else "FAIL"
             print(f"    h={h} [{mark}] {dt/60:.1f} 分钟"
@@ -127,10 +181,8 @@ def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
                       f"{'OK' if p['ok'] else 'FAIL ' + str(p.get('reason'))}", flush=True)
 
     ok_all = bool(good) and pushed.get("ok", False)
-    _req(f"{nas}/api/sync/result", "POST",
-         {"id": tid, "ok": ok_all, "worker": _worker_name(),
-          "detail": {"train": results, "push": pushed.get("pushed", [])}},
-         token, timeout=60)
+    _report(nas, tid, ok_all, {"train": results, "push": pushed.get("pushed", [])},
+            token, verbose=verbose)
     return {"ok": ok_all, "train": results, "push": pushed}
 
 
@@ -200,7 +252,17 @@ def main(argv=None) -> int:
             print("  队列为空，等 NAS 排任务（网页「设置 → 训练任务」）")
             return False
         print(f"领到任务 {t.get('id')}")
-        res = run_task(nas, t, token)
+        try:
+            res = run_task(nas, t, token)
+        except Exception as e:  # noqa: BLE001
+            # 领了任务却崩掉 = 服务端永远等不到结果，最后变成 expired。
+            # 必须回报失败，让队列状态诚实地显示「失败」而不是「过期」。
+            print(f"  任务异常：{type(e).__name__}: {str(e)[:120]}", flush=True)
+            _journal({"event": "crashed", "task": t.get("id"),
+                      "error": f"{type(e).__name__}: {str(e)[:200]}"})
+            _report(nas, t.get("id"), False,
+                    {"error": f"{type(e).__name__}: {str(e)[:200]}"}, token)
+            return True
         print(f"  任务完成：{'全部成功' if res.get('ok') else '有失败'}")
         return True
 
