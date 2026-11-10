@@ -198,6 +198,57 @@ def main() -> int:
     check("CLI 保存失败有友好提示", t_cli_ro)
 
 
+    print(chr(10) + "[3d] 坏 JSON 不静默丢弃（P2-9）")
+
+    def t_corrupt():
+        tmp3 = os.path.join(ROOT, "tmp", "kit_setup_corrupt")
+        os.makedirs(tmp3, exist_ok=True)
+        f = os.path.join(tmp3, "apb_defaults.json")
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write("{ this is not json ,,,")
+        old_d = KS.DEFAULTS
+        KS.DEFAULTS = f
+        try:
+            try:
+                KS.load_cfg(strict=True)
+                raise AssertionError("坏 JSON 竟然没抛错")
+            except ValueError:
+                pass
+            d = KS.save_cfg("http://new:8765", "tok", "")
+            bak = d.get("_backed_up_to")
+            assert bak and os.path.isfile(bak), "没有备份坏文件"
+            assert "原文件不是合法 JSON" in str(d.get("_note")), "没有告知用户"
+            # 备份里应是原始坏内容
+            assert "not json" in open(bak, encoding="utf-8").read()
+        finally:
+            KS.DEFAULTS = old_d
+        return "坏文件已备份为 .bak 并告知"
+
+    check("坏 JSON 会备份后重建", t_corrupt)
+
+    print(chr(10) + "[3e] 令牌文件权限收紧（P2-10）")
+
+    def t_chmod():
+        tmp4 = os.path.join(ROOT, "tmp", "kit_setup_perm")
+        os.makedirs(tmp4, exist_ok=True)
+        f = os.path.join(tmp4, "apb_defaults.json")
+        old_d = KS.DEFAULTS
+        KS.DEFAULTS = f
+        try:
+            KS.save_cfg("http://x:1", "secret-token", "")
+        finally:
+            KS.DEFAULTS = old_d
+        src2 = open(os.path.join(ROOT, "tools", "kit_setup.py"), encoding="utf-8").read()
+        assert "os.chmod(DEFAULTS, 0o600)" in src2, "没有收紧权限"
+        if os.name != "nt":
+            mode = os.stat(f).st_mode & 0o777
+            assert mode == 0o600, f"权限是 {oct(mode)}"
+            return f"chmod 600 生效"
+        return "Windows 上 chmod 无效果，但已调用不报错"
+
+    check("保存后收紧权限", t_chmod)
+
+
     print("\n[4] 无图形环境时能退回控制台")
     src = open(os.path.join(ROOT, "tools", "kit_setup.py"), encoding="utf-8").read()
     check("有 --cli 分支", "--cli" in src)

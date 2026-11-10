@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
@@ -110,6 +111,38 @@ def main() -> int:
         check(f"{f} 用 CRLF", b"\r\n" in raw)
         ctrl = [b for b in raw if b < 0x09 or 0x0b <= b <= 0x0c or 0x0e <= b <= 0x1f]
         check(f"{f} 无控制字符", not ctrl, str(ctrl[:3]))
+
+    print(chr(10) + "[6b] 自身更新检测（P1-7）")
+    check("有 _own_stamp（自我指纹）", hasattr(AD, "_own_stamp"))
+    s1 = AD._own_stamp()
+    check("指纹非空", bool(s1), s1)
+    check("指纹稳定（同一文件两次一致）", AD._own_stamp() == s1)
+    _src = open(os.path.join(ROOT, "tools", "agent_daemon.py"), encoding="utf-8").read()
+    check("run() 里有 execv 自我重启", "os.execv" in _src)
+    check("自我重启前记录了 self_restart 状态", "self_restart" in _src)
+
+    print(chr(10) + "[6c] 同类错误上限（P2-11）")
+    check("SAME_ERR_LIMIT 存在且合理",
+          hasattr(AD, "SAME_ERR_LIMIT") and 3 <= AD.SAME_ERR_LIMIT <= 50,
+          str(getattr(AD, "SAME_ERR_LIMIT", None)))
+    check("超限后写 needs_attention", "needs_attention" in _src)
+
+    print(chr(10) + "[6d] 心跳判活（P2-12）")
+    check("有 HEART_PATH", hasattr(AD, "HEART_PATH"))
+    check("有心跳超时", hasattr(AD, "HEART_TIMEOUT") and AD.HEART_TIMEOUT > 0,
+          str(getattr(AD, "HEART_TIMEOUT", None)))
+    AD.HEART_PATH = os.path.join(tmp, "agent.heartbeat")
+    if os.path.isfile(AD.HEART_PATH):
+        os.remove(AD.HEART_PATH)
+    check("没心跳 -> 不认为存活", AD.status()["alive"] is False)
+    AD._beat()
+    check("刷心跳后 -> 认为存活", AD.status()["alive"] is True)
+    _old = time.time() - 3600
+    os.utime(AD.HEART_PATH, (_old, _old))
+    _st2 = AD.status()
+    check("心跳过期 -> 不认为存活", _st2["alive"] is False,
+          "age=" + str(_st2.get("heartbeat_age_s")) + "s")
+    check("status 暴露心跳年龄", _st2.get("heartbeat_age_s") is not None)
 
     print("\n[7] 负控：这些检查器真的会失败")
     check("乱写的退出码不被当成更新",

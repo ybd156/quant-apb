@@ -49,6 +49,16 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 ATOL = 1e-12
+
+# INV-1 检验**必须确定性**：绝不允许在比对过程中联网重取行情。
+# 实测事故：`load_kline` 的「落后交易日历就重取」让全量跑与截断跑
+# 之间有一次重取成功、一次被 30 分钟节流挡住，两次数据不同，
+# 于是报出 2.37e-02 的**假前视**（真实原因是数据在测试中途变了）。
+try:
+    from qcore.data import set_offline as _set_offline
+    _set_offline(True)
+except Exception:  # noqa: BLE001
+    pass
 # 注：engine 内部用 float32 存 scores/weights，float32 的相对精度约 1.2e-7。
 # atol=1e-12 对 float32 而言等于"要求逐位相同"——正是我们要的严格度：
 # 任何真实的重算差异都会远大于 1e-12；而同一份数据、同一顺序的运算必然逐位相同。

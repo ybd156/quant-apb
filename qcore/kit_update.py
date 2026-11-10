@@ -197,6 +197,54 @@ def _validate(tmp: str) -> Dict:
     return {"ok": True, "version": v}
 
 
+def _swap_file(src: str, dst: str) -> None:
+    """原子替换单个文件：先写 .new，再 os.replace。"""
+    tmp = dst + ".apbnew"
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _swap_dir(src: str, dst: str) -> None:
+    """两阶段替换目录：新目录先落地，再改名交换。
+
+    原实现是 `rmtree(dst)` 然后 `copytree(src,dst)` —— 中途断电/被杀/
+    磁盘满就**两头空**：旧目录已删、新目录只拷了一半。
+    子进程随后退出 42，守护进程用半新半旧的代码重启，
+    而 VERSION 已显示新版本 —— 极难诊断（P1-8）。
+
+    现在：新目录先完整拷到 `<dst>.apbnew` → 旧目录改名 `<dst>.apbold`
+    → 新目录改名到位 → 删旧。任一步失败都能回滚。
+    """
+    new = dst + ".apbnew"
+    old = dst + ".apbold"
+    shutil.rmtree(new, ignore_errors=True)
+    shutil.rmtree(old, ignore_errors=True)
+    shutil.copytree(src, new)          # 失败：dst 未动，直接抛
+    moved_old = False
+    try:
+        if os.path.isdir(dst):
+            os.replace(dst, old)       # 目录改名（同盘、原子）
+            moved_old = True
+        os.replace(new, dst)
+    except Exception:
+        # 回滚：把旧目录放回去
+        if moved_old and not os.path.isdir(dst) and os.path.isdir(old):
+            try:
+                os.replace(old, dst)
+            except Exception:  # noqa: BLE001
+                pass
+        shutil.rmtree(new, ignore_errors=True)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+
+
 def apply_update(zip_path: str, verbose: bool = True) -> Dict:
     """
     解压 + 校验 + 覆盖。全程失败不改动现有文件。
@@ -231,19 +279,17 @@ def apply_update(zip_path: str, verbose: bool = True) -> Dict:
         if not os.path.exists(s):
             continue
         if os.path.isdir(s):
-            if os.path.isdir(d):
-                shutil.rmtree(d, ignore_errors=True)
             try:
-                shutil.copytree(s, d)
+                _swap_dir(s, d)
                 replaced.append(name)
-            except Exception:
-                skipped.append(name)
+            except Exception as e:  # noqa: BLE001
+                skipped.append(f"{name}({type(e).__name__})")
         else:
             try:
-                shutil.copy2(s, d)
+                _swap_file(s, d)
                 replaced.append(name)
-            except Exception:
-                skipped.append(name)
+            except Exception as e:  # noqa: BLE001
+                skipped.append(f"{name}({type(e).__name__})")
 
     # 保留清单里的东西不能被覆盖（保险，理论上 OVERWRITE 里没有）
     for keep in PRESERVE:

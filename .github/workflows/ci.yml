@@ -92,7 +92,11 @@ jobs:
       - name: Alpha158 因子自检（截断不变性 / 未来扰动 / 朴素对拍）
         run: python -m qcore.alpha158
 
+      # APB_OFFLINE=1：INV-1 检验必须确定性。允许联网重取会让
+      # 全量跑与截断跑拿到不同数据，报出假前视（实测 2.37e-02）。
       - name: 无未来函数检验（核心不变量）
+        env:
+          APB_OFFLINE: "1"
         run: python tests/test_no_lookahead.py
 
       # 不加 `|| true`：HIGH>0 时脚本返回 1，必须让 CI 红。

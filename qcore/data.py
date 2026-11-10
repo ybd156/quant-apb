@@ -165,6 +165,27 @@ def _annotate_freshness(df: pd.DataFrame, now=None) -> pd.DataFrame:
     return df
 
 
+#: 离线模式：**绝不联网**，只读缓存。缓存缺失时明确报错，不静默拉数据。
+#:
+#: 为什么需要：`load_kline` 会因「数据落后交易日历」自动重取。
+#: 这让**同一个测试跑两次可能拿到不同数据** —— INV-1 截断不变性检验
+#: 因此变成不确定的（实测：全量跑与截断跑之间有一次重取成功、
+#: 一次被 30 分钟节流挡住，两次数据不同，报出 2.37e-02 的假前视）。
+#:
+#: 凡是「必须可复现」的场景（INV-1 门禁、回测、审计）都要先 `set_offline(True)`。
+#: 也可以用环境变量 `APB_OFFLINE=1`。
+_OFFLINE = {"on": os.environ.get("APB_OFFLINE", "") in ("1", "true", "yes")}
+
+
+def set_offline(on: bool = True) -> None:
+    """切换离线模式。开启后所有行情读取只认本地缓存。"""
+    _OFFLINE["on"] = bool(on)
+
+
+def offline() -> bool:
+    return bool(_OFFLINE["on"])
+
+
 def load_kline(code: str, adjust: int = ADJUST, refresh: bool = False,
                max_age_days: float = 5.0, now=None) -> pd.DataFrame:
     """读日线。返回的 DataFrame 带 attrs：
@@ -178,6 +199,16 @@ def load_kline(code: str, adjust: int = ADJUST, refresh: bool = False,
     code = str(code).zfill(6)
     path = _cache_path(code, adjust)
     df = None
+    if _OFFLINE["on"]:
+        # 离线：只读缓存，不判新鲜度、不重取
+        if not os.path.exists(path):
+            raise RuntimeError(
+                f"离线模式下没有 {code} 的本地缓存（{path}）。"
+                f"先联网跑一次预热，或关闭离线模式。")
+        df = pd.read_csv(path, parse_dates=["date"])
+        df["code"] = code
+        df = _strip_forming_bar(df, now)
+        return _annotate_freshness(df, now)
     if (not refresh) and os.path.exists(path):
         if (time.time() - os.path.getmtime(path)) / 86400 < max_age_days:
             df = pd.read_csv(path, parse_dates=["date"])
@@ -286,6 +317,13 @@ def fetch_index(code: str = "000300") -> pd.DataFrame:
 def load_index(code: str = "000300", now=None) -> pd.DataFrame:
     path = os.path.join(INDEX_DIR, f"{code}.csv")
     df = None
+    if _OFFLINE["on"]:
+        if not os.path.exists(path):
+            raise RuntimeError(
+                f"离线模式下没有指数 {code} 的本地缓存（{path}）。")
+        df = pd.read_csv(path, parse_dates=["date"])
+        df = _strip_forming_bar(df, now)
+        return _annotate_freshness(df, now)
     if os.path.exists(path) and (time.time() - os.path.getmtime(path)) / 86400 < 5:
         df = pd.read_csv(path, parse_dates=["date"])
         import datetime as _dt

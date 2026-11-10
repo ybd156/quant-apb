@@ -46,18 +46,49 @@ _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) APB-Setup"
 
 
 # ---------------------------------------------------------------- 配置读写
-def load_cfg() -> dict:
+def load_cfg(strict: bool = False) -> dict:
+    """读配置。
+
+    `strict=False`（默认）容错：文件不存在或坏了都返回 {}，适合「读个默认值」。
+    `strict=True` 在**解析失败**时抛 `ValueError` —— 保存路径必须用 strict，
+    否则用户手改坏 JSON 后一保存，原有字段会被静默丢弃（P2-9）。
+    """
+    if not os.path.isfile(DEFAULTS):
+        return {}
     try:
         with open(DEFAULTS, encoding="utf-8") as f:
             d = json.load(f)
-        return d if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        if strict:
+            raise ValueError(f"配置文件不是合法 JSON：{type(e).__name__}: {e}") from e
         return {}
+    if not isinstance(d, dict):
+        if strict:
+            raise ValueError("配置文件顶层不是对象（应该是 {...}）")
+        return {}
+    return d
 
 
 def save_cfg(nas: str, token: str = "", password: str = "") -> dict:
-    """保存到 apb_defaults.json，**保留其它字段**（不要整体覆盖）。"""
-    d = load_cfg()
+    """保存到 apb_defaults.json，**保留其它字段**（不要整体覆盖）。
+
+    - 原文件是坏 JSON 时：先备份成 `.bak`，再重建，**并告知调用方**
+      （否则用户手改出错后，原有字段会无声消失）
+    - 写完后把权限收紧到 0o600（文件里有明文令牌，P2-10）
+    """
+    backed_up = None
+    try:
+        d = load_cfg(strict=True)
+    except ValueError:
+        # 坏了：备份原文件再重建，绝不静默丢弃
+        try:
+            import time as _t
+            backed_up = DEFAULTS + f".bak.{_t.strftime('%Y%m%d-%H%M%S')}"
+            with open(DEFAULTS, "rb") as _s, open(backed_up, "wb") as _d:
+                _d.write(_s.read())
+        except Exception:  # noqa: BLE001
+            backed_up = None
+        d = {}
     d["nas_url"] = nas.strip()
     d["token"] = token.strip()
     d["password"] = password.strip()
@@ -69,6 +100,14 @@ def save_cfg(nas: str, token: str = "", password: str = "") -> dict:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(d, f, ensure_ascii=False, indent=2)
     os.replace(tmp, DEFAULTS)
+    # 文件里有明文令牌，尽量收紧权限（Windows 上 chmod 基本无效，但不报错）
+    try:
+        os.chmod(DEFAULTS, 0o600)
+    except Exception:  # noqa: BLE001
+        pass
+    if backed_up:
+        d["_backed_up_to"] = backed_up
+        d["_note"] = "原文件不是合法 JSON，已备份后重建"
     return d
 
 

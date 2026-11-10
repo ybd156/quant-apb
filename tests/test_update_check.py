@@ -60,7 +60,50 @@ def urllib_unquote(s: str) -> str:
     return urllib.parse.unquote(s)
 
 
+def test_atomic_swap() -> None:
+    """P1-8：目录替换必须两阶段，中途失败不能两头空。"""
+    import shutil as _sh
+    from qcore.kit_update import _swap_dir, _swap_file
+
+    base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "tmp", "swap_atomic")
+    _sh.rmtree(base, ignore_errors=True)
+    os.makedirs(os.path.join(base, "dst"), exist_ok=True)
+    with open(os.path.join(base, "dst", "a.txt"), "w", encoding="utf-8") as f:
+        f.write("OLD")
+    with open(os.path.join(base, "dst", "only_old.txt"), "w", encoding="utf-8") as f:
+        f.write("GONE")
+    os.makedirs(os.path.join(base, "src"), exist_ok=True)
+    with open(os.path.join(base, "src", "a.txt"), "w", encoding="utf-8") as f:
+        f.write("NEW")
+
+    _swap_dir(os.path.join(base, "src"), os.path.join(base, "dst"))
+    assert open(os.path.join(base, "dst", "a.txt"), encoding="utf-8").read() == "NEW"
+    assert not os.path.exists(os.path.join(base, "dst", "only_old.txt"))
+    assert not os.path.exists(os.path.join(base, "dst.apbnew")), "残留 .apbnew"
+    assert not os.path.exists(os.path.join(base, "dst.apbold")), "残留 .apbold"
+
+    # 失败路径：src 不存在 -> 目标目录必须原样保留
+    with open(os.path.join(base, "dst", "keep.txt"), "w", encoding="utf-8") as f:
+        f.write("KEEP")
+    try:
+        _swap_dir(os.path.join(base, "nope"), os.path.join(base, "dst"))
+        raise AssertionError("不存在的 src 竟然成功")
+    except FileNotFoundError:
+        pass
+    assert os.path.exists(os.path.join(base, "dst", "keep.txt")), "失败后目标目录被破坏"
+    assert open(os.path.join(base, "dst", "a.txt"), encoding="utf-8").read() == "NEW"
+
+    # 单文件
+    with open(os.path.join(base, "s.txt"), "w", encoding="utf-8") as f:
+        f.write("F-NEW")
+    _swap_file(os.path.join(base, "s.txt"), os.path.join(base, "dst", "a.txt"))
+    assert open(os.path.join(base, "dst", "a.txt"), encoding="utf-8").read() == "F-NEW"
+    print("  [PASS] 目录/文件原子替换 + 失败回滚")
+
+
 def main() -> int:
+    test_atomic_swap()
     # ---- 1) 两页：第 1 页全是旧版本，第 2 页才有新版本（正是线上情形）
     # 第 1 页全是旧版本（都 < 0.27），且正好 100 个 —— 模拟 GHCR 的真实返回
     page1 = [f"0.{i}.{j}" for i in range(1, 11) for j in range(5)]
@@ -109,3 +152,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

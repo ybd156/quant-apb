@@ -44,6 +44,11 @@ LOGS = os.path.join(ROOT, "logs")
 LOG_PATH = os.path.join(LOGS, "agent.log")
 STOP_FLAG = os.path.join(LOGS, "agent.stop")
 PID_PATH = os.path.join(LOGS, "agent.pid")
+#: 心跳文件：每轮循环刷新 mtime。
+#: 不用「PID 是否存在」判活 —— PID 会被系统复用，会误报 alive（P2-12）。
+HEART_PATH = os.path.join(LOGS, "agent.heartbeat")
+#: 心跳超过这么久没刷新就认为守护进程已死（秒）
+HEART_TIMEOUT = 180
 STATE_PATH = os.path.join(LOGS, "agent_state.json")
 
 #: 子进程「已更新，请重启我」的退出码
@@ -52,6 +57,8 @@ EXIT_UPDATED = 42
 LOG_MAX_BYTES = 5 * 1024 * 1024
 #: 崩溃重启退避（秒）
 BACKOFF = [10, 20, 40, 80, 160, 300]
+#: 同一个错误连续出现这么多次就判定「这台机器需要人管」，停止重试
+SAME_ERR_LIMIT = 10
 
 
 def _now() -> str:
@@ -75,6 +82,26 @@ def _log(msg: str) -> None:
             f.write(line + "\n")
     except Exception:  # noqa: BLE001
         pass
+
+
+def _beat() -> None:
+    """刷新心跳文件。"""
+    try:
+        os.makedirs(LOGS, exist_ok=True)
+        with open(HEART_PATH, "w", encoding="utf-8") as f:
+            f.write(_now())
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _own_stamp() -> str:
+    """本文件的 mtime+size 指纹，用于检测「自己被更新了」。"""
+    try:
+        p = os.path.abspath(__file__)
+        st = os.stat(p)
+        return f"{int(st.st_mtime)}:{st.st_size}"
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _write_state(d: dict) -> None:
@@ -115,13 +142,33 @@ def run(loop_sec: int = 60, nas: str = "", token: str = "",
     except Exception:  # noqa: BLE001
         pass
 
-    _log(f"daemon start pid={os.getpid()} loop={loop_sec}s nas={nas or '(default)'}")
+    _own = _own_stamp()
+    _log(f"daemon start pid={os.getpid()} loop={loop_sec}s nas={nas or '(default)'} "
+         f"own={_own}")
+    _beat()
     restarts = 0
     idx = 0
+    #: 连续在同一类错误上失败几次后停止重试（P2-11）
+    same_err = 0
+    last_err = None
     while True:
         if os.path.isfile(STOP_FLAG):
             _log("stop flag found -> exit")
             break
+        _beat()
+        # P1-7：守护进程**自己**的文件被 kit_update 覆盖了。
+        # 子进程会拿到新代码，但本进程仍在跑内存里的旧逻辑 ——
+        # 不自我重启的话，以后修 agent_daemon 的 bug 永远不生效。
+        _now_own = _own_stamp()
+        if _own and _now_own and _now_own != _own:
+            _log(f"self updated ({_own} -> {_now_own}) -> execv self-restart")
+            _write_state({"self_restart": True, "at": _now(),
+                          "old": _own, "new": _now_own})
+            try:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            except Exception as e:  # noqa: BLE001
+                _log(f"execv failed: {type(e).__name__}: {str(e)[:100]}")
+                _own = _now_own
         cmd = _child_cmd(loop_sec, nas, token, password)
         _log("spawn: " + " ".join(cmd[:3]) + " ...")
         t0 = time.time()
@@ -143,6 +190,20 @@ def run(loop_sec: int = 60, nas: str = "", token: str = "",
             continue
 
         restarts += 1
+        # P2-11：同一个错误连续出现太多次，说明不是偶发崩溃，是环境问题
+        # （缺依赖、磁盘满、权限）。继续每 5 分钟重试只会刷日志，
+        # 用户永远不知道这台机器已经废了。
+        sig = f"{rc}:{int(alive) // 5}"
+        if sig == last_err:
+            same_err += 1
+        else:
+            same_err = 1
+            last_err = sig
+        if same_err >= SAME_ERR_LIMIT:
+            _log(f"same failure {same_err}x (rc={rc}) -> needs_attention, stop retrying")
+            _write_state({"needs_attention": True, "reason": f"rc={rc} 连续 {same_err} 次",
+                          "restarts": restarts, "at": _now()})
+            break
         if max_restarts and restarts >= max_restarts:
             _log(f"max_restarts={max_restarts} reached -> exit")
             break
@@ -184,13 +245,16 @@ def status() -> dict:
         pid = int(open(PID_PATH, encoding="utf-8").read().strip())
     except Exception:  # noqa: BLE001
         pid = None
+    # 用**心跳**判活，不用 PID：PID 会被复用，os.kill(pid,0) 只能说明
+    # 「这个号有人占着」，可能完全是另一个进程（P2-12）。
     alive = False
-    if pid:
-        try:
-            os.kill(pid, 0)
-            alive = True
-        except Exception:  # noqa: BLE001
-            alive = False
+    heart_age = None
+    try:
+        if os.path.isfile(HEART_PATH):
+            heart_age = time.time() - os.path.getmtime(HEART_PATH)
+            alive = heart_age <= HEART_TIMEOUT
+    except Exception:  # noqa: BLE001
+        alive = False
     st = {}
     try:
         st = json.load(open(STATE_PATH, encoding="utf-8"))
@@ -203,7 +267,9 @@ def status() -> dict:
     except Exception:  # noqa: BLE001
         pass
     return {"ok": True, "pid": pid, "alive": alive,
+            "heartbeat_age_s": round(heart_age, 1) if heart_age is not None else None,
             "stop_requested": os.path.isfile(STOP_FLAG),
+            "needs_attention": bool(st.get("needs_attention")),
             "state": st, "log_tail": log_tail}
 
 
