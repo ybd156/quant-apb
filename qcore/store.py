@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -93,8 +94,28 @@ def _default(o):
 
 
 # ---------------------------------------------------------------- 权重器状态
-def save_weighter(w, path: Optional[str] = None) -> str:
-    path = path or os.path.join(STATE_DIR, "weighter.npz")
+def weighter_path(market: str = "CN", horizon: int = 5,
+                  state_dir: str = STATE_DIR) -> str:
+    """权重器状态的实例化文件名。
+
+    旧实现三处（live.rebuild / live.step_once / pipeline）共用
+    `weighter.npz`，且 `RunConfig.horizon` 与 `WeightConfig.horizon` 从不互相同步
+    —— 于是 `pipeline --horizon 1` 会静默覆盖日更 h=5 循环的状态，
+    而 npz 里的 cfg 仍自称 horizon=5（陷阱 13：多实例共用文件名）。
+    """
+    return os.path.join(state_dir, f"weighter_{str(market).lower()}_h{int(horizon)}.npz")
+
+
+def save_weighter(w, path: Optional[str] = None, market: str = "CN",
+                  horizon: Optional[int] = None) -> str:
+    h = int(horizon if horizon is not None
+            else getattr(getattr(w, "cfg", None), "horizon", 5) or 5)
+    # 顺手把 cfg.horizon 同步成真实周期，避免「文件名 h=1、内容自称 h=5」
+    try:
+        w.cfg.horizon = h
+    except Exception:  # noqa: BLE001
+        pass
+    path = path or weighter_path(market, h)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.savez(path,
              a_g=w.a_g, b_g=w.b_g, E_g=w.E_g, logw_g=w.logw_g, n_g=w.n_g,
@@ -105,9 +126,20 @@ def save_weighter(w, path: Optional[str] = None) -> str:
     return path
 
 
-def load_weighter(path: Optional[str] = None):
+def load_weighter(path: Optional[str] = None, market: str = "CN",
+                  horizon: Optional[int] = None, strict: bool = True):
+    """读权重器状态。按 (market, horizon) 取实例文件，旧 `weighter.npz` 只读兼容。
+
+    `strict=True`（默认）时，若给了 horizon 而状态内的 cfg.horizon 不一致，
+    直接抛错 —— 旧行为是「零报错地拿 h=1 的状态继续跑 h=5」。
+    """
     from .learner import AdaptiveWeighter, WeightConfig
-    path = path or os.path.join(STATE_DIR, "weighter.npz")
+    if path is None:
+        cands = []
+        if horizon is not None:
+            cands.append(weighter_path(market, horizon))
+        cands.append(os.path.join(STATE_DIR, "weighter.npz"))   # 旧文件，只读兼容
+        path = next((c for c in cands if os.path.exists(c)), cands[0])
     if not os.path.exists(path):
         return None
     z = np.load(path, allow_pickle=False)
@@ -119,6 +151,17 @@ def load_weighter(path: Optional[str] = None):
         setattr(w, k, z[k].astype(np.float64 if k != "alarms" else np.int64))
     for k in ("a_r", "b_r", "E_r", "logw_r", "n_r"):
         setattr(w, k, z[k].astype(np.float64))
+    if horizon is not None and int(getattr(cfg, "horizon", -1)) != int(horizon):
+        msg = (f"weighter 周期不一致：{os.path.basename(path)} 内 cfg.horizon="
+               f"{getattr(cfg, 'horizon', None)}，本次要跑 h={horizon}")
+        if os.path.basename(path) == "weighter.npz":
+            # 旧的无标识文件：不猜、不混用，当作「该周期尚无状态」，
+            # 调用方会走 rebuild 路径（可见的失败，而不是静默拿错状态）。
+            print(f"[weighter] {msg} → 视为无状态（请先 rebuild）", file=sys.stderr)
+            return None
+        if strict:
+            raise ValueError(msg + "。拒绝混用（会把 h=1 的记忆喂给 h=5）")
+        print(f"[weighter] {msg}（strict=False，继续）", file=sys.stderr)
     return w
 
 
@@ -145,7 +188,11 @@ def export_ui_bundle(res: dict, p3d, family_of: Optional[Dict[str, str]] = None,
         "as_of": str(pd.Timestamp(dates[-1]).date()),
         "data_from": str(pd.Timestamp(dates[0]).date()),
         "data_to": str(pd.Timestamp(dates[-1]).date()),
-        "n_stocks": int(res["scores"].shape[1]),
+        # res["scores"] 对外是 (N,T)（engine.run_walkforward 已 .T）。
+        # 旧写法 shape[1] 取到的是 T（天数），导致 status.json 的 n_stocks
+        # 恒等于 n_days，UI 首屏把「112 只」显示成「2633 只」（错 23.5 倍）。
+        # 广度是 IR ≈ IC·√BR 的分子，错在这里会直接污染「有多大优势」。
+        "n_stocks": int(len(res.get("codes") or [])),
         "n_signals": int(len(sids)),
         "n_days": int(len(dates)),
         "mode": res["meta"].get("mode", "learned"),
@@ -187,6 +234,15 @@ def export_ui_bundle(res: dict, p3d, family_of: Optional[Dict[str, str]] = None,
             for r in sub.itertuples(index=False)
         ]
 
+    # status.json 有 5 个写入方（本函数、live.rebuild、live.step_once、
+    # pipeline、daily_append）。本函数过去是整体覆盖，会把别人写的
+    # rebuilt_at / last_processed 抹掉 —— 改成读-改-写（AGENTS §7.5 规则二）。
+    _old_status = read_json("status", state_dir, default=None) or {}
+    if isinstance(_old_status, dict):
+        _merged = dict(_old_status)
+        _merged.update(status)
+        status = _merged
+
     paths = {
         "status": write_json("status", status, state_dir),
         "weights": write_json("weights", weights, state_dir),
@@ -208,12 +264,106 @@ def _f(x, nd: int = 6):
         return None
 
 
-def append_ledger(rows: list, year: Optional[int] = None) -> str:
-    """台账只追加：按年存 JSONL，永不回改历史预测。"""
-    import pandas as pd
+def _ledger_key(r: dict, default_h: int = 5):
+    """台账幂等键：(决策日, 代码, 周期)。
+
+    同一决策日对同一只票在同一周期上，只应存在**一个**预测。
+    实测旧台账 47,676 行只有 8,150 个唯一键（5.85×重复），且 8,029 个键
+    挂着 3–9 个互不相同的分数 —— rebuild 每次把最近 90 天整段再追加一遍。
+    没有幂等键，台账无法回答「s 日对 x 股的预测是什么」，命中率也会被
+    最近 90 天加权约 5.8 倍。
+    """
+    as_of = str(r.get("as_of") or "")[:10]
+    code = str(r.get("code") or "")
+    h = r.get("horizon")
+    try:
+        h = int(h) if h is not None else int(default_h)
+    except Exception:
+        h = int(default_h)
+    return (as_of, code, h)
+
+
+def append_ledger(rows: list, year: Optional[int] = None,
+                  horizon: Optional[int] = None, market: str = "CN",
+                  run_id: Optional[str] = None) -> str:
+    """台账只追加：按年存 JSONL，永不回改历史预测。
+
+    相对旧实现的三处修正：
+      1. 幂等：以 (as_of, code, horizon) 为键，已落盘的键不再重复写入。
+      2. 归属：每行补 horizon / market / run_id（AGENTS §7.5 规则一）。
+      3. 裸 NaN 防护：走 _clean + allow_nan=False，与 write_json 一致
+         （旧实现只有 default=_default，python float NaN 会写出非法 JSON）。
+    """
     year = year or datetime.now().year
     path = os.path.join(LEDGER_DIR, f"{year}.jsonl")
+    os.makedirs(LEDGER_DIR, exist_ok=True)
+    dh = int(horizon) if horizon is not None else 5
+    rid = run_id or (f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+                     f"-{os.getpid()}")
+    mkt = str(market or "CN").upper()
+
+    seen = set()
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    seen.add(_ledger_key(json.loads(line), dh))
+                except Exception:
+                    continue
+
+    n_new = n_dup = 0
     with open(path, "a", encoding="utf-8") as f:
         for r in rows:
-            f.write(json.dumps(r, ensure_ascii=False, default=_default) + "\n")
+            rec = dict(r)
+            rec.setdefault("horizon", dh)
+            rec.setdefault("market", mkt)
+            rec.setdefault("run_id", rid)
+            k = _ledger_key(rec, dh)
+            if k in seen:
+                n_dup += 1
+                continue
+            seen.add(k)
+            f.write(json.dumps(_clean(rec), ensure_ascii=False,
+                               default=_default, allow_nan=False) + "\n")
+            n_new += 1
+    if n_dup:
+        print(f"[ledger] appended {n_new}, skipped {n_dup} duplicate key(s)",
+              flush=True)
     return path
+
+
+def compact_ledger(year: Optional[int] = None, out_suffix: str = ".dedup") -> Dict[str, Any]:
+    """生成去重视图，**不修改**原始台账（守 INV-7：历史只追加不改）。
+
+    保留策略：同一键保留**最后一条**（最新一次重算视为当前视图），
+    并写 dup_n = 该键历史出现次数，供审计判断重复是否非随机。
+    """
+    year = year or datetime.now().year
+    src = os.path.join(LEDGER_DIR, f"{year}.jsonl")
+    if not os.path.exists(src):
+        return {"ok": False, "reason": "no_ledger", "path": src}
+    last: Dict[Any, dict] = {}
+    total = bad = 0
+    with open(src, encoding="utf-8") as f:
+        for line in f:
+            total += 1
+            try:
+                r = json.loads(line)
+            except Exception:
+                bad += 1
+                continue
+            k = _ledger_key(r)
+            prev = last.get(k)
+            r["dup_n"] = (prev["dup_n"] + 1) if prev else 1
+            last[k] = r
+    dst = os.path.join(LEDGER_DIR, f"{year}{out_suffix}.jsonl")
+    tmp = dst + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for k in sorted(last):
+            f.write(json.dumps(_clean(last[k]), ensure_ascii=False,
+                               default=_default, allow_nan=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dst)
+    return {"ok": True, "path": dst, "total_rows": total, "bad_lines": bad,
+            "unique_keys": len(last), "duplicate_rows": total - bad - len(last)}

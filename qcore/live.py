@@ -69,14 +69,14 @@ def rebuild(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     cfg = RunConfig(horizon=horizon, warmup=120, record_ledger=True)
     res = run_walkforward(p3d, cfg)
 
-    store.save_weighter(res["weighter"])
+    store.save_weighter(res["weighter"], market=market, horizon=horizon)
     fam = _family_map()
     store.export_ui_bundle(res, p3d, family_of=fam)
 
     led = res.get("ledger")
     if led is not None and len(led):
         recent = led[led["as_of"] >= p3d.dates[-1] - np.timedelta64(90, "D")]
-        store.append_ledger(recent.to_dict("records"))
+        store.append_ledger(recent.to_dict("records"), horizon=horizon, market=market)
 
     st = store.read_json("status", default={}) or {}
     st["last_processed"] = str(pd.Timestamp(p3d.dates[-1]).date())
@@ -122,7 +122,7 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     if t_from >= len(dates):
         return {"ok": True, "skipped": True, "last_processed": last}
 
-    w = store.load_weighter()
+    w = store.load_weighter(horizon=horizon)
     if w is None:
         _log("weighter state missing -> rebuild required")
         return {"ok": False, "reason": "no_weighter"}
@@ -130,7 +130,7 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     cfg = RunConfig(horizon=horizon, warmup=0, start_t=t_from, from_t=t_from,
                     record_ledger=True)
     res = run_walkforward(p3d, cfg, weighter=w)
-    store.save_weighter(w)
+    store.save_weighter(w, horizon=horizon)
 
     # 台账：只追加新产生的预测
     led = res.get("ledger")
@@ -138,7 +138,7 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     if led is not None and len(led):
         new_rows = led[led["as_of"] > pd.Timestamp(last)].to_dict("records")
         if new_rows:
-            store.append_ledger(new_rows)
+            store.append_ledger(new_rows, horizon=horizon)
 
     # UI 产物（用最近 60 天台账 + 当前权重）
     fam = _family_map()

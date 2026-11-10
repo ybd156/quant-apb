@@ -101,15 +101,44 @@ def main() -> int:
 
     df = frames[CODES[0]] if CODES[0] in frames else list(frames.values())[0]
 
+    # 当日会话是否已收盘：最后一根 15:00 才算完整。
+    # 09:30–15:00 之间跑测试，抓到的是「进行中的会话」（可能只有几根），
+    # 这不是缺陷 —— 旧断言直接要求 >=200 根，导致盘中跑必红。
+    _hhmm = df["datetime"].dt.strftime("%H:%M")
+    _complete = bool(len(df)) and _hhmm.iloc[-1] == "15:00"
+
     def t_fetch():
         assert set(["datetime", "open", "close", "high", "low", "volume", "amount"]).issubset(df.columns)
-        assert len(df) >= 200, len(df)
         assert df["datetime"].is_monotonic_increasing
-        hhmm = df["datetime"].dt.strftime("%H:%M")
-        assert hhmm.iloc[0] == "09:31", hhmm.iloc[0]
-        assert hhmm.iloc[-1] == "15:00", hhmm.iloc[-1]
-        return f"{len(df)} bars, {hhmm.iloc[0]}..{hhmm.iloc[-1]}, {len(frames)} codes"
-    check("fetch_minute returns one session (240 bars)", t_fetch, skip_reason=net_err if not frames else None)
+        assert _hhmm.iloc[0] == "09:31", _hhmm.iloc[0]
+        if _complete:
+            assert len(df) >= 200, len(df)
+            assert _hhmm.iloc[-1] == "15:00", _hhmm.iloc[-1]
+            return f"{len(df)} bars, {_hhmm.iloc[0]}..{_hhmm.iloc[-1]}（完整会话）, {len(frames)} codes"
+        # 进行中的会话：只校验契约与单调性，并如实报出根数
+        return (f"{len(df)} bars, {_hhmm.iloc[0]}..{_hhmm.iloc[-1]}"
+                f"（会话进行中，未满 240 根 —— 属正常）")
+    check("fetch_minute 返回会话（完整时 240 根）", t_fetch,
+          skip_reason=net_err if not frames else None)
+
+    # 会话不完整时，下游（信号/截断/记账）需要完整数据，改用合成会话跑逻辑
+    if not _complete:
+        print("  [WARN] 当前会话未收盘 -> 下游改用合成完整会话（逻辑照测，数据非真实）")
+        idx = pd.date_range("2026-11-06 09:31", "2026-11-06 15:00", freq="1min")
+        rng = np.random.default_rng(0)
+        px = 100 * np.cumprod(1 + rng.normal(0, 0.0004, len(idx)))
+        vol = rng.integers(100, 5000, len(idx)).astype(float)
+        # 注入两段放量：否则 i_vol_burst_* 这类「量能突增」信号在纯随机量下
+        # 永远不会触发，会被误判成「死信号」（这是 fixture 的问题，不是信号的问题）
+        vol[60:75] *= 6.0
+        vol[150:170] *= 4.0
+        px[60:75] *= 1.004
+        px[150:170] *= 0.996
+        frames = {"600519": pd.DataFrame({
+            "datetime": idx, "open": px, "close": px,
+            "high": px * 1.0005, "low": px * 0.9995,
+            "volume": vol, "amount": px * vol * 100.0})}
+        df = frames["600519"]
 
     # ---------------- 2. 信号 ----------------
     print("\n[2] intraday_signals")

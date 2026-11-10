@@ -333,9 +333,12 @@ def test_direction_orientation():
 # 10. 预测：signed CAR -> 板块实际预期收益
 # --------------------------------------------------------------------------- #
 def test_predict_sign_and_clock():
-    idx, mr, sr = make_world(n_days=1500, idio=0.004, seed=17)
-    pos = [400 + 60 * i for i in range(12)]
-    dates = event_dates_from(idx, 400, 60, 12)
+    # 样本量必须 >= MIN_TRADES(30)：n<30 一律 insufficient、confidence=0。
+    # 旧 fixture 用 12 个事件，等于在「样本不足」的数据上要求非零置信度。
+    N_EV = 32
+    idx, mr, sr = make_world(n_days=400 + 60 * N_EV + 400, idio=0.004, seed=17)
+    pos = [400 + 60 * i for i in range(N_EV)]
+    dates = event_dates_from(idx, 400, 60, N_EV)
     srd = add_drift(sr, idx, pos, 0.04)
     evs = mk_events(dates, sectors=("SEC",), direction=1)
     tab = impact_factor(evs, {"SEC": srd}, mr, horizons=(1, 5, 20))
@@ -346,7 +349,7 @@ def test_predict_sign_and_clock():
     assert s0["expected_car"] is not None
     assert abs(s0["expected_car"] - s0["expected_car_signed"]) < 1e-12   # d=+1
     assert 0.0 < s0["confidence"] <= 1.0
-    assert s0["n"] == 12
+    assert s0["n"] == N_EV
     assert p["catalyst_clock"]["peak_h"] in (1, 5, 20)
     assert set(p["catalyst_clock"]["curve"]) == {1, 5, 20}
     # 反向事件：expected_car 符号必须翻
@@ -360,8 +363,25 @@ def test_predict_sign_and_clock():
 # --------------------------------------------------------------------------- #
 # 11. 持久化：JSONL 追加 + 读回 + 坏行容错
 # --------------------------------------------------------------------------- #
+def _safe_tmpdir(prefix: str) -> str:
+    """系统 temp 不可写（沙箱 / 受限 Windows）时回落到仓库内 tmp/。"""
+    try:
+        d = tempfile.mkdtemp(prefix=prefix)
+        probe = os.path.join(d, ".probe")
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.unlink(probe)
+        return d
+    except Exception:
+        base = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tmp")
+        os.makedirs(base, exist_ok=True)
+        d = os.path.join(base, prefix + str(os.getpid()))
+        os.makedirs(d, exist_ok=True)
+        return d
+
+
 def test_save_load_roundtrip():
-    tmp = tempfile.mkdtemp(prefix="evtest_")
+    tmp = _safe_tmpdir("evtest_")
     try:
         path = os.path.join(tmp, "events.jsonl")
         assert load_events(path) == []                 # 不存在 -> []

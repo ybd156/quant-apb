@@ -94,6 +94,13 @@ CAPITAL_LIMITS: Dict[str, Tuple[float, float]] = {
 }
 INT_FIELDS = {"top_k", "hold"}
 
+# 每市场的**成本物理下限**（bps，往返）。低于此值不是"激进假设"，是不可能。
+#   CN：法定+佣金下限 = 3.141(买) + 8.141(卖) = 11.28 bps，还没算价差。
+#   实测事故：account.json 曾出现 cost_bps=10.0，于是同一次 pipeline 里
+#   回测用 19.28bps、模拟盘用 10.0bps —— 同一次输出两个成本基准。
+#   港股双边 0.1% 印花税，下限更高；美股无印花税，给 0。
+COST_FLOOR_BPS: Dict[str, float] = {"CN": 11.28, "US": 0.0, "HK": 11.0}
+
 
 def _blank() -> Dict:
     return {"default_market": "CN",
@@ -155,6 +162,13 @@ def load(market: Optional[str] = None) -> Dict:
         else:
             cur["initial_capital"] = float(v)
         cur["currency"] = DEFAULTS[m]["currency"]
+        # 成本物理下限：低于法定下限直接回落到默认值，并留下审计痕迹。
+        # 静默放行一个不可能的 10bps，会让回测与模拟盘站在两个基准上。
+        floor = float(COST_FLOOR_BPS.get(m, 0.0))
+        if float(cur.get("cost_bps") or 0.0) < floor:
+            cur["cost_bps_clamped_from"] = float(cur.get("cost_bps") or 0.0)
+            cur["cost_bps"] = float(DEFAULTS[m]["cost_bps"])
+            cur["cost_bps_floor"] = floor
 
     if market is None:
         return cfg

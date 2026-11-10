@@ -258,8 +258,12 @@ def summarize_edge(ic_series: np.ndarray, dates: np.ndarray, horizon: int = 5,
     lags = max(horizon - 1, 0)
     base = mean_tstat(x, lags)
     boot = stationary_bootstrap_ci(x, avg_block=max(horizon, 10))
-    sr = sharpe_ratio(x)                     # 把 IC 当收益序列看（IC 的 SR）
-    dsr = deflated_sharpe(x.mean(), x.size, n_trials)
+    # DSR 的 sr 参数必须是「每期 Sharpe」= mean/std。
+    # 旧实现传 x.mean()（IC 均值 ≈ -0.005），与 sr0（Sharpe 单位）量纲不一致，
+    # 会把 DSR 压在地板值上，使多重检验门禁在构造上不可通过。
+    _sd = float(x.std(ddof=1)) if x.size > 2 else 0.0
+    sr_pp = float(x.mean() / _sd) if _sd > 0 else float("nan")
+    dsr = deflated_sharpe(sr_pp, x.size, n_trials)
     mon = rolling_edge_monitor(x, MonitorConfig(lags=lags))
     return {
         "ic_mean": base["mean"], "hac_se": base["se"], "t": base["t"], "p": base["p"],
@@ -267,6 +271,7 @@ def summarize_edge(ic_series: np.ndarray, dates: np.ndarray, horizon: int = 5,
         "boot_ci95": [boot.get("lo"), boot.get("hi")],
         "p_positive_boot": boot.get("p_positive"),
         "n_obs": base["n"], "effective_n": int(base["n"] / max(horizon, 1)),
+        "sharpe_per_period": sr_pp,
         "deflated_sharpe": dsr,
         "frac_time_active": mon["frac_active"], "final_state": mon["final_state"],
         "verdict": _verdict(base, dsr, mon),

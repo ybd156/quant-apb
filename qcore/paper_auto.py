@@ -217,6 +217,23 @@ def default_top_k(horizon: int, market: str = "CN") -> int:
     return base
 
 
+def _infer_market(code: str) -> str:
+    """从代码形态反推市场。认不出就返回空串（不猜）。
+
+    CN: 6 位纯数字；HK: 以 .HK 结尾或 5 位数字；US: 纯字母（可带 . / -）
+    """
+    c = str(code or "").strip().upper()
+    if not c:
+        return ""
+    if c.endswith(".HK"):
+        return "HK"
+    if c.isdigit():
+        return "CN" if len(c) == 6 else ("HK" if len(c) == 5 else "CN")
+    if c.replace(".", "").replace("-", "").isalpha():
+        return "US"
+    return ""
+
+
 def rebalance(picks: Optional[Dict] = None, market: str = "CN",
               top_k: Optional[int] = None, dry_run: bool = False,
               verbose: bool = True, horizon: int = 1,
@@ -282,14 +299,23 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
                 "hint": f"{fn if picks is None else 'picks'} 属于 {_pm} 市场，"
                         f"不能给 {market} 账户下单。"
                         f"该市场需要自己的预测（先训练该市场的模型）"}
-    # picks 里没写 market 时，用代码形态反查：
-    # 全是 6 位纯数字 -> A股；带 .HK -> 港股；纯字母 -> 美股
+    # picks 里没写 market 时，用代码形态反查 —— 必须**三个市场都覆盖**。
+    # 旧实现只拦「数字代码给非 A 股账户」，反方向（美股 ticker 给港股账户）
+    # 直接放行：AAPL 不是数字 → 不拦 → 跨市场串仓。
     if not _pm and rows:
         _c0 = str(rows[0].get("code") or "")
-        if _c0.isdigit() and market != "CN":
+        _inferred = _infer_market(_c0)
+        if _inferred and _inferred != market:
             return {"ok": False, "reason": "picks_market_mismatch",
-                    "horizon": h, "picks_market": "CN", "account_market": market,
-                    "hint": f"picks 里是 A 股代码（{_c0}），不能给 {market} 账户下单"}
+                    "horizon": h, "picks_market": _inferred, "account_market": market,
+                    "hint": (f"picks 里是 {_inferred} 代码（{_c0}），"
+                             f"不能给 {market} 账户下单；该市场需要自己的预测")}
+        # 混装（一行 A 股一行美股）也必须拒 —— 只看第一行会漏
+        _mixed = {_infer_market(str(r.get("code") or "")) for r in rows} - {"", _inferred}
+        if _mixed:
+            return {"ok": False, "reason": "picks_mixed_markets",
+                    "horizon": h, "markets": sorted(_mixed | {_inferred}),
+                    "hint": "同一份 picks 里混了多个市场的代码，拒绝下单"}
 
     acc = load_account(market, h)
     if not acc:

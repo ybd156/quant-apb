@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import re
 import sys
@@ -205,6 +206,35 @@ def _receiver_start(s, dot_pos):
     return j + 1
 
 
+WAIVER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "waivers.json")
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_FILE_WAIVERS = None          # relpath -> reason
+
+
+def _file_waivers() -> dict:
+    """读 audit/waivers.json（文件级豁免）。
+
+    行内 `# leak-scan: ok <理由>` 只能豁免具体那一行；实测 MEDIUM 有 700+ 条、
+    散在 40 个文件，逐行加注释不现实。所以另有一条**可复核的机械规则**：
+    不在打分/建模链路闭包内的文件，其全样本统计只影响事后指标，按文件豁免。
+    规则与生成脚本见 audit/gen_waivers.py（可重复执行、可 --check）。
+    """
+    global _FILE_WAIVERS
+    if _FILE_WAIVERS is not None:
+        return _FILE_WAIVERS
+    _FILE_WAIVERS = {}
+    try:
+        with open(WAIVER_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        for w in (d.get("waivers") or []):
+            p = str(w.get("path") or "").replace("\\", "/")
+            if p:
+                _FILE_WAIVERS[p] = str(w.get("reason") or "file waiver")
+    except Exception:
+        pass
+    return _FILE_WAIVERS
+
+
 class Finding:
     __slots__ = ("path", "line", "sev", "reason", "code", "waived", "waiver")
 
@@ -254,10 +284,15 @@ def scan_file(path: str):
         def add(sev, reason, pos, line=None):
             ln = _line_of(spans, pos) if line is None else line
             waived = ln in waiver_by_line
+            waiver_txt = waiver_by_line.get(ln, "")
+            if not waived:
+                rel = os.path.relpath(path, _ROOT).replace("\\", "/")
+                fr = _file_waivers().get(rel)
+                if fr:
+                    waived, waiver_txt = True, f"[file] {fr}"
             findings.append(
                 Finding(path, ln + 1, sev, reason,
-                        raw_lines[ln].rstrip(), waived,
-                        waiver_by_line.get(ln, ""))
+                        raw_lines[ln].rstrip(), waived, waiver_txt)
             )
 
         # ---------- HIGH ----------
@@ -338,6 +373,8 @@ def main(argv=None):
 
     active = [x for x in all_findings if not x.waived]
     waived = [x for x in all_findings if x.waived]
+    waived_file = [x for x in waived if str(x.waiver).startswith("[file]")]
+    waived_line = [x for x in waived if not str(x.waiver).startswith("[file]")]
     highs = [x for x in active if x.sev == "HIGH"]
     meds = [x for x in active if x.sev == "MEDIUM"]
     infos = [x for x in active if x.sev == "INFO"]
@@ -357,7 +394,7 @@ def main(argv=None):
 
     print("-" * 78)
     print(f"RESULT: HIGH={len(highs)}  MEDIUM={len(meds)}  INFO={len(infos)}  "
-          f"WAIVED={len(waived)}")
+          f"WAIVED={len(waived)}（行内 {len(waived_line)} / 文件级 {len(waived_file)}）")
     if highs:
         print("VERDICT: FAIL -- structural look-ahead found. Build must not pass.")
         return 1

@@ -55,6 +55,9 @@ HORIZONS: Dict[int, Dict] = {
 DEFAULT_HORIZON = 1
 
 # 各市场往返成本（bps），来自 qcore/costs.py 实测
+# 已弃用：请走 qcore.costs.effective_cost_bps()（唯一真源）。
+# 保留这个字典只为向后兼容老调用方；数值必须与 costs.MARKETS 一致，
+# 否则同一次输出会出现两套成本（历史上 costs.py / fees.py / 这里各有一份）。
 ROUND_TRIP_BPS = {"CN": 19.28, "US": 3.28, "HK": 38.17}
 
 
@@ -72,19 +75,28 @@ def supports(h: int, market: str = "CN") -> bool:
     return m in ((HORIZONS.get(h) or {}).get("markets") or [])
 
 
-def annual_cost_drag(h: int, market: str = "CN", turnover: float = 0.8) -> float:
+def annual_cost_drag(h: int, market: str = "CN", turnover: float = 0.7) -> float:
     """
     年化成本拖累（小数）。turnover = 每次调仓换手比例。
     持 h 天 → 一年调仓 250/h 次。
+
+    turnover 默认值从 0.8 改为 **0.7**，与 `costs.annual_cost_drag(..., 0.7, ...)`
+    对齐 —— 同一个项目里同一个量用两个换手假设，会让 UI 显示 7.71%/年、
+    报告显示 6.80%/年，读者无从判断哪个是真的。
+    往返成本也改为走 `costs.effective_cost_bps()`（唯一真源）。
     """
-    bps = ROUND_TRIP_BPS.get(str(market).upper(), 19.28)
-    n = 250.0 / max(int(h), 1)
+    try:
+        from .costs import effective_cost_bps
+        bps = float(effective_cost_bps(str(market).upper()))
+    except Exception:  # noqa: BLE001
+        bps = ROUND_TRIP_BPS.get(str(market).upper(), 19.28)
+    n = 252.0 / max(int(h), 1)      # 与 costs.annual_cost_drag 的 252 对齐
     return n * turnover * bps / 1e4
 
 
 def expected_net_annual(ic: float, h: int, market: str = "CN",
                         n_stocks: int = 300, rho: float = 0.30,
-                        turnover: float = 0.8) -> Dict:
+                        turnover: float = 0.7) -> Dict:
     """
     用 Grinold 基本法则估算扣成本后的年化超额。
 
@@ -134,7 +146,7 @@ if __name__ == "__main__":
 
     print("\n=== 成本拖累随周期变化（CN，换手 80%）===")
     for h in (1, 3, 5, 10, 15):
-        c = annual_cost_drag(h, "CN", 0.8)
+        c = annual_cost_drag(h, "CN", 0.7)
         print(f"  h={h:<3} 年换手 {250/h:>6.1f} 次 → 成本拖累 {c*100:>6.2f}%")
 
     print("\n=== 假设各周期 IC 都是 0.03，扣成本后还剩多少 ===")

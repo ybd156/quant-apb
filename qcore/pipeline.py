@@ -171,12 +171,22 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     if _market not in ("CN", "US", "HK"):
         _market = "CN"
     _acct = AC.load(_market)
+    # 成本口径统一：回测与模拟盘必须站在同一个基准上。
+    # 实测事故：account.json 写 cost_bps=10.0（低于 A 股法定下限 11.28bps），
+    # 于是同一次输出里回测用 19.28bps、模拟盘用 10.0bps，差 9.28bps/期。
+    _acct_cost = float(_acct["cost_bps"])
+    # 容差 0.05bps：账户里存的是四舍五入后的 19.28，costs 算出 19.2815，
+    # 用 1e-6 比会把「同一个口径」误报成不一致（自造的噪音告警）。
+    if abs(_acct_cost - float(cost_bps)) > 0.05:
+        print(f"      WARN cost basis mismatch: account={_acct_cost:.2f}bps "
+              f"vs costs.round_trip={float(cost_bps):.2f}bps -> 用后者（唯一真源）",
+              flush=True)
     print(f"      account[{_market}]: 初始资金 {_acct['initial_capital']:,.0f} "
           f"{_acct.get('currency','')} / 持仓 {_acct['top_k']} / "
-          f"单票上限 {_acct['max_weight']:.0%} / 成本 {_acct['cost_bps']:.2f}bps", flush=True)
+          f"单票上限 {_acct['max_weight']:.0%} / 成本 {float(cost_bps):.2f}bps", flush=True)
     sim = simulate(res["scores_TN"], p3d.OPEN, p3d.CLOSE, p3d.VALID, p3d.dates,
                    PaperConfig(top_k=int(_acct["top_k"]), hold=horizon,
-                               cost_bps=float(_acct["cost_bps"]),
+                               cost_bps=float(cost_bps),
                                initial=float(_acct["initial_capital"])),
                    start_t=cfg.warmup)
     lt = load_live_trades()
@@ -324,9 +334,30 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
 
     store.write_json("performance", _san(perf))
 
+    # 成本口径落盘：/api/horizons 过去在**请求期**现算 annual_cost_drag，
+    # 那是 UI 层在做计算（违反 INV-8），且与 performance.costs 两条来源。
+    # 改成 qcore 一次算好、写进 costs.json，server 只读。
+    try:
+        from . import horizons as HZ
+        store.write_json("costs", {
+            "market": market,
+            "round_trip_bps": round(float(cost_bps), 4),
+            "buy_bps": round(float(rt["buy_bps"]), 4),
+            "sell_bps": round(float(rt["sell_bps"]), 4),
+            "annual_drag_pct": {str(h): round(HZ.annual_cost_drag(int(h), market) * 100, 2)
+                                for h in (1, 3, 5, 10, 15, 20)},
+            "turnover_assumption": 0.8,
+            "verified_on": (perf.get("costs") or {}).get("verified_on"),
+            "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "note": "annual_drag_pct = 250/h × 换手0.8 × 往返bps；由 qcore 计算，UI 只读",
+        })
+    except Exception as _e:  # noqa: BLE001
+        print(f"      costs.json skipped: {_e}", flush=True)
+
     led = res.get("ledger")
     if led is not None and len(led):
-        store.append_ledger(led[led["as_of"] >= p3d.dates[-1] - np.timedelta64(90, "D")].to_dict("records"))
+        store.append_ledger(led[led["as_of"] >= p3d.dates[-1] - np.timedelta64(90, "D")].to_dict("records"),
+                        horizon=horizon, market=market)
 
     # 记录主台账属于哪个周期 —— 否则下游无法判断
     # 「已对账」该归到 h=1 还是 h=5，只能靠猜。
@@ -341,7 +372,7 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     st["last_processed"] = str(pd.Timestamp(p3d.dates[-1]).date())
     st["rebuilt_at"] = datetime.now().isoformat(timespec="seconds")
     store.write_json("status", st)
-    store.save_weighter(res["weighter"])
+    store.save_weighter(res["weighter"], market=market, horizon=horizon)
 
     out = {"ok": True, "seconds": round(time.time() - t0, 1),
            "shape": [int(T), int(N), int(S)], "metrics": mets, "backtest": perf["backtest"],

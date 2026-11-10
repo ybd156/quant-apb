@@ -37,12 +37,52 @@ jobs:
           python -m tests.test_signals
           python -m tests.test_metrics
           python -m tests.test_events
+          python -m tests.test_info
+          python -m tests.test_us_data
+          python -m tests.test_intraday
+
+      - name: 接线层回归（台账幂等 / 朝向 / DSR 单位）
+        run: |
+          python -m tests.test_store_ledger
+          python -m tests.test_dsr_units
+
+      - name: 检查器负控（注入违规必须 FAIL）
+        run: python -m tests.test_invariants_negative
+
+      - name: 增量=批量 parity（无本地行情时自动 SKIP）
+        run: python -m tests.test_incremental_parity
+
+      - name: Alpha158 因子自检（截断不变性 / 未来扰动 / 朴素对拍）
+        run: python -m qcore.alpha158
 
       - name: 无未来函数检验（核心不变量）
         run: python tests/test_no_lookahead.py
 
+      # 不加 `|| true`：HIGH>0 时脚本返回 1，必须让 CI 红。
+      # （MEDIUM 属评估层统计，需人工签收；用 --strict 才会阻塞。）
       - name: 泄漏静态扫描
-        run: python audit/leak_scan.py || true
+        run: python audit/leak_scan.py
+
+      - name: 不变量自检
+        run: python -m qcore.invariants
+
+      # 到期判断必须有人结算：有 overdue 且无自动口径 → 非零退出，CI 变红。
+      # 这是「7 条判断长期 0 结算」的机制化修复（不靠人记得）。
+      - name: 判断台账到期结算
+        run: python -m qcore.claims settle
+
+      # 豁免清单必须与当前代码一致：代码变了而清单没刷新 → 红，
+      # 防止「704 条 MEDIUM 里 608 条从没人看过」那种积压悄悄复发。
+      - name: 泄漏豁免清单新鲜度
+        run: python -m audit.gen_waivers --check
+
+      # 两个探针：CI 里没有本地行情 → 自动 SKIP（退出 0），不会误伤。
+      # 有行情时会真的判定「复权口径 / 池是否在换人」。
+      - name: 探针 · 复权口径与生存者偏差
+        run: |
+          python -m audit.basis_probe --codes 40
+          python -m audit.basis_ic --codes 60
+          python -m audit.pool_probe --codes 300
 
       - name: 导入自检
         run: python -c "import qcore, qcore.pipeline, qcore.live, qcore.brief, webui.server; print('import ok', qcore.__version__)"

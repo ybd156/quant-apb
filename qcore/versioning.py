@@ -48,6 +48,22 @@ CURRENT = os.path.join(MODEL_DIR, "current.json")
 MODEL_PATH = os.path.join(MODEL_DIR, "gbdt.pkl")
 META_PATH = os.path.join(MODEL_DIR, "meta.json")
 
+
+def paths(horizon: Optional[int] = None) -> tuple:
+    """按周期实例化的模型路径。
+
+    h=1 沿用 `gbdt.pkl` / `meta.json` / `current.json`（向后兼容）；
+    h≠1 用 `gbdt_h{h}.pkl` / `meta_h{h}.json` / `current_h{h}.json`
+    —— 与 `live_model._paths(h)`、`data/model/meta_h5.json` 的既有约定对齐。
+    旧实现 save() 没有 horizon 参数，无论训哪个周期都覆盖 h=1 槽位（陷阱 13）。
+    """
+    h = int(horizon or 1)
+    if h == 1:
+        return MODEL_PATH, META_PATH, CURRENT
+    return (os.path.join(MODEL_DIR, f"gbdt_h{h}.pkl"),
+            os.path.join(MODEL_DIR, f"meta_h{h}.json"),
+            os.path.join(MODEL_DIR, f"current_h{h}.json"))
+
 KEEP = 12
 
 
@@ -69,32 +85,37 @@ def _atomic_json(path: str, obj) -> None:
     os.replace(tmp, path)
 
 
-def save(model, meta: Dict, tag: str = "") -> Dict:
+def save(model, meta: Dict, tag: str = "", horizon: Optional[int] = None) -> Dict:
     """
     保存模型：写当前生效文件 + 存一份带时间戳快照 + 更新 current.json。
     返回 {"version","path","meta"}。
+
+    horizon 缺省时从 meta["horizon"] 取，再缺省为 1。**不再静默覆盖 h=1 槽位。**
     """
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(VER_DIR, exist_ok=True)
+    h = int(horizon or (meta or {}).get("horizon") or 1)
+    model_path, meta_path, cur_path = paths(h)
     ver = _stamp() + (f"-{tag}" if tag else "")
 
     # 1) 当前生效
-    with open(MODEL_PATH, "wb") as f:
+    with open(model_path, "wb") as f:
         pickle.dump(model, f, protocol=4)
 
     m = dict(meta or {})
     m["version"] = ver
+    m["horizon"] = h
     m["saved_at"] = _now()
-    _atomic_json(META_PATH, m)
+    _atomic_json(meta_path, m)
 
-    # 2) 快照
-    snap = os.path.join(VER_DIR, f"gbdt_{ver}.pkl")
-    shutil.copy2(MODEL_PATH, snap)
-    _atomic_json(os.path.join(VER_DIR, f"gbdt_{ver}.meta.json"), m)
+    # 2) 快照（文件名带周期，避免 h=1 与 h=5 的快照互相覆盖）
+    snap = os.path.join(VER_DIR, f"gbdt_h{h}_{ver}.pkl")
+    shutil.copy2(model_path, snap)
+    _atomic_json(os.path.join(VER_DIR, f"gbdt_h{h}_{ver}.meta.json"), m)
 
     # 3) 指针
-    _atomic_json(CURRENT, {"version": ver, "saved_at": m["saved_at"],
-                           "file": os.path.basename(snap)})
+    _atomic_json(cur_path, {"version": ver, "horizon": h, "saved_at": m["saved_at"],
+                            "file": os.path.basename(snap)})
     prune(KEEP)
     return {"version": ver, "path": snap, "meta": m}
 
@@ -106,15 +127,24 @@ def list_versions() -> List[Dict]:
     for fn in sorted(os.listdir(VER_DIR)):
         if not fn.endswith(".pkl"):
             continue
-        ver = fn[len("gbdt_"):-len(".pkl")]
+        # 兼容两种快照名：gbdt_{ver}.pkl（旧，h=1）与 gbdt_h{h}_{ver}.pkl（新）
+        hz = 1
+        body = fn[len("gbdt_"):-len(".pkl")]
+        if body.startswith("h"):
+            head, _, rest = body.partition("_")
+            if head[1:].isdigit() and rest:
+                hz, body = int(head[1:]), rest
+        ver = body
         mp = os.path.join(VER_DIR, f"gbdt_{ver}.meta.json")
+        if hz != 1:
+            mp = os.path.join(VER_DIR, f"gbdt_h{hz}_{ver}.meta.json")
         meta = {}
         try:
             with open(mp, encoding="utf-8") as f:
                 meta = json.load(f)
         except Exception:
             pass
-        out.append({"version": ver, "file": fn,
+        out.append({"version": ver, "horizon": hz, "file": fn,
                     "size_mb": round(os.path.getsize(os.path.join(VER_DIR, fn)) / 1e6, 2),
                     "saved_at": meta.get("saved_at"),
                     "ic": meta.get("ic"), "sharpe": meta.get("sharpe"),
@@ -123,39 +153,49 @@ def list_versions() -> List[Dict]:
     return sorted(out, key=lambda x: x["version"], reverse=True)
 
 
-def current_version() -> Optional[str]:
+def current_version(horizon: Optional[int] = None) -> Optional[str]:
     try:
-        with open(CURRENT, encoding="utf-8") as f:
+        with open(paths(horizon)[2], encoding="utf-8") as f:
             return json.load(f).get("version")
     except Exception:
         return None
 
 
-def rollback(version: str) -> Dict:
+def rollback(version: str, horizon: Optional[int] = None) -> Dict:
     """
     回滚到指定版本。回滚前先把当前模型另存一份，所以回滚本身也可回滚。
     """
+    model_path, meta_path, _cur = paths(horizon)
     src = os.path.join(VER_DIR, f"gbdt_{version}.pkl")
+    if not os.path.isfile(src):
+        # 新版快照文件名带周期：gbdt_h{h}_{ver}.pkl
+        for h_try in (horizon, 1, 5, 10, 20, 3, 15):
+            if h_try is None:
+                continue
+            cand = os.path.join(VER_DIR, f"gbdt_h{int(h_try)}_{version}.pkl")
+            if os.path.isfile(cand):
+                src = cand
+                break
     if not os.path.isfile(src):
         avail = [v["version"] for v in list_versions()[:5]]
         return {"ok": False, "reason": "version_not_found", "version": version,
                 "available": avail}
-    cur = current_version()
-    if cur and os.path.isfile(MODEL_PATH):
+    cur = current_version(horizon)
+    if cur and os.path.isfile(model_path):
         # 备份当前
         try:
-            with open(MODEL_PATH, "rb") as f:
+            with open(model_path, "rb") as f:
                 m = pickle.load(f)
             meta = {}
             try:
-                with open(META_PATH, encoding="utf-8") as f:
+                with open(meta_path, encoding="utf-8") as f:
                     meta = json.load(f)
             except Exception:
                 pass
-            save(m, meta, tag="before-rollback")
+            save(m, meta, tag="before-rollback", horizon=horizon)
         except Exception:
             pass
-    shutil.copy2(src, MODEL_PATH)
+    shutil.copy2(src, model_path)
     mp = os.path.join(VER_DIR, f"gbdt_{version}.meta.json")
     meta = {}
     try:
@@ -278,6 +318,6 @@ def summary() -> Dict:
 if __name__ == "__main__":
     import json
     print(json.dumps(summary(), ensure_ascii=False, indent=1))
-    if os.path.isfile(MODEL_PATH):
+    if os.path.isfile(paths()[0]):
         r = backup()
         print("\n备份:", json.dumps(r, ensure_ascii=False))

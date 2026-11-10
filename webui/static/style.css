@@ -67,7 +67,7 @@ html[data-theme="dark"] {
   --line-soft: #1a2536;
   --text: #e8eef6;
   --text-2: #a5b4c8;
-  --text-3: #6b7f96;
+  --text-3: #7b8ca1;   /* 4.25:1 -> 5.09:1 (card) / 3.98:1 -> 4.77:1 (card-2)，达 WCAG AA */
   --hover: rgba(255, 255, 255, .045);
   --input: #0d1622;
   --track: #16202c;
@@ -85,7 +85,7 @@ html[data-theme="light"] {
   --line-soft: #e9eef6;
   --text: #0f1b2d;
   --text-2: #4a5b70;
-  --text-3: #7c8ba1;
+  --text-3: #5f6d80;   /* 3.46:1 -> 5.27:1 (white) / 3.22:1 -> 4.90:1 (bg)，达 WCAG AA */
   --hover: rgba(15, 27, 45, .04);
   --input: #f8fafd;
   --track: #eef2f8;
@@ -1053,6 +1053,11 @@ select { cursor: pointer; }
   color: var(--text-1, #d5dae3); font-size: 14px; font-variant-numeric: tabular-nums;
   text-transform: uppercase; }
 .ck-input:focus { outline: none; border-color: #4a7dff; background: rgba(74,125,255,.08); }
+
+/* 键盘可达性：鼠标点击不显示，Tab 聚焦必须可见。
+   原有 3 处 outline:none 把焦点环也一起抹掉了。 */
+:focus-visible { outline: 2px solid var(--brand, #4a7dff); outline-offset: 2px; }
+.ck-input:focus-visible, .fee-inp:focus-visible { outline: 2px solid var(--brand, #4a7dff); }
 
 .quote-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
 .quote-price { font-size: 32px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.5px; }

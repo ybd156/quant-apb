@@ -63,6 +63,10 @@ STATE_FILES = {
     "market": "market.json",
 }
 LIVE_TRADES_FILE = "live_trades.jsonl"
+# 主预测台账目录（qcore/store.py 的 LEDGER_DIR 写这里）。
+# 过去这份 14MB / 47k 行的台账**没有任何读取方** —— 只写不读，
+# 于是 5.85× 重复写入无人发现。
+LEDGER_DIR: Path = PROJECT_ROOT / "data" / "pred_ledger"
 
 # 可选文件（缺失不算错误，只是对应页面显示“未就绪”）
 OPTIONAL_FILES = {
@@ -86,6 +90,7 @@ DEFAULT_VERSION = "0.0.0"
 # 导致 /api/model/import 和 /api/sync/push **从来没成功过**（400）。
 # 16MB 足够放一个完整模型包（250 树约 260KB，base64 后 350KB，余量很大）。
 MAX_BODY_BYTES = 16 * 1024 * 1024
+_LEDGER_COUNT_CACHE: dict = {}
 MAX_TOP = 200
 MAX_DAYS = 500
 
@@ -724,6 +729,10 @@ class ApiHandler(BaseHTTPRequestHandler):
                              "n_display_note": "live 台账按周期收窄展示，"
                                                "评估样本数见 n_display"})
 
+        src = str((query.get("source") or ["replay"])[0] or "replay").lower()
+        if src == "file":
+            return self._api_ledger_file(query)
+
         data, sent = self._load_or_not_ready("ledger")
         if sent is not None:
             return sent
@@ -742,6 +751,92 @@ class ApiHandler(BaseHTTPRequestHandler):
                          "window_truncated": True,
                          "note": "回放台账（walk-forward）只保留最近 60 天；"
                                  "带 ?horizon=N 可看实时台账"})
+
+    def _api_ledger_file(self, query):
+        """直读主台账 data/pred_ledger/{year}.jsonl（只读、分页、带总数）。
+
+        ?source=file&year=2026&dedup=1&limit=200&offset=0
+          dedup=1（默认）：优先读 compact_ledger 生成的 {year}.dedup.jsonl
+                           （每个 (as_of, code, horizon) 只保留最后一条）；
+                           文件不存在时回落到主台账并标注 dedup=false。
+        返回 total_records（所选文件行数）、total_deduped（主台账唯一键数）、
+        has_more、以及窗口说明 —— 列表被截断时必须让用户知道总量（陷阱 16）。
+        """
+        import json as _json
+
+        def _q(name, default=None):
+            v = query.get(name)
+            return (v[0] if v else default)
+
+        try:
+            year = int(_q("year") or 0) or _dt.datetime.now().year
+        except (TypeError, ValueError):
+            return self._fail("bad_year", 400, got=_q("year"))
+        try:
+            # 注意：_clamp_int 的 raw 形参要的是 query 里的**列表**
+            # （它内部做 str(raw[0])）。传标量会只取首字符：
+            # offset="100" 会被解析成 1 —— 分页静默错位。
+            limit = _clamp_int(query.get("limit"), 200, 1, 2000)
+            offset = _clamp_int(query.get("offset"), 0, 0, 10_000_000)
+        except (TypeError, ValueError):
+            return self._fail("bad_paging", 400)
+
+        want_dedup = str(_q("dedup", "1")).lower() not in ("0", "false", "no")
+        main = LEDGER_DIR / f"{year}.jsonl"
+        dedup = LEDGER_DIR / f"{year}.dedup.jsonl"
+        use_dedup = bool(want_dedup and dedup.is_file())
+        path = dedup if use_dedup else main
+        if not path.is_file():
+            return self._fail("not_ready", 200,
+                              detail=f"缺 data/pred_ledger/{path.name}",
+                              hint="先跑 python -m qcore.pipeline 或 qcore.live --once")
+
+        # 计数缓存：47k 行扫描约 0.2s，按 (path, mtime, size) 缓存 60s
+        cache_key = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        counts = _LEDGER_COUNT_CACHE.get(cache_key)
+        if counts is None:
+            n_rows = 0
+            keys = set()
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    n_rows += 1
+                    try:
+                        r = _json.loads(line)
+                    except Exception:
+                        continue
+                    if r.get("as_of") is not None and r.get("code") is not None:
+                        keys.add((str(r.get("as_of"))[:10], str(r.get("code")),
+                                  r.get("horizon")))
+            # 唯一键数：读去重视图时等于行数；读主台账时它就是"真实预测数"，
+            # 与 total_records 的差即历史重复量 —— 让重复率在 UI 上可见。
+            counts = {"total_records": n_rows, "total_deduped": len(keys)}
+            _LEDGER_COUNT_CACHE.clear()
+            _LEDGER_COUNT_CACHE[cache_key] = counts
+
+        rows = []
+        with open(path, encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i < offset:
+                    continue
+                if len(rows) >= limit:
+                    break
+                try:
+                    r = _json.loads(line)
+                except Exception:
+                    continue
+                rows.append(r)
+
+        total = counts["total_records"]
+        return self._ok({
+            "rows": rows, "n": len(rows), "source": "file",
+            "file": path.name, "dedup": use_dedup,
+            "offset": offset, "limit": limit,
+            "total_records": total,
+            "total_deduped": counts["total_deduped"],
+            "has_more": offset + len(rows) < total,
+            "n_display_note": (f"已显示第 {offset + 1}–{offset + len(rows)} 行 / 共 {total} 行"
+                               + ("（去重视图）" if use_dedup else "（原始台账，含历史重复）")),
+        })
 
     def _api_passthrough(self, key: str):
         data, sent = self._load_or_not_ready(key)
@@ -1837,6 +1932,15 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
         market = str(((query or {}).get("market") or ["CN"])[0]).upper()
+        # 成本拖累由 qcore 落盘（costs.json），server 不再现算（INV-8：UI 不做计算）
+        _costs = {}
+        try:
+            _cp = STATE_DIR / "costs.json"
+            if _cp.is_file():
+                _costs = __import__("json").loads(_cp.read_text(encoding="utf-8"))
+        except Exception:
+            _costs = {}
+        _drag_map = (_costs.get("annual_drag_pct") or {}) if _costs else {}
         rows = []
         for h in HZ.all_horizons():
             mp, _ = LM._paths(h)
@@ -1855,7 +1959,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "model_exists": exists,
                 "trained_at": meta.get("trained_at"),
                 "n_trees": meta.get("n_trees"),
-                "cost_drag_annual": round(HZ.annual_cost_drag(max(h, 1), market) * 100, 2),
+                # 只读落盘值；缺 costs.json 时给 null，由 UI 显示「—」
+                "cost_drag_annual": _drag_map.get(str(int(max(h, 1)))),
             })
         # 各周期的真实战绩（台账对账出来的）
         perf = {}

@@ -204,11 +204,29 @@ def hit_rate(scores, RET, h: int, dates=None, regime=None,
     n_zero = int((rr == 0).sum())
 
     out = dict(base)
+    # 命中率的不确定性：股票-日单元格之间高度相关（同一决策日的截面强相关），
+    # 把它们当独立样本会把 SE 低估一个量级。实测 53 天台账：朴素二项 SE ±0.45pp，
+    # 按决策日聚类 ±13.5pp（差 30 倍）——于是「48.7% 低于抛硬币 5.5 个标准差」
+    # 实际只有 0.18 个标准差。这里同时给出两种口径，并把 insufficient 的
+    # 判据从「单元格为 0」改成「独立期数不足」。
+    from .thresholds import MIN_TRADES
+    p = float(hit.mean())
+    n_days = int(base["n_days"])
+    se_naive = float(np.sqrt(max(p * (1.0 - p), 1e-12) / max(n_samples, 1)))
+    se_cluster = float(np.sqrt(max(p * (1.0 - p), 1e-12) / max(n_days, 1)))
     out.update(
-        hit_rate=float(hit.mean()),
+        hit_rate=p,
         mean_signed_ret=float((np.sign(s) * rr).mean()),
         n_zero_ret=n_zero,
-        insufficient=False,
+        se_naive=se_naive,
+        se_cluster=se_cluster,
+        ci95_naive=[p - 1.96 * se_naive, p + 1.96 * se_naive],
+        ci95_cluster=[p - 1.96 * se_cluster, p + 1.96 * se_cluster],
+        n_eff=n_days,                                  # 有效独立观测数（聚类口径）
+        n_indep=int(n_days // max(int(h), 1)),          # 非重叠期数（重叠收益口径）
+        insufficient=bool(n_days < MIN_TRADES),
+        insufficient_reason=(f"n_days={n_days} < MIN_TRADES={MIN_TRADES}"
+                             if n_days < MIN_TRADES else ""),
     )
 
     yr = _year_axis(dates, sc.shape[1])

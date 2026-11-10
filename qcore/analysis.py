@@ -104,10 +104,16 @@ def edge_report(scores: np.ndarray, RET: np.ndarray, dates: np.ndarray,
     summ = S.summarize_edge(ic_ok, dates[-ic_ok.size:], horizon=h, n_trials=n_trials)
 
     ls = long_short_series(scores, RET, h)
-    # 非重叠 h 日收益 → 换算成日频等效
-    ls_daily = ls / h if ls.size else ls
-    dsr_ls = S.deflated_sharpe(float(np.nanmean(ls_daily)), int(ls_daily.size * h),
-                               n_trials) if ls.size > 10 else {"ok": False}
+    # DSR 的 sr 参数是「每期 Sharpe」= mean/std，不是每期收益均值。
+    # 旧实现传 np.nanmean(ls_daily)（≈4e-4，收益单位），而 sr0_daily 是
+    # Sharpe 单位（≈4.7e-2），两者差 ~100 倍 → DSR 恒被压在
+    # Φ(-E[max SR])≈0.0078 的地板上；h=1/5/20 三个不同策略全给 0.008 即是指纹。
+    _ls = np.asarray(ls, dtype=np.float64)
+    _ls = _ls[np.isfinite(_ls)]
+    _sd = float(_ls.std(ddof=1)) if _ls.size > 2 else 0.0
+    sr_pp = float(_ls.mean() / _sd) if _sd > 0 else float("nan")
+    dsr_ls = (S.deflated_sharpe(sr_pp, int(_ls.size), n_trials)
+              if _ls.size > 10 else {"ok": False})
     ls_stat = S.mean_tstat(ls, lags=0)          # 已是非重叠，用朴素 SE
     sr_ls = S.sharpe_ratio(ls, periods=max(1, 252 // max(h, 1)))
 
@@ -124,6 +130,7 @@ def edge_report(scores: np.ndarray, RET: np.ndarray, dates: np.ndarray,
         "long_short": {"mean_per_period": ls_stat["mean"], "t": ls_stat["t"],
                        "p": ls_stat["p"], "sharpe": sr_ls, "n_periods": int(ls.size),
                        "annualized": float(np.nanmean(ls) * 252 / max(h, 1)) if ls.size else None,
+                       "sr_per_period": sr_pp, "sr_basis": "per_period_sharpe",
                        "dsr": dsr_ls.get("dsr"), "dsr_significant": dsr_ls.get("significant")},
         "inverted_check": {"ic_mean": inv["mean"], "t": inv["t"], "p": inv["p"]},
         "deflated_sharpe": dsr_ls,
@@ -141,8 +148,9 @@ def _conclude(summ: Dict, ls_stat: Dict, inv: Dict) -> str:
     if t >= 2.0 and summ["deflated_sharpe"].get("significant"):
         return "IC 显著为正且通过多重检验 → 有可用优势，可进入模拟盘验证"
     if t <= -2.0:
-        return ("IC 显著为负 → 信号方向系统性做反。反着做在统计上成立，"
-                "但需独立样本再验证一次，不能直接上线")
+        return ("IC 显著为负 → 信号方向系统性做反。**这不等于「反着做就能赚」**："
+                "反着做需要独立样本复核 + 2N 次多重检验惩罚 + 融券可行性，"
+                "当前三项均不满足，不得据此上线")
     return "IC 与 0 不可区分 → 当前信号集无优势，应停手或换特征，而不是加大权重"
 
 

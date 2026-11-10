@@ -82,7 +82,12 @@ EVENT_TYPE_CN: Dict[str, str] = {
 SCOPES: Tuple[str, ...] = ("market", "sector", "stock")
 EVIDENCE_LEVELS: Tuple[str, ...] = ("strong", "medium", "weak", "conflict")
 
-MIN_N = 5          # 横截面样本下限：< 5 一律 insufficient，不给点估计当结论
+from .thresholds import MIN_TRADES, MIN_XS_NAMES
+
+# 横截面样本下限：某日截面不足这么多只，不给点估计。
+# 注意：这不是「单组最少交易笔数」—— 那个是 MIN_TRADES=30（AGENTS §7.5 规则六）。
+# 两个语义共用一个旧名 MIN_N，正是「n=20 却 insufficient=False」的来源。
+MIN_N = MIN_XS_NAMES
 MIN_EST = 40       # 市场模型估参窗口最少有效观测数
 
 
@@ -1039,7 +1044,7 @@ def predict_impact(event: Event, table: pd.DataFrame, horizon: int = 5,
         n = int(row["n"])
         mean_signed = float(row["mean_car"]) if pd.notna(row["mean_car"]) else float("nan")
         t = float(row["t"]) if pd.notna(row["t"]) else float("nan")
-        insuff = bool(row["insufficient"]) or n < min_n
+        insuff = bool(row["insufficient"]) or n < max(int(min_n), MIN_TRADES)
         conf = _confidence(n, t, mean_signed, min_n=min_n)
         # 样本不足时**不给点预测**（"不硬报"）：只保留统计量供人看
         expected = (None if (insuff or d == 0 or not np.isfinite(mean_signed))

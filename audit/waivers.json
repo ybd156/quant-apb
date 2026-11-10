@@ -1,0 +1,442 @@
+{
+ "criterion": "MEDIUM 分流规则：文件是否在打分链路闭包内。闭包根 = ['signals', 'learner', 'engine', 'dataset']；闭包内不豁免，闭包外按文件豁免。这条规则可重复执行：python -m audit.gen_waivers",
+ "generated_at": "2026-11-10T10:06:24+08:00",
+ "by": "lead",
+ "chain_modules": [
+  "account_config",
+  "alpha158",
+  "analysis",
+  "behavior_report",
+  "behavioral",
+  "capital",
+  "costs",
+  "daily_append",
+  "data",
+  "dataset",
+  "distill",
+  "engine",
+  "ensemble",
+  "ensemble_model",
+  "event_learning",
+  "events",
+  "feature_select",
+  "fees",
+  "flow",
+  "gbdt",
+  "horizon_ledger",
+  "horizons",
+  "impact",
+  "intraday_online",
+  "learner",
+  "live_model",
+  "lot",
+  "meta",
+  "neutral",
+  "news_live",
+  "online_calib",
+  "paper_auto",
+  "policy_calendar",
+  "qlib_data",
+  "ranker",
+  "residual",
+  "reward",
+  "sample_weight",
+  "signals",
+  "signed",
+  "sources",
+  "stats",
+  "store",
+  "thresholds",
+  "tick"
+ ],
+ "waivers": [
+  {
+   "path": "qcore/horizon_ledger.py",
+   "scope": "file",
+   "n": 42,
+   "reason": "[已核实] 全部为台账展示聚合（mean/hit_rate/spread/top_mean），只写 horizon_perf.json 供 UI 读取，不回喂预测或权重"
+  },
+  {
+   "path": "qcore/intraday_online.py",
+   "scope": "file",
+   "n": 35,
+   "reason": "[已核实] train_online 只接收 y is not None 的**已到期**样本，标准化与指标都在该集合内计算，训练时刻天然因果（见 qcore/intraday_online.py:train_online）"
+  },
+  {
+   "path": "qcore/risk.py",
+   "scope": "file",
+   "n": 35,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/stress.py",
+   "scope": "file",
+   "n": 31,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/slippage.py",
+   "scope": "file",
+   "n": 23,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/bt.py",
+   "scope": "file",
+   "n": 22,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/paper.py",
+   "scope": "file",
+   "n": 22,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/bt_rules.py",
+   "scope": "file",
+   "n": 21,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/intraday.py",
+   "scope": "file",
+   "n": 21,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/advanced.py",
+   "scope": "file",
+   "n": 20,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/analysis.py",
+   "scope": "file",
+   "n": 20,
+   "reason": "[已核实] 优势体检模块：demean/秩相关/分位差本身就是评估指标，不产出信号或权重"
+  },
+  {
+   "path": "qcore/optimizer.py",
+   "scope": "file",
+   "n": 19,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/drift.py",
+   "scope": "file",
+   "n": 16,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/ensemble.py",
+   "scope": "file",
+   "n": 16,
+   "reason": "[已核实] 零 importer（未被任何模块 import），不可能进入主链路"
+  },
+  {
+   "path": "qcore/context.py",
+   "scope": "file",
+   "n": 15,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/longshort.py",
+   "scope": "file",
+   "n": 15,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/account.py",
+   "scope": "file",
+   "n": 14,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/events.py",
+   "scope": "file",
+   "n": 14,
+   "reason": "[已核实] 事件研究评估统计（CAR/分位），产物写 events.json 供 UI；不进打分链路"
+  },
+  {
+   "path": "qcore/multihorizon.py",
+   "scope": "file",
+   "n": 13,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/retail_index.py",
+   "scope": "file",
+   "n": 13,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/behavior_report.py",
+   "scope": "file",
+   "n": 12,
+   "reason": "[已核实] 仅被 pipeline 调用的报告脚本（行为因子体检），输出到 reports/"
+  },
+  {
+   "path": "qcore/cleaning.py",
+   "scope": "file",
+   "n": 12,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/distill.py",
+   "scope": "file",
+   "n": 12,
+   "reason": "[已核实] 零 importer（只有自身 __main__），同上"
+  },
+  {
+   "path": "qcore/meta.py",
+   "scope": "file",
+   "n": 12,
+   "reason": "[已核实] 告警点全部是评估量：L79-81 的 demean+相关是 meta_ic 本身，L130-131 frac_inverted/frac_silent、L146-147 hit_rate/mean_signed_ret 都是「事后命中率」展示；final_sign 由 final_t 判定，不由这些均值决定"
+  },
+  {
+   "path": "qcore/confidence.py",
+   "scope": "file",
+   "n": 11,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/model.py",
+   "scope": "file",
+   "n": 11,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/ranker.py",
+   "scope": "file",
+   "n": 11,
+   "reason": "[已核实] 零 importer，同上"
+  },
+  {
+   "path": "qcore/online_calib.py",
+   "scope": "file",
+   "n": 10,
+   "reason": "[已核实] L227-234 是对（预测, 已实现收益）做 OLS 求 a/b，样本是已到期配对；L191 是 MSE 指标。校准参数只作用于未来预测，不回看未来"
+  },
+  {
+   "path": "qcore/position.py",
+   "scope": "file",
+   "n": 10,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/info.py",
+   "scope": "file",
+   "n": 9,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/attribution.py",
+   "scope": "file",
+   "n": 8,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/crossmarket.py",
+   "scope": "file",
+   "n": 8,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/live_features.py",
+   "scope": "file",
+   "n": 8,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/residual.py",
+   "scope": "file",
+   "n": 8,
+   "reason": "[已核实] 零 importer，同上"
+  },
+  {
+   "path": "qcore/weekly.py",
+   "scope": "file",
+   "n": 8,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/market_live.py",
+   "scope": "file",
+   "n": 7,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/noon.py",
+   "scope": "file",
+   "n": 7,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/reward.py",
+   "scope": "file",
+   "n": 7,
+   "reason": "[已核实] L101-102 hit_rate/加权均值、L136 max_dd 都是对**已实现**序列的评价指标，用于报告与奖励口径评估，不进入信号计算"
+  },
+  {
+   "path": "qcore/survival.py",
+   "scope": "file",
+   "n": 7,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/event_learning.py",
+   "scope": "file",
+   "n": 6,
+   "reason": "[已核实] L209/L332-333 是事件后收益的均值与命中率（评估统计），产物写 event_learning.json 供 UI"
+  },
+  {
+   "path": "qcore/model_health.py",
+   "scope": "file",
+   "n": 6,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/session.py",
+   "scope": "file",
+   "n": 6,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/stock_chart.py",
+   "scope": "file",
+   "n": 6,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/watch.py",
+   "scope": "file",
+   "n": 6,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/alert.py",
+   "scope": "file",
+   "n": 4,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/live_model.py",
+   "scope": "file",
+   "n": 4,
+   "reason": "[已核实] L256-258 是特征索引越界检查、L267 是样本数门槛、L279 是应用在线校准；没有全样本统计量进入打分"
+  },
+  {
+   "path": "qcore/pipeline.py",
+   "scope": "file",
+   "n": 4,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/sources.py",
+   "scope": "file",
+   "n": 4,
+   "reason": "[已核实] 数据源交叉验证的健康度统计（compare_returns），只影响 source_health.json"
+  },
+  {
+   "path": "qcore/combo.py",
+   "scope": "file",
+   "n": 3,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/tactics.py",
+   "scope": "file",
+   "n": 3,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/tech_extra.py",
+   "scope": "file",
+   "n": 3,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/forecast.py",
+   "scope": "file",
+   "n": 2,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/hotspot.py",
+   "scope": "file",
+   "n": 2,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/sentiment.py",
+   "scope": "file",
+   "n": 2,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/altdata.py",
+   "scope": "file",
+   "n": 1,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/brief.py",
+   "scope": "file",
+   "n": 1,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/gpu.py",
+   "scope": "file",
+   "n": 1,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/indicators2.py",
+   "scope": "file",
+   "n": 1,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/invariants.py",
+   "scope": "file",
+   "n": 1,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
+   "path": "qcore/live.py",
+   "scope": "file",
+   "n": 1,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  }
+ ],
+ "unconfirmed_paths": [
+  {
+   "path": "qcore/gbdt.py",
+   "n": 15,
+   "why": "训练代码：L191 的分箱边界只用**训练矩阵**拟合（X[:,k] 的分位），L329-330 是节点内梯度/海森求和，L520/524/575 是 L2 与 R² 指标 —— 均非时序泄漏，但属核心，保留告警"
+  },
+  {
+   "path": "qcore/engine.py",
+   "n": 9,
+   "why": "逐日重放核心：告警点全部是 axis=1（信号维）归一化与横截面 mean，非时序统计；核心代码保留告警"
+  },
+  {
+   "path": "qcore/signed.py",
+   "n": 5,
+   "why": "L56 是 axis=1 横截面去均值；L88-89 的 mu/sd 在 fit 时用**训练矩阵**拟合并存盘、预测时复用（标准做法），非泄漏；核心保留告警"
+  },
+  {
+   "path": "qcore/learner.py",
+   "n": 3,
+   "why": "权重更新核心：softmax 在信号维做归一化，非时序统计"
+  },
+  {
+   "path": "qcore/dataset.py",
+   "n": 1,
+   "why": "面板构造核心"
+  }
+ ],
+ "note": "行内 `# leak-scan: ok <理由>` 的豁免不在此文件里；本文件只做文件级分流。"
+}

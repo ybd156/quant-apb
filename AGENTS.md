@@ -19,14 +19,28 @@
 ## 1. 30 秒上手
 
 ```bash
-python -m qcore.pipeline --pool 300 --start 2013-01-01   # 全流程，约 45 秒
-python -m qcore.live --once                              # 每日增量（秒级）
+python -m qcore.pipeline --pool 300 --start 2013-01-01   # 全流程，本机实测 81.9–103.7s
+python -m qcore.live --once                              # 每日增量（dataset 段已 16.9s，超预算）
 python -m webui.server --port 8765                       # 零依赖 Web UI
 python -m qcore.claims score                             # 查看判断命中率
 python tests/test_no_lookahead.py                        # 泄漏检验（必须 PASS）
+python -m tests.test_signals                             # 必须带 -m，否则 ModuleNotFoundError
+python -m qcore.invariants                               # 8 条不变量自检
 ```
 
-依赖：**只有 numpy + pandas**。Python ≥ 3.10。禁止引入 scipy / sklearn / talib / requests。
+依赖：**运行时只有 numpy + pandas**（`pillow` 仅用于 `chart.py`/`brief.py` 出图）。
+Python ≥ 3.10。禁止引入 scipy / sklearn / talib / requests。
+
+> 耗时口径（2026-11-10 本机 Zen3/16 线程实测，**N100 上未测**）：
+> 端到端 81.9–103.7s（两次同命令，含 impact/behavior/报告/导出）｜核心 18.2s｜
+> 增量 dataset 段 16.9s（已超 15s 预算）｜信号层 300 只 ≈12–17s。
+> **「全流程 <60s」当前未达标**，别再把 45s 当实测值引用。
+>
+> 增量耗时拆解（实测）：`build_panel` **4.1s** + `compute_signals` **12.2s**（43ms/只 × 283）
+> ≈ 16.3s —— **信号层占 75%**。曾尝试「信号前只算最后 N 根」砍掉 3/4 计算，
+> 但即使 warmup 给到 620 根，仍有 15/513k 单元格与全量计算不同（MA 族用前缀和，
+> 序列变短后浮点舍入改变、在阈值边界翻转 DIR）→ **违反 INV-1 逐位相等，已否决**。
+> 真要提速得先把 MA 族改成数值稳定的 `rolling().mean()`，或做逐股增量信号缓存。
 
 ---
 
@@ -49,17 +63,35 @@ python tests/test_no_lookahead.py                        # 泄漏检验（必须
 | `qcore/analysis.py` | 优势体检（IC 显著性、多空、分年度） | 无 |
 | `qcore/costs.py` | 分市场交易成本（A股/美股/港股） | 无 |
 | `qcore/risk.py` | 风险分摊（ERC / 上限 / 组合配权） | 无 |
-| `qcore/forecast.py` | 前景与空间测算（Grinold 基本法则） | 无 |
+| ~~`qcore/forecast.py`~~ | **已从核心表移除：实测零引用**（见 `docs/21_unwired_modules.md`） | — |
 | `qcore/claims.py` | 判断台账（先登记后验证） | `data/claims/` |
 | `qcore/paper.py` | 模拟盘 vs 实盘对账 | `data/state/live_trades.jsonl` |
 | `qcore/slippage.py` | 滑点追踪：回测假设价 vs 实盘成交价，验证回测可信度 | `data/slippage/*.jsonl` |
 | `qcore/alert.py` | 告警规则 + 1h 去重 + file/webhook 分发 | `data/state/alerts.jsonl`、`alert_state.json` |
 | `qcore/context.py` | 当时形势 / 历史类比 | 无 |
-| `qcore/store.py` | 状态落盘（原子写 + NaN→null） | `data/state/` |
+| `qcore/store.py` | 状态落盘（原子写 + NaN→null）+ 台账幂等追加 | `data/state/`、`data/pred_ledger/` |
+| `qcore/thresholds.py` | **样本量门槛唯一真源**（`MIN_TRADES=30` / `MIN_XS_NAMES=5`） | 无 |
+| `qcore/invariants.py` | 8 条不变量的可执行自检（含负控） | `data/state/invariants.json` |
 | `qcore/pipeline.py` | 全流程编排 | 无 |
 | `qcore/live.py` | 每日增量 / 常驻循环 | 读 weighter 状态 |
 | `qcore/intraday.py` | 分钟级前向验证（无历史，不可回测） | `data/intraday/` |
 | `webui/server.py` | 零依赖 HTTP API（**只做 IO，不做计算**） | 只读 |
+| `audit/leak_scan.py` | 静态泄漏扫描（HIGH/MEDIUM/INFO + 行内与文件级豁免） | 无 |
+| `audit/gen_waivers.py` | 两层分流 MEDIUM：链路闭包 + 闭包内逐文件人判 | `audit/waivers.json` |
+| `audit/basis_probe.py` | 复权方式逐股分类 + 压缩因子 + 秩重排 | `data/state/basis.json` |
+| `audit/basis_ic.py` | 同一份 scores 换三种收益口径重算 Rank IC | `data/state/basis_ic.json` |
+| `audit/pool_probe.py` | 生存者偏差：池快照 / UNIV 周转 / 掩码排除率 | 无 |
+
+> **本表只覆盖核心链路。** `qcore/` 实际有 **120 个 .py**（约 4 万行）。
+> 引用某个模块前先 `ls qcore/`，并对照 `docs/21_unwired_modules.md`：
+>
+> | 类别 | 模块数 | 行数 |
+> |---|---|---|
+> | 被 import（主链路） | 91 | 32,643 |
+> | CLI 入口（有 `__main__`，不进自动流程） | 10 | 3,016 |
+> | **零引用且无入口（死代码候选）** | **19** | **4,033** |
+>
+> 「不在表里」不等于「不存在」，也**不等于「已接线」**。
 
 ---
 
@@ -94,9 +126,14 @@ INV-6 股票池点对点
       正确做法：Panel3D.UNIV 掩码 = 过去 60 日均成交额当日横截面排名前 n_univ。
       注意：当 N < n_univ 时该掩码恒真，等于没生效。
 
-INV-7 台账只追加
+INV-7 台账只追加（且必须幂等）
       data/pred_ledger/*.jsonl 与 data/claims/*.jsonl 不允许修改历史记录，
       只允许追加结果字段。
+      「只追加」不等于「随便追加」：append_ledger 以 (as_of, code, horizon) 为幂等键，
+      重复写入直接跳过。实测教训：rebuild 每次重追加最近 90 天，47,676 行里
+      只有 8,150 个唯一键（5.85×重复），同一决策日同一票挂着 3–9 个不同分数，
+      台账因此无法回答「s 日对 x 股的预测是什么」。
+      历史重复不可回改 → 读数用 store.compact_ledger() 生成的 `{year}.dedup.jsonl`。
 
 INV-8 UI 不做计算
       webui/ 只读 data/state/*.json 并展示。禁止在 server.py 里算指标。
@@ -208,6 +245,11 @@ regime 混合    γ = γ_max·n/(n+γ_n0);  z = (1-γ)z_g + γz_r
 | 19 | **验证工具自己失灵** | 冒烟测试对报错页面报「全过」 | Windows 下子进程必须 `encoding="utf-8"`；先用已知失败样本验证检测器 |
 | 20 | **const 先用后定义（TDZ）** | `Cannot access 'x' before initialization` | 语法合法、运行时炸。长函数里 const 集中到开头 |
 | 21 | **插入代码不读上下文** | `r is not defined`（回调参数其实是 e） | 插入前读目标位置往上 5 行，确认变量名和作用域 |
+| 22 | **`open(tmp,'w')` + `os.replace` 写 JSONL = 全量重写，不是追加** | `horizon_ledger._write_all` 在读失败时把整本台账写成 1 条 | 写入侧 `_read_strict` 读不全就**拒绝写**；`tests/test_store_ledger.py` |
+| 23 | **把「收益均值」当「Sharpe」传给 PSR/DSR** | DSR 恒等于 `Φ(−E[max SR])`≈0.0078，h=1/5/20 三个策略给同一个数 | 传 `mean/std`（每期 Sharpe），n=期数不乘 h；`tests/test_dsr_units.py` |
+| 24 | **`scores.shape[1]` 当股票数** | `status.json` 的 `n_stocks` 恒等于 `n_days`，UI 显示「2633 只」真值 112 | 用 `len(res["codes"])`；断言 `n_stocks != n_days` |
+| 25 | **成本假设低于法定下限** | `account.json` 写 `cost_bps=10.0`，回测 19.28 / 模拟盘 10.0，同一次输出两个基准 | `account_config.COST_FLOOR_BPS`（CN 11.28 / HK 11.0）自动回落并留痕 |
+| 26 | **豁免清单把自己的证据洗掉** | 生成器沿用上次的 waivers 扫描 → 已豁免文件扫出 0 条 → 新清单一路归零（246→207→0） | 扫描前先 `_FILE_WAIVERS = {}`；`gen_waivers --check` 进 CI |
 
 ---
 
@@ -261,10 +303,12 @@ for k in ("live", "live_meta"):
 
 | 对象 | 命名 |
 |---|---|
-| 模型 | `gbdt.pkl`(h1) / `gbdt_h5.pkl` |
+| 模型 | `gbdt.pkl`+`meta.json`+`current.json`(h1) / `gbdt_h5.pkl`+`meta_h5.json`+`current_h5.json`(h5) |
+| 模型快照 | `versions/gbdt_h{h}_{ver}.pkl`（带周期，h1/h5 快照不再互相覆盖） |
+| **权重器状态** | **`weighter_{mkt}_h{h}.npz`**（旧 `weighter.npz` 只读兼容；读时校验 cfg.horizon，不符即拒） |
 | 模拟盘账户 | `paper_auto.json`(CN/h1) / `paper_auto_cn_h5.json` / `paper_auto_us_h1.json` |
 | 预测 | `picks.json`(h1) / `picks_h5.json` |
-| 台账 | `data/pred_ledger/horizon_{h}.jsonl` |
+| 主台账 | `data/pred_ledger/{year}.jsonl`（幂等键 `(as_of, code, horizon)`）+ 去重视图 `{year}.dedup.jsonl` |
 
 ### 规则四：生成脚本后的三条断言
 
@@ -311,6 +355,28 @@ MIN_TRADES = 30   # 单组最少交易次数，低于此标 insufficient
   → 查 data/state/*.json 是否存在（缺文件会显示"未就绪"而非崩）
   → 查是否有裸 NaN（server 已兜底，但根因在写出端）
 
+症状：怀疑复权口径有问题（收益率幅度不对 / IC 能不能信）
+  → python -m audit.basis_probe --codes 40
+  → 看 adjust_kind_counts：multiplicative 为主 = fqt=2 是乘法复权（正常）
+  → 再看 `python -m audit.basis_ic --codes 60`：同一份 scores 换收益口径重算 IC
+  → 实测 ΔIC +1.0%（修正加法复权股票）/ +1.5%（改用 fqt=0）
+    → 口径影响 ≤1.5%，**IC 的方向与量级都可引用**；不必做全池 A/B
+  → 产物落在 data/state/basis.json 与 basis_ic.json
+
+症状：怀疑生存者偏差 / 池子没在换人
+  → python -m audit.pool_probe --codes 300
+  → 看 exclusion_rate（掩码排除率，<2% 说明 N≈n_univ 点对点无效）
+  → 看 jaccard_first_last（≈1 且未全选 = 池成员恒定）
+  → 池构造层（今日市值 top-800 快照、ST/退仅个位数）本探针只能证明、不能消除
+
+症状：leak_scan 报一大堆 MEDIUM，不知道该不该管
+  → python -m audit.gen_waivers --check（清单是否与代码一致）
+  → 规则是机械的：**不在打分/建模链路闭包内**的文件，全样本统计只影响事后指标
+    → 文件级豁免（写进 audit/waivers.json，可重复生成、可复核）
+  → 闭包内的文件**不豁免**，那部分才是需要逐条看的人工量
+  → 当前分流：**MEDIUM 33（5 个核心/训练文件，故意保留）/ 文件级豁免 685**
+  → 判定表见 docs/22_leak_waivers.md，机器可读版 audit/waivers.json
+
 症状：多源报 inconsistent
   → 先看 suspected_adjustment_days 是否落在分红除权日（那是口径差异不是错误）
   → 再看 median_abs_diff 是否 < 2e-3（是则降级为 basis_mismatch 仍可用）
@@ -318,31 +384,97 @@ MIN_TRADES = 30   # 单组最少交易次数，低于此标 insufficient
 
 ---
 
-## 9. 当前实测基线（2026-11，283 只 / 2013-2026 / h=5）
+## 9. 当前实测基线
 
-| 指标 | 数值 | 含义 |
+> **本节不再硬编码"唯一真相"。** 仓库里同时存在多套配置（283 只/2013 起 vs
+> 112 只/2016 起），过去谁引用都不标配置，导致同一指标出现 3–4 个数字。
+> **数字以产物为准，产物必须能指出是哪条命令、哪个配置、什么时间生成的。**
+
+### 9.1 基线 A：283 只 / 2013-01-01 起 / h=5（研究口径，**默认引用这个**）
+
+生成命令：`python -m qcore.pipeline --pool 300 --start 2013-01-01`
+产物：`data/state/performance.json`（`generated_at` 字段即生成时间）
+最近一次实测：**2026-11-10，端到端 81.9s / 103.7s（两次，机器负载不同）**
+（T=3360 N=283 S=73；同机同命令，差 22s 说明「<60s」这条线对负载敏感）
+
+| 指标 | 数值 | 说明 |
 |---|---|---|
-| 横截面 Rank IC | **−0.0185** | 方向系统性做反 |
-| HAC t | **−2.48** | 95% CI 全在 0 以下 |
-| 原始命中率 | 48.4% | 低于抛硬币 |
-| Meta 反向命中率 | 50.7% | 纠错后略高于 50%，但 t 未达显著 |
-| 多空年化（扣 19.3bps） | +4.5%，t=0.59 | 不显著 |
-| Deflated Sharpe | 0.008 | 未通过多重检验 |
-| 学习器 vs 等权 | 无显著差异 | **学习器当前无效** |
-| 有效独立信号（相关性调整） | 12.1 / 73 | 信号高度同质 |
-| 成本拖累（A股/5日/70%换手） | 6.8%/年 | 港股同口径 13.5%/年 |
+| 横截面 Rank IC (h=5) | **−0.01847** | HAC t = **−2.48**（lags=4，n=3335） |
+| h=1 / h=20 的 IC | −0.00680 (t=−1.61) / −0.02680 (t=−1.93) | 三个周期同向 |
+| 原始命中率 (h=5) | **48.49%**，n=328,559，n_eff=3,335 | 聚类 SE ±0.87pp，距 50% 仅 1.7 个 SE |
+| Meta 反向命中率 | 50.72% | 同一产物 `meta.compare`，非"IC>0 占比" |
+| 多空年化（**毛**、算术 `mean·252/h`） | +4.18%（h=5）/ +13.27%（h=1） | 未扣成本，**不可当净值读** |
+| Deflated Sharpe（每期 Sharpe 口径） | **0.0313**（h=5）/ 0.2411（h=1）/ 0.0308（h=20） | 全部 `significant=false` |
+| 学习器 vs 等权 | 无显著差异（配对 Δ HAC t ≈ −1.0） | **学习器当前无效** |
+| 有效独立信号（相关性 `effective_n_corr`） | **12.13 / 73** | 权重口径 `1/HHI`=69 是另一个数，永不混用（部署态 112 只池为 10.40） |
+| 成本拖累（A股/5日/70%换手） | 6.80%/年（19.28bps 往返，verified_on 2026-11） | 港股同口径 13.47%/年；`horizons` 原先用 250/0.8 算出 7.71%，已统一为 252/0.7 → `data/state/costs.json` |
+| 核心耗时（build_dataset + walkforward） | 18.2s | 不含 impact/behavior/报告/导出 |
+| 模拟盘年化（CN/h=5，修正后） | **−3.49%/年**（修正前 +4.33%） | 成本口径从 10.0bps 改回 19.28bps 的净效果：**7.8pp/年** |
 
-**结论**：当前信号集在 A 股大盘股 5 日尺度上**没有可用 alpha**，且略呈系统性反向。
-任何声称"改进"的提交，必须给出 HAC t 值与 Deflated Sharpe 的前后对比，否则不予采信。
+**结论**：当前信号集在 A 股大盘股 5 日尺度上**没有可用 alpha**；IC 显著为负但
+幅度极小（折算 IR≈−0.06），扣成本后为负 —— **"反着做"也救不了**（需要 IC≥0.021）。
+
+### 9.2 基线 B：112 只 / 2016 起（部署口径，UI 与 `/api/performance` 展示的就是它）
+
+同一份代码、不同池与区间，数字显著不同（IC −0.0050、t −0.57、Meta 46.15%）。
+**引用任何数字前先确认是 A 还是 B**，否则会出现"同一指标三个值"的假矛盾。
+
+### 9.3 三条已被证伪的旧说法（勿再引用）
+
+| 旧说法 | 实测 | 结论 |
+|---|---|---|
+| Deflated Sharpe = 0.008 | 该值是"把收益均值当 Sharpe 传参"的产物；修正后按周期为 0.03–0.24 | **0.008 作废**（见 §7 陷阱 23） |
+| 命中率 48.4%"低于抛硬币" | 朴素二项 SE 把它说成 5.5 个标准差；按决策日聚类只有 0.18 个标准差 | **不成立**，只能说"与 50% 不可区分" |
+| 多空 +4.5% 是"扣费后" | +4.18% 是**毛**算术年化；`analysis.long_short_series` 不含成本 | **标签错误**，净值须另算 |
+| 模拟盘「+4.3%/年」 | 那个数是按 10.0bps 往返成本算的，低于 A 股法定下限 11.28bps | **改用 19.28bps 后为 −3.49%/年**（见 §7 陷阱 25） |
+| 「fqt=2 是加法复权，收益率被压缩到 0.58–0.83 倍」 | 同源 fqt=0 对照：压缩因子中位 **1.0000**，乘法复权 34/36；换口径后 Rank IC 只动 **1.0%** | **不成立**（那是跨源差异）；见 §9.4 |
+
+### 9.4 未测项（不许估算冒充）
+
+- **N100 上的耗时**：从未实测。已知本机（Zen3/16 线程）端到端 81.9s、核心 18.2s、
+  增量 dataset 段 16.93s（已超 15s 预算）。
+- **端到端 <60s 目标**：本机 81.9–103.7s **未达标**（含 impact/behavior/report/导出）。
+- **fqt=2 收益率尺度（已闭环，结论与初判相反）**：
+  ① `audit/basis_probe.py`（36 只）：**乘法复权 34 / 加法复权 2**，压缩因子
+  **中位 1.0000**（p05 0.862）→「收益率被压缩到 0.58–0.83 倍」**不成立**，
+  那个数是跨源（东财 vs 腾讯）比出来的，不是 fqt=2 自身的误差。
+  ② `audit/basis_ic.py`（56 只 × 2633 天，同一份 scores 换三种收益口径）：
+  ```
+  h2                IC −0.01104  t −1.27
+  修正加法复权股票   IC −0.01093  t −1.26   ΔIC +0.00011 (+1.0%)
+  fqt=0 原始价       IC −0.01088  t −1.25   ΔIC +0.00017 (+1.5%)
+  ```
+  → **复权口径对 Rank IC 的影响 ≤1.5% 相对值，方向与量级都可引用**。
+  数学原因：乘法复权下 `p_adj = p_raw·k(t)`，`r_true = p_adj[t+1]/p_adj[t] − 1 = r_h2`
+  恒等 —— fqt=2 本身就是总收益序列。真正的风险只剩少数加法复权股票（实测 2/56）。
+  产物：`data/state/basis.json`、`data/state/basis_ic.json`。
+  **不需要再做全池 300 只 A/B**（此前以为需要）。
 
 ---
 
 ## 10. 修改本项目时的硬性要求
 
-1. 改完必须跑：`tests/test_no_lookahead.py`、`tests/test_signals.py`、`audit/leak_scan.py`。
+1. 改完必须跑：`python tests/test_no_lookahead.py`（worst diff 必须 `0.000e+00`）、
+   `python -m tests.test_signals`（19 passed，截断一致性逐位相等）、`python audit/leak_scan.py`（HIGH=0）。
+   改了 IO / 台账 / 统计口径，还要跑 `python -m tests.test_store_ledger`、
+   `python -m tests.test_dsr_units`、`python -m tests.test_invariants_negative`、
+   `python -m tests.test_incremental_parity`、`python -m qcore.invariants`、
+   `python -m qcore.claims settle`（到期判断必须结算，否则 CI 红）、
+   `python -m audit.gen_waivers --check`（豁免清单必须与代码一致，否则 CI 红）。
 2. 任何性能改动必须给出实测数字（本项目目标：N100 级小主机，全流程 < 60s，增量 < 15s）。
 3. 任何"提升效果"的改动必须同时给出**样本外**证据，且说明是否通过多重检验。
 4. 不允许为了让数字好看而调整评估口径。评估口径是本项目的核心资产。
 5. 新增判断（结论）必须通过 `qcore.claims.register` 登记，写明证伪条件与复核日期。
 6. **任何与规模/流动性/波动相关的因子，不做行业+市值中性化不许上报 alpha。**
    实测教训：amihud 原始价差 +0.566%(t=5.94)，中性化后 +0.031%(t=0.40) —— 全是小市值效应。
+7. **任何「最优 X / 有提升」必须报样本数**，`< MIN_TRADES(30)` 一律标 insufficient；
+   门槛只认 `qcore/thresholds.py` 一个真源（历史上散落成 5 / 8 / 30 三套）。
+8. **判断必须能自动结算**：`claims.register` 强制 `falsifier` 与 `review_by`；
+   `python -m qcore.claims settle` 对有产物口径的判断自动判定，对无口径的列
+   `needs_manual` 并非零退出。只登记不结算 = 没有命中率。
+9. **UI 上每个数字必须有写入方**。硬编码一个有利数字（曾经把
+   「Alpha158 IC +0.0260 样本外验证通过」写死在页面上，而产物是 0.0116）
+   比不显示更糟 —— 它让测量仪替用户下结论。
+10. **不利结论不许折叠**：73 个手写信号是测量本体，不许降级成 `<details>` 归档区。
+11. **台账必须有人读**：`/api/ledger?source=file` 直读主台账（分页 + 总数 + 去重数）；
+    只写不读的文件，重复写入 5.85× 也没人会发现。

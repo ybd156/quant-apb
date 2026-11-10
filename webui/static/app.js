@@ -1449,7 +1449,9 @@
     const ic = toNum(m.ic);
     const icT = toNum(m.ic_t);
     const ric = toNum(m.rank_ic);
-    const icCls = ic === null ? '' : ic > 0 ? 'down-text' : ic < 0 ? 'up-text' : '';
+    // 配色必须与同文件 signClass() 一致：正 = 好。旧写法把正 IC 染成「跌」色，
+    // 与 modelBarHtml 的 is-pos/is-neg 相反 —— 同一页两套相反映射。
+    const icCls = ic === null ? '' : signClass(ic);
 
     const heroCard = card({
       title: (m.model || '模型') + (m.version ? ' · ' + m.version : ''),
@@ -1470,7 +1472,7 @@
         '<div class="hm"><span class="hm-k">t 值</span>' +
         '<span class="hm-v ' + icCls + '">' + (icT === null ? '—' : (icT > 0 ? '+' : '') + num(icT, 2)) + '</span></div>' +
         '<div class="hm"><span class="hm-k">RankIC</span>' +
-        '<span class="hm-v ' + (ric === null ? '' : ric > 0 ? 'down-text' : ric < 0 ? 'up-text' : '') + '">' +
+        '<span class="hm-v ' + (ric === null ? '' : signClass(ric)) + '">' +
         (ric === null ? '—' : (ric > 0 ? '+' : '') + num(ric, 4)) + '</span></div>' +
         '</div></div>'
     });
@@ -1598,7 +1600,7 @@
         '</tr></thead><tbody>' + perfRows + '</tbody></table></div>' +
         '<p class="muted" style="margin-top:10px">' +
           '命中率 = top 三分之一跑赢全体平均的期数占比；' +
-          '超额 = top 组平均收益 − 全体平均。样本 &lt; 10 时只能当观察。' +
+          '超额 = top 组平均收益 − 全体平均。样本 &lt; 30（MIN_TRADES）一律标 insufficient，只能当观察。' +
         '</p>'
     });
 
@@ -1652,9 +1654,16 @@
     const regimeRows = (regimeRes.ok && regimeRes.data && regimeRes.data.rows) || [];
     const paper = (paperRes.ok && paperRes.data) || null;
 
+    // 样本量必须取 meta.n_stocks：顶层 n_stocks 曾经把 scores.shape[1]（= 天数）
+    // 当成股票数写进去，页面显示「2633 只」而真值 112 只，错 23.5 倍。
+    // 广度是 IR ≈ IC·√BR 的分子，显示错值会直接误导「有多大优势」的判断。
+    const nStk = (status && status.meta && status.meta.n_stocks) ||
+      (perf && perf.dataset && perf.dataset.N) || null;
     setSub(status
       ? (status.data_from || '—') + ' → ' + (status.data_to || '—') + ' · ' +
-        (status.n_stocks || '—') + ' 只 × ' + (status.n_signals || '—') + ' 信号 · h=' + (status.horizon || '—')
+        (nStk === null ? 'N —' : 'N=' + nStk + ' 只') + ' × ' +
+        (status.n_signals || '—') + ' 信号 · T=' + (status.n_days || '—') +
+        ' 天 · h=' + (status.horizon || '—')
       : (perfRes.error === 'not_ready' ? '未就绪：等待引擎首次运行' : '数据不可用'));
 
     /* --- 4 个 KPI --- */
@@ -1682,7 +1691,10 @@
         k: 'Rank IC (h=5)', v: icMean === null ? '—' : num(icMean, 4),
         cls: signClass(icMean), tone: icMean === null ? 'neutral' : (icMean > 0 ? 'good' : 'bad'),
         s: icT === null ? '未就绪'
-          : 'HAC t = ' + num(icT, 2) + (edge5 && edge5.ic_verdict ? ' · ' + esc(edge5.ic_verdict) : '')
+          : 'HAC t = ' + num(icT, 2) +
+            ' · n=' + num(edge5 && edge5.ic && edge5.ic.n_obs, 0) +
+            ' · lags=' + (edge5 && edge5.h ? edge5.h - 1 : 4) +
+            (edge5 && edge5.ic_verdict ? ' · ' + esc(edge5.ic_verdict) : '')
       }),
       kpi({
         k: '成本拖累 / 年', v: drag === null ? '—' : num(drag, 2) + '%',
@@ -1699,11 +1711,15 @@
       bannerHtml = banner({
         tone: tone,
         icon: tone === 'good' ? 'check' : 'alert',
-        title: (perf.meta && perf.meta.verdict) || '当前结论未标注',
+        // 引擎自己的判定句（edge[h].conclusion）比 meta.verdict（常常是「不表态」）
+        // 更具体，优先展示；缺失时回退并显式标注。
+        title: (edge5 && edge5.conclusion) || (perf.meta && perf.meta.verdict) || '引擎未给结论',
         text: '学习器 IC ' + num(lv.learned_ic, 4) + '（t=' + num(lv.learned_t, 2) + '） vs 等权 IC ' +
           num(lv.equal_ic, 4) + '（t=' + num(lv.equal_t, 2) + '） · 差 ' + num(lv.diff_ic, 4) +
           '（p=' + num(lv.diff_p, 3) + '）' + (lv.verdict ? '<br>' + esc(lv.verdict) : ''),
-        meta: 'DSR ' + num(edge5 && edge5.long_short && edge5.long_short.dsr, 4) +
+        meta: 'Deflated Sharpe ' + num(edge5 && edge5.long_short && edge5.long_short.dsr, 4) +
+          (edge5 && edge5.long_short && edge5.long_short.dsr_significant === false ? '（未过 0.95）' : '') +
+          ' · n_trials=' + num(edge5 && edge5.n_trials, 0) +
           ' · 相关性有效信号 ' + num(perf.risk && perf.risk.signal_level &&
             perf.risk.signal_level.corr_adjusted && perf.risk.signal_level.corr_adjusted.effective_n_corr, 1) +
           ' · 生成于 ' + ((perfRes.data && perfRes.data.generated_at) || '—')
@@ -2054,10 +2070,19 @@
   /* =============================== 信号 ================================ */
 
   async function pageSignals() {
-    // 这一页现在以「Alpha158 因子重要性」为主 —— 那是真正在用的模型（IC +0.0260）。
-    // 旧的 73 个手写信号实测 IC −0.0185（系统性做反），降级为折叠归档区，
-    // 因为把死数据摆在主位会误导人。
+    // 两个信号栈并列，不做「主 / 归档」的价值排序 —— 谁是有效模型由统计判定，
+    // 不由页面布局判定。页面上所有 IC / t 都从产物读，不许硬编码
+    // （AGENTS §7.5 规则五：UI 显示的数字必须有写入方）。
     const fi = await apiCached('/api/factors/importance');
+    const perfS = await apiCached('/api/performance');
+    const perfD = perfS && perfS.ok ? perfS.data : null;
+    const edgeS = perfD && perfD.edge && (perfD.edge['5'] || perfD.edge[5]);
+    const sigIc = edgeS && edgeS.ic ? toNum(edgeS.ic.mean) : null;
+    const sigT = edgeS && edgeS.ic ? toNum(edgeS.ic.t) : null;
+    const sigN = edgeS && edgeS.ic ? toNum(edgeS.ic.n_obs) : null;
+    const sigEff = perfD && perfD.risk && perfD.risk.signal_level &&
+      perfD.risk.signal_level.corr_adjusted
+      ? toNum(perfD.risk.signal_level.corr_adjusted.effective_n_corr) : null;
     const fRows = ((fi && fi.ok && fi.data && fi.data.rows) || [])
       .filter((r) => r && typeof r === 'object')
       .slice()
@@ -2094,7 +2119,7 @@
     });
 
     const families = Array.from(new Set(rows.map((r) => r.family).filter(Boolean))).sort();
-    setSub('Alpha158 ' + fRows.length + ' 个因子（有效模型）· 归档信号 ' + (res.data.total || rows.length) + ' 个');
+    setSub('Alpha158 ' + fRows.length + ' 个因子 · 手写信号 ' + (res.data.total || rows.length) + ' 个（并列两栈，不可直接比较）');
 
     const fam = S.filter.family;
     const q = (S.filter.q || '').trim().toLowerCase();
@@ -2175,21 +2200,27 @@
       }) + (sorted.length > 500 ? '<p class="muted" style="margin-top:8px">仅渲染前 500 行（共 ' + sorted.length + ' 行）</p>' : '') + '</div>'
     });
 
+    // 73 个手写信号是「量化预知」的测量本体，不是归档 —— 不折叠、不降级。
+    // 不利结论可以显示得不好看，但不能被藏起来。
     const legacyBanner = banner({
-      tone: 'warn', icon: 'alert',
-      title: '这一页是旧版手写信号（实测 IC −0.0185，无预测能力），保留仅供参考',
-      text: '有效模型请见 <button type="button" class="link-btn" data-page="model">模型</button> 页' +
-        '（Alpha158+GBDT，IC +0.0260，样本外验证通过）。',
-      meta: '73 个信号 · 相关性调整后有效独立信号约 12 个'
+      tone: (sigT !== null && Math.abs(sigT) < 2) ? 'warn' : 'bad',
+      icon: 'alert',
+      title: sigIc === null
+        ? '73 个手写信号：IC 未就绪（缺 /api/performance）'
+        : '73 个手写信号：Rank IC ' + num(sigIc, 4) +
+          '（HAC t ' + num(sigT, 2) + '，n=' + num(sigN, 0) + '）',
+      text: '这是本项目的测量对象本身。上方 Alpha158+GBDT 是另一套并行模型，' +
+        '池、区间、因子数都不同，<b>两者不可直接比较</b>；各自的样本量与口径见各自卡片。',
+      meta: '73 个信号 · 相关性调整后有效独立信号 ' +
+        (sigEff === null ? '—' : num(sigEff, 1)) + ' / 73 · 判定：' +
+        (sigIc === null ? '未就绪' : (Math.abs(sigT) < 2 ? '与 0 不可区分' : '显著'))
     });
 
-    // 旧信号整体折叠：默认收起，想看再展开
-    const legacyBlock = '<details class="legacy-archive">' +
-      '<summary>归档：旧版 73 个手写信号（实测 IC −0.0185，已停用）</summary>' +
+    const legacyBlock =
       '<div style="margin:14px 0">' + legacyBanner + '</div>' +
       '<div style="margin-bottom:14px">' + barsCard + '</div>' +
       (detail ? '<div style="margin-bottom:14px">' + detail + '</div>' : '') +
-      tableCard + '</details>';
+      tableCard;
 
     return '<div style="margin-bottom:14px">' + factorCard + '</div>' + legacyBlock;
   }
@@ -2652,6 +2683,10 @@
     // 不带 horizon 读到的是 walk-forward 回放，点「生成预测」不会有变化。
     const _hz = S.modelHorizon || 1;
     const res = await apiCached('/api/ledger?days=' + S.filter.days + '&horizon=' + _hz);
+    // 主台账（data/pred_ledger/*.jsonl）长期只写不读：14MB / 4.7 万行没有任何
+    // 读取方，于是 5.85× 重复写入无人发现。这里把它的真实总量与重复率摊开。
+    const _fRes = await apiCached('/api/ledger?source=file&limit=1', 60000);
+    const _fd = (_fRes && _fRes.ok && _fRes.data) ? _fRes.data : null;
     if (!res.ok || !res.data) { setSub('未就绪'); return notReadyBox(res); }
 
     const all = (res.data.rows || []).filter((r) => r && typeof r === 'object');
@@ -2789,7 +2824,29 @@
           '</div>' +
           '<span class="muted">命中 = 预测方向与实际一致（预测跌而实际跌也算命中），不是"涨了才算命中"</span>' +
         '</div>' +'</div>'
-    });
+    }) + (_fd ? card({
+      title: '主台账（文件）',
+      sub: 'data/pred_ledger/' + (_fd.file || '—') +
+        (_fd.dedup ? ' · 去重视图（每 (决策日,代码,周期) 保留最后一条）'
+                   : ' · 原始台账（含历史重复，只追加不可回改）'),
+      body: '<div style="padding:0 16px 16px">' +
+        kv([
+          kvItem('文件总行数', num(_fd.total_records, 0), '', '物理行数'),
+          kvItem('唯一预测数', num(_fd.total_deduped, 0), '', '去重后的 (日,代码,周期) 键数'),
+          kvItem('历史重复行',
+            _fd.total_records !== null && _fd.total_deduped !== null
+              ? num(_fd.total_records - _fd.total_deduped, 0) : '—',
+            (_fd.total_records && _fd.total_deduped &&
+             _fd.total_records > _fd.total_deduped) ? 'warn-text' : '',
+            _fd.total_records && _fd.total_deduped
+              ? '重复率 ' + num((1 - _fd.total_deduped / _fd.total_records) * 100, 1) + '%'
+              : '')
+        ]) +
+        '<p class="muted" style="margin:12px 0 0">' +
+        '幂等写入已生效（append_ledger 按 (as_of, code, horizon) 去重）；' +
+        '历史重复受 INV-7 约束不可回改，读数请用去重视图。' +
+        '</p></div>'
+    }) : '');
   }
 
   /* ============================== 模拟实盘 ============================= */
@@ -3296,6 +3353,19 @@
     { id: 'INV-8', name: 'UI 不做计算', check: 'webui/ 只读 JSON' }
   ];
 
+  // 数据源健康度：扁平（现行）与 {sources:{...}}（旧假设）两种结构都吃。
+  const _SRC_META = ['as_of', 'generated_at', 'sources', 'summary', 'updated_at', 'note'];
+  function _srcMap(sh) {
+    if (!sh || typeof sh !== 'object') return {};
+    if (sh.sources && typeof sh.sources === 'object') return sh.sources;
+    const out = {};
+    Object.keys(sh).forEach((k) => {
+      if (_SRC_META.indexOf(k) >= 0) return;
+      if (sh[k] && typeof sh[k] === 'object') out[k] = sh[k];
+    });
+    return out;
+  }
+
   async function pageRisk() {
     const [perfRes, healthRes, onlineRes] = await Promise.all([
       apiCached('/api/performance'), apiCached('/api/health'),
@@ -3359,8 +3429,12 @@
         ],
         // source_health.json 的结构是 {as_of, sources:{...}, summary}。
         // 之前直接遍历顶层，把 as_of / sources / summary 当成"源"显示出来了。
-        rows: Object.keys((sh && sh.sources) || {}).map((k) => {
-          const v = ((sh && sh.sources) || {})[k] || {};
+        // qcore/sources.py 写的是**扁平**结构 {eastmoney:{...}, sina:{...}}，
+        // 而这里过去读 sh.sources —— 一个从来没有写入方的嵌套键，
+        // 于是「数据源健康度」表恒为空（陷阱 18：只改读取方）。
+        // 兼容两版：有 sources 就用，没有就把顶层对象当源表，跳过元信息键。
+        rows: Object.keys(_srcMap(sh)).map((k) => {
+          const v = _srcMap(sh)[k] || {};
           const failN = toNum(v.fail);
           const okN = toNum(v.ok);
           const bad = (failN !== null && failN > 0 && (okN === null || okN === 0));

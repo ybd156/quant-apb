@@ -203,7 +203,11 @@ def build_ledger(p3d: Panel3D, scores: np.ndarray, cfg: RunConfig) -> pd.DataFra
         "exit_price": p3d.OPEN[ti + lag + h, ni],
         "ret": ret_h[ti, ni],
     })
-    df["hit"] = np.sign(df["score"]) == np.sign(df["ret"])
+    # ret=NaN（未到期 / 停牌缺口）时 hit 必须是「未知」，不能记成 False。
+    # 旧写法 np.sign(nan)==np.sign(nan) -> False，于是任何 sum(hit)/len(hit)
+    # 都把未到期样本当「没命中」计入分母 —— 与 status="pending" 自相矛盾。
+    df["hit"] = (np.sign(df["score"]) == np.sign(df["ret"])).where(
+        df["ret"].notna(), other=None)
     df["status"] = np.where(df["ret"].notna(), "scored", "pending")
     return df
 

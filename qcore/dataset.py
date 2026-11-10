@@ -104,6 +104,14 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
     N = len(code_list)
 
     ix = load_index("000300")
+    # regime 必须用「完整指数历史」算，再 reindex 到本面板的日期。
+    # 旧实现拿 start 之后的切片算 vol_pct(250)，窗口前 250 天全 NaN，
+    # build_regime 又 fillna(0) → 增量窗口(900 天)与全量历史在同一历史日
+    # 给出不同 regime（实测 57/610 天 = 9.3%），而 regime 决定用哪套权重，
+    # 于是「今天的分」≠「回放的分」。
+    # 注意：build_regime 内部全部是向后滚动/位移，只用 ≤t 的信息，
+    # 因此保留 start 之前的行不会引入未来函数。
+    ix_full = ix.copy()
     ix = ix[(ix["date"] >= pd.Timestamp(start))].reset_index(drop=True)
     if cutoff is not None:
         ix = ix[ix["date"] <= pd.Timestamp(cutoff)].reset_index(drop=True)
@@ -182,7 +190,7 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
         if verbose and (n + 1) % chunk == 0:
             print(f"  ... {n + 1}/{N}", flush=True)
 
-    regime = build_regime(ix, dates)
+    regime = build_regime(ix_full, dates)
     p3d = Panel3D(
         dates=dates, codes=code_list, sids=sids,
         DIR=DIR, STR=STR, OPEN=OPEN, CLOSE=CLOSE, RET=RET, SIGMA=SIGMA,

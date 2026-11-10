@@ -66,6 +66,34 @@ def _atomic(path: str, obj) -> None:
     os.replace(tmp, path)
 
 
+def _read_strict(h: int):
+    """严格读：返回 (rows, n_bad, err)。
+
+    `_read` 为了兼容 7 个读方保持「坏行静默丢弃 / 读失败返回 []」的旧行为，
+    但那个行为用在写入侧是致命的：`record()` 先 `_read` 再 `_write_all`
+    （整文件重写），一旦读到 []，就会把整本台账写成只剩 1 条。
+    写入路径必须用这个严格版，读不全就拒绝写。
+    """
+    p = _path(h)
+    if not os.path.isfile(p):
+        return [], 0, None
+    rows = []
+    n_bad = 0
+    try:
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    n_bad += 1
+    except Exception as e:  # noqa: BLE001
+        return [], n_bad, f"{type(e).__name__}: {e}"
+    return rows, n_bad, None
+
+
 def _read(h: int) -> List[Dict]:
     p = _path(h)
     if not os.path.isfile(p):
@@ -159,7 +187,14 @@ def record(h: int, picks: Dict, verbose: bool = False) -> Dict:
         "result": None,
     }
 
-    existing = _read(h)
+    existing, _n_bad, _err = _read_strict(h)
+    if _err is not None:
+        return {"ok": False, "reason": "ledger_unreadable", "detail": _err,
+                "hint": "台账读取失败；拒绝重写以免丢历史，请先人工检查文件权限"}
+    if _n_bad:
+        return {"ok": False, "reason": "ledger_corrupt", "n_bad": _n_bad,
+                "hint": ("台账有损坏行；_write_all 是整文件重写，"
+                         "此时写入会永久删除坏行与后续内容。请先人工修复")}
     prev = next((x for x in existing
                  if str(x.get("as_of")) == as_of), None)
     if prev and str(prev.get("status")) not in ("pending", "", "None"):
