@@ -67,6 +67,8 @@ ENTRIES: List[str] = [
     "tools/prewarm_external.py",
     # --- 静默后台守护：持续跟随版本更新 + 崩溃自动拉起
     "tools/agent_daemon.py",
+    # --- 配置向导：窗口填令牌 / 测连接 / 保存
+    "tools/kit_setup.py",
 ]
 
 #: 无论闭包是否覆盖，都必须打包的（`__init__` 是包本身）

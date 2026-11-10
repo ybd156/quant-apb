@@ -73,6 +73,9 @@ jobs:
       - name: 训练机守护（版本跟随 / 崩溃重拉 / 启动器编码）
         run: python -m tests.test_agent_daemon
 
+      - name: 配置向导（令牌探测 / 保留其它字段 / 脚本编码）
+        run: python -m tests.test_kit_setup
+
       - name: 训练机套件闭包完整性（所有任务类型可承接）
         run: python -m scripts.kit_manifest --verify . --no-import
 

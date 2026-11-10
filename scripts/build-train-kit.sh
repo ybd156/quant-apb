@@ -60,7 +60,9 @@ cp "$ROOT/tools/defaults.py" "$KIT/tools/"
 cp "$ROOT/tools/bootstrap.ps1" "$KIT/tools/"
 cp "$ROOT/tools/kit_selftest.py" "$KIT/tools/"
 cp "$ROOT/tools/agent_daemon.py" "$KIT/tools/"
+cp "$ROOT/tools/kit_setup.py" "$KIT/tools/"
 cp "$ROOT/start_agent.bat" "$ROOT/start_agent_hidden.vbs" "$KIT/" 2>/dev/null || true
+cp "$ROOT/setup.bat" "$KIT/" 2>/dev/null || true
 cp "$ROOT/scripts/kit_manifest.py" "$KIT/scripts/"
 cp "$ROOT/scripts/benchmark_alpha158.py" "$KIT/scripts/"
 cp "$ROOT/requirements.txt" "$KIT/"
