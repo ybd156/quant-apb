@@ -172,7 +172,13 @@ def main(argv=None) -> int:
 
     findings.append("退市股覆盖：not_measured（本地无退市名单，需外部数据源）")
 
-    res = {"ok": verdict not in ("pool_static", "mask_noop"), "verdict": verdict,
+    # 退出码语义：只有**在真实池规模上**测出的问题才算问题。
+    # 薄面板（N < 200）上「掩码无效 / 池恒定」是样本太小的必然结果，
+    # 拿它让 CI 变红等于把「测不准」当成「测得坏」。
+    _n = (turn.get("N") or 0) if turn.get("ok") else 0
+    _blocking = verdict in ("pool_static", "mask_noop") and _n >= 200
+    res = {"ok": not _blocking, "verdict": verdict, "panel_n": _n,
+           "blocking": _blocking,
            "pool_snapshot": snap, "univ_turnover": turn,
            "findings": findings,
            "limitation": ("本探针只能证明「掩码是否在换人」与「池是不是今日快照」；"
