@@ -81,6 +81,7 @@ Python ≥ 3.10。禁止引入 scipy / sklearn / talib / requests。
 | `audit/basis_probe.py` | 复权方式逐股分类 + 压缩因子 + 秩重排 | `data/state/basis.json` |
 | `audit/basis_ic.py` | 同一份 scores 换三种收益口径重算 Rank IC | `data/state/basis_ic.json` |
 | `audit/pool_probe.py` | 生存者偏差：池快照 / UNIV 周转 / 掩码排除率 | 无 |
+| `tools/ui_audit.mjs` | **无头浏览器界面审计**：7 个页面渲染后做跨字段一致性断言 | 无（只读） |
 
 > **本表只覆盖核心链路。** `qcore/` 实际有 **120 个 .py**（约 4 万行）。
 > 引用某个模块前先 `ls qcore/`，并对照 `docs/21_unwired_modules.md`：
@@ -250,6 +251,10 @@ regime 混合    γ = γ_max·n/(n+γ_n0);  z = (1-γ)z_g + γz_r
 | 24 | **`scores.shape[1]` 当股票数** | `status.json` 的 `n_stocks` 恒等于 `n_days`，UI 显示「2633 只」真值 112 | 用 `len(res["codes"])`；断言 `n_stocks != n_days` |
 | 25 | **成本假设低于法定下限** | `account.json` 写 `cost_bps=10.0`，回测 19.28 / 模拟盘 10.0，同一次输出两个基准 | `account_config.COST_FLOOR_BPS`（CN 11.28 / HK 11.0）自动回落并留痕 |
 | 26 | **豁免清单把自己的证据洗掉** | 生成器沿用上次的 waivers 扫描 → 已豁免文件扫出 0 条 → 新清单一路归零（246→207→0） | 扫描前先 `_FILE_WAIVERS = {}`；`gen_waivers --check` 进 CI |
+| 27 | **门禁模块存在但零消费** | `session.in_window()` 全项目唯一消费者是 UI 一行展示；`paper_auto`/`live`/`daily_append` 里时段 token 命中 **0** → 非交易时间照常成交（实测周一 13:10 用周五收盘价成交 20 笔） | 新增门禁必须同时给出**调用点**与 `tests/test_time_gates.py`；CI 跑它 |
+| 28 | **用文件 mtime 判数据新鲜度** | 缓存 mtime 2026-11-08（判「新鲜」）而最后一根 bar 是 11-06，**缺一整个已收盘交易日**；盘中 09:41 的部分 bar 被当收盘价缓存 5 天 | 判据用「数据日期 vs 交易日历」，`load_kline().attrs` 给 `data_last_date`/`stale`；`_strip_forming_bar` 丢弃未收盘 bar |
+| 29 | **界面审计自己失灵** | ①只在整页找时间字符串 → 「数据截至 11-06」让「成交表有时刻」假通过；②静态资源缓存 → 改了 `app.js` 审计仍对着旧界面报结论；③`innerText` 对折叠容器返回空串 | 断言只针对目标表格；每次审计用全新 profile + `Network.setCacheDisabled`；行级判断用 `textContent` |
+| 30 | **配置迁移只保留白名单键** | `_migrate()` 只留 `DEFAULTS` 里的键 → 用户设的 `horizon_capital` 被**整段丢掉**，`capital_for()` 永远回落到 `initial_capital`，「各周期本金」设置形同虚设 | 迁移要显式保留非默认字段；设置项必须有 round-trip 测试（存→读→再存→读） |
 
 ---
 
@@ -478,3 +483,8 @@ MIN_TRADES = 30   # 单组最少交易次数，低于此标 insufficient
 10. **不利结论不许折叠**：73 个手写信号是测量本体，不许降级成 `<details>` 归档区。
 11. **台账必须有人读**：`/api/ledger?source=file` 直读主台账（分页 + 总数 + 去重数）；
     只写不读的文件，重复写入 5.85× 也没人会发现。
+12. **改界面必须跑无头审计**：`node tools/ui_audit.mjs --port <端口>`（先起
+    `python -m webui.server`）。它抓渲染后的 DOM 做跨字段断言，能抓住
+    「同一件事两处写法不同」——静态读代码看不见，肉眼看截图会漏。
+    实测它一次抓出 5 个我自己没发现的问题（持有期与周期不符、单位写成「天」、
+    模拟盘写成真实委托、净值硬编码 100 万、过期版本号当最新）。
