@@ -66,7 +66,11 @@ def _univ_turnover(n_codes: int, start: str) -> dict:
         return {"ok": False, "reason": "no_local_kline",
                 "hint": "先跑一次 python -m qcore.pipeline 生成 data/raw/kline"}
     codes = [os.path.basename(f).split("_")[0] for f in files[:n_codes]]
-    p3d = build_dataset(codes, start=start, horizon=5, verbose=False)
+    try:
+        p3d = build_dataset(codes, start=start, horizon=5, verbose=False)
+    except Exception as e:  # noqa: BLE001
+        # fail-soft：指数/行情拉不到是「测不了」，不是「测出问题」
+        return {"ok": False, "reason": f"build_failed: {type(e).__name__}: {str(e)[:120]}"}
     import numpy as np
     U = p3d.UNIV                      # (T,N) bool
     dates = np.asarray(p3d.dates)

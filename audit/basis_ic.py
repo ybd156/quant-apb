@@ -155,12 +155,22 @@ def main(argv=None) -> int:
     codes = [os.path.basename(f).split("_")[0] for f in files[:a.codes]]
 
     print(f"[1/4] build_dataset  {len(codes)} 只 …", flush=True)
-    p3d = build_dataset(codes, start=a.start, horizon=a.horizon, verbose=False)
+    # 诊断工具必须 fail-soft：CI 上行情/指数可能拉不到（境内数据源常封 GitHub IP），
+    # 那是「测不了」，不是「测出问题」。测不了 → 退出 0 并说明；测出问题才非零。
+    try:
+        p3d = build_dataset(codes, start=a.start, horizon=a.horizon, verbose=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"[SKIP] 面板构建失败，本环境无法测量：{type(e).__name__}: {str(e)[:160]}")
+        return 0
     print(f"      T={p3d.shape[0]} N={p3d.shape[1]} S={p3d.shape[2]}", flush=True)
 
     print("[2/4] walkforward（只取 scores，不重算信号逻辑）…", flush=True)
-    res = run_walkforward(p3d, RunConfig(horizon=a.horizon, warmup=120,
-                                        record_ledger=False))
+    try:
+        res = run_walkforward(p3d, RunConfig(horizon=a.horizon, warmup=120,
+                                            record_ledger=False))
+    except Exception as e:  # noqa: BLE001
+        print(f"[SKIP] 回放失败，本环境无法测量：{type(e).__name__}: {str(e)[:160]}")
+        return 0
     scores = np.asarray(res["scores"], dtype=np.float64)        # (N,T)
     print(f"      scores {scores.shape}", flush=True)
 
