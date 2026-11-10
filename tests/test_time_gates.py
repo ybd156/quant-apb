@@ -60,6 +60,67 @@ def main() -> int:
     check("in_session(上午) == True", S.in_session(datetime(2026, 11, 10, 10, 0)) is True)
     check("in_session(国庆) == False", S.in_session(datetime(2026, 10, 1, 10, 0)) is False)
 
+    # ---------- 1b) 多市场时段：美股四段 / 港股收盘 16:00 ----------
+    print(chr(10) + "[1b] 多市场时段（实测事故：美股被 A 股时段拦住）")
+
+    def t_multi():
+        from zoneinfo import ZoneInfo
+        from qcore.session import segment, in_session
+        ET = ZoneInfo("America/New_York")
+        import datetime as _dt
+        # 美股四段（含跨午夜夜盘）
+        cases = [
+            (21, 0, "overnight", False),
+            (2, 0, "overnight", False),
+            (6, 0, "premarket", False),
+            (11, 0, "regular", True),
+            (15, 0, "regular", True),
+            (18, 0, "afterhours", False),
+            (20, 30, "overnight", False),
+        ]
+        bad = []
+        for h, mi, exp, trad in cases:
+            t = _dt.datetime(2026, 11, 11, h, mi, tzinfo=ET)
+            seg = segment(t, "US")
+            if seg["phase"] != exp or bool(seg["tradable"]) != trad:
+                bad.append(f"ET {h:02d}:{mi:02d} -> {seg['phase']}/{seg['tradable']} "
+                           f"期望 {exp}/{trad}")
+        assert not bad, "; ".join(bad)
+        # 边界：20:00 属夜盘，04:00 属盘前
+        assert segment(_dt.datetime(2026, 11, 11, 19, 59, tzinfo=ET), "US")["phase"] == "afterhours"
+        assert segment(_dt.datetime(2026, 11, 11, 20, 0, tzinfo=ET), "US")["phase"] == "overnight"
+        assert segment(_dt.datetime(2026, 11, 11, 4, 0, tzinfo=ET), "US")["phase"] == "premarket"
+        # 港股收盘 16:00，比 A 股晚 1 小时
+        assert segment(_dt.datetime(2026, 11, 10, 15, 30), "HK")["phase"] == "afternoon"
+        assert segment(_dt.datetime(2026, 11, 10, 15, 30), "CN")["phase"] == "postclose"
+        # 只有常规盘中 in_session 为真
+        assert in_session(_dt.datetime(2026, 11, 11, 11, 0, tzinfo=ET), "US") is True
+        assert in_session(_dt.datetime(2026, 11, 11, 18, 0, tzinfo=ET), "US") is False
+        assert in_session(_dt.datetime(2026, 11, 11, 18, 0, tzinfo=ET), "US",
+                          allow_extended=True) is True
+        return "US 四段 + 港股 16:00 + 边界 20:00/04:00"
+
+    check("多市场时段分段正确", t_multi)
+
+    # ---------- 1c) 美股盘中被放行（原来被 A 股时段拦住）----------
+    def t_us_gate():
+        from zoneinfo import ZoneInfo
+        import datetime as _dt
+        ET = ZoneInfo("America/New_York")
+        r = PA._assert_tradable({"as_of": "2026-11-10"},
+                                now=_dt.datetime(2026, 11, 11, 11, 0, tzinfo=ET),
+                                market="US")
+        assert r["ok"], f"美股盘中应放行，实际 {r.get('reason')}"
+        assert r.get("price_mode") == "live", r.get("price_mode")
+        # 同一时刻 A 股应拒绝
+        r2 = PA._assert_tradable({"as_of": "2026-11-10"},
+                                 now=_dt.datetime(2026, 11, 11, 11, 0, tzinfo=ET),
+                                 market="CN")
+        assert not r2["ok"], "同一时刻 A 股不该放行"
+        return f"US 放行(live) / CN 拒绝({r2.get('reason')})"
+
+    check("美股盘中放行、A股同时刻拒绝", t_us_gate)
+
     # ---------- 2) lag_trading_days：基准必须是「最近已收盘交易日」 ----------
     print("\n[2] lag_trading_days（基准不是 qlib 日历最后一根）")
     lag_cases = [

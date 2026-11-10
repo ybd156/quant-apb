@@ -274,7 +274,7 @@ def lag_trading_days(as_of: str, now: Optional[datetime] = None) -> Optional[int
     phase = None
     try:
         from . import session as _S
-        phase = _S.in_window(now)
+        phase = _S.in_window(now, "CN")   # lag_trading_days 是 A 股日历口径
     except Exception:  # noqa: BLE001
         phase = None
 
@@ -294,7 +294,9 @@ def lag_trading_days(as_of: str, now: Optional[datetime] = None) -> Optional[int
 
 def _assert_tradable(as_of_hint=None, dry_run: bool = False,
                      now: Optional[datetime] = None,
-                     allow_backfill: bool = False) -> Dict:
+                     allow_backfill: bool = False,
+                     market: str = "CN",
+                     allow_extended: bool = False) -> Dict:
     """交易时间门禁 —— 全项目唯一实现。
 
     实测事故（2026-11-09）：周一 13:10 用**周五收盘价**成交 20 笔，并记成周五。
@@ -313,6 +315,7 @@ def _assert_tradable(as_of_hint=None, dry_run: bool = False,
     `allow_backfill=True` 显式越过 ③，但会在返回体里留痕 `"backfilled": True`。
     """
     import datetime as _dt
+    mkt = str(market or "CN").upper()
     now = now or datetime.now()
     picks = as_of_hint or {}
     as_of = str((picks or {}).get("as_of") or "")[:10]
@@ -321,69 +324,110 @@ def _assert_tradable(as_of_hint=None, dry_run: bool = False,
                 "hint": "picks 缺 as_of，无法判定交易日"}
 
     # ① 交易日
+    #   A 股：用权威日历（含节假日）
+    #   港股/美股：**没有当地节假日日历**，只判周末 —— 这是已知边界，
+    #   宁可漏判（放行）也不误判成「节假日不能交易」，因为误判会让用户
+    #   在真正的交易日被拦住，且完全不知道原因。
     try:
         from . import calendar_cn as CAL
-        is_td, basis = CAL.is_trading_day(_dt.date.fromisoformat(as_of))
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "reason": "calendar_unavailable", "detail": str(e)[:120]}
-    if not is_td:
-        return {"ok": False, "reason": "not_trading_day", "as_of": as_of,
-                "hint": f"{as_of} 不是交易日（依据 {basis}），不能成交"}
+    _d = _dt.date.fromisoformat(as_of)
+    if mkt == "CN":
+        is_td, basis = CAL.is_trading_day(_d)
+        if not is_td:
+            return {"ok": False, "reason": "not_trading_day", "as_of": as_of,
+                    "market": mkt,
+                    "hint": f"{as_of} 不是交易日（依据 {basis}），不能成交"}
+    else:
+        if _d.weekday() >= 5:
+            return {"ok": False, "reason": "not_trading_day", "as_of": as_of,
+                    "market": mkt,
+                    "hint": f"{as_of} 是周末，{mkt} 不能成交"}
 
     # ② 不许是未来 / 不许是「今天还没收盘」/ 不许陈旧
     target = _dt.date.fromisoformat(as_of)
     if target > _dt.date.today():
         return {"ok": False, "reason": "as_of_in_future", "as_of": as_of}
-    # 最近**已收盘**交易日：盘后（且今天是交易日）就是今天，否则是上一交易日
+    # 最近**已收盘**交易日
     try:
         from . import session as _S2
-        _ph = _S2.in_window(now)
+        _ph = _S2.in_window(now, mkt)
+        _local = _S2._market_now(now, mkt)
     except Exception:  # noqa: BLE001
-        _ph = None
-    if _ph == "postclose" and CAL.is_trading_day_bool(now.date()):
-        _ref = now.date()
+        _ph, _local = None, now
+    if mkt == "CN":
+        if _ph == "postclose" and CAL.is_trading_day_bool(_local.date()):
+            _ref = _local.date()
+        else:
+            _ref = CAL.prev_trading_day(_local.date())
     else:
-        _ref = CAL.prev_trading_day(now.date())
+        # 港股/美股：只按周末退，不用 A 股日历（会把 A 股节假日当成休市）
+        _ref = _local.date()
+        if _ph not in ("postclose",) and _ph != "closed":
+            _ref = _ref if _ph in ("morning", "afternoon", "lunch") else _ref
+        while _ref.weekday() >= 5:
+            _ref = _ref - _dt.timedelta(days=1)
     if target > _ref:
         return {"ok": False, "reason": "not_closed_yet", "as_of": as_of,
-                "latest_closed": str(_ref),
-                "hint": f"{as_of} 还没收盘（最近已收盘交易日是 {_ref}），不能成交"}
-    # 注意必须把 now 传进去：旧写法用真实时钟，注入的 now 只影响 ③，
-    # 于是 ② 和 ③ 会基于两个不同的「现在」，测试与实际行为不一致。
-    lag = lag_trading_days(as_of, now)
-    if lag is None:
-        return {"ok": False, "reason": "stale_unknown", "as_of": as_of,
-                "hint": "算不出 as_of 落后几个交易日（日历不可用），拒绝成交"}
-    if lag != 0:
-        return {"ok": False, "reason": "stale_picks", "as_of": as_of, "lag": lag,
-                "hint": f"picks 落后 {lag} 个交易日，先刷新预测再调仓"}
+                "latest_closed": str(_ref), "market": mkt,
+                "hint": f"{as_of} 还没收盘（{mkt} 最近已收盘交易日是 {_ref}），不能成交"}
+    if mkt == "CN":
+        # 注意必须把 now 传进去：旧写法用真实时钟，注入的 now 只影响 ③，
+        # 于是 ② 和 ③ 会基于两个不同的「现在」，测试与实际行为不一致。
+        lag = lag_trading_days(as_of, now)
+        if lag is None:
+            return {"ok": False, "reason": "stale_unknown", "as_of": as_of,
+                    "hint": "算不出 as_of 落后几个交易日（日历不可用），拒绝成交"}
+        if lag != 0:
+            return {"ok": False, "reason": "stale_picks", "as_of": as_of, "lag": lag,
+                    "hint": f"picks 落后 {lag} 个交易日，先刷新预测再调仓"}
+    else:
+        # 港美股：用「自然日差」近似（没有当地交易日历），超过 5 天算陈旧
+        _gap = (target - _ref).days if target <= _ref else 0
+        if (now.date() - target).days > 5:
+            return {"ok": False, "reason": "stale_picks", "as_of": as_of,
+                    "lag": (now.date() - target).days, "market": mkt,
+                    "hint": f"picks 已 {as_of}，距今天超过 5 天，先刷新预测再调仓"}
 
-    # ③ 取价方式：盘中用**实时价**；盘前/盘后不能成交（dry_run 才允许按收盘价试算）。
-    # 旧实现是「盘中一律拒绝」，用户的反问很对：盘中有实时价，为什么要拦？
-    # 真正的问题从来不是「能不能交易」，而是「拿什么价成交」。
+    # ③ 取价方式：**常规盘中**用实时价成交；盘前/盘后/夜盘默认不成交。
+    #
+    # 为什么默认不认延长时段：那几段流动性薄、价差宽，
+    # 用那些价成交会让这台测量仪的读数失真（不是不能下单，是测不准）。
+    # 需要时显式 allow_extended=True。
     try:
         from . import session as _S
-        phase = _S.in_window(now)
+        seg = _S.segment(now, mkt)
     except Exception:  # noqa: BLE001
-        phase = "unknown"
-    if phase in ("morning", "afternoon", "lunch"):
-        # 盘中（含午休，最新价停在 11:30）用**实时价**成交。
+        seg = {"phase": "unknown", "tradable": False, "label": mkt,
+               "local": now, "segments": []}
+    phase = seg.get("phase")
+    if seg.get("tradable") or (allow_extended and phase != "closed"):
         price_mode = "live"
+        if phase in ("overnight", "premarket", "afterhours",
+                     "auction_open", "auction_close"):
+            price_mode = "extended"     # 延长时段：实时价但标注口径
     else:
-        # 盘前 / 盘后 / 非交易时段：A 股**不能成交**。
-        # 收盘价在 15:00 那一刻就定了，15:05 下单拿不到那个价 ——
-        # 旧提示「请在 15:05–17:00 用收盘价调仓」是错的（用户当场指出）。
-        # 唯一诚实的做法：拒绝，让人在盘中调，或排队到次日开盘。
         if dry_run:
-            price_mode = "close"      # 试算不落盘，允许用收盘价演练
+            price_mode = "close"        # 试算不落盘，允许用收盘价演练
         else:
+            _win = []
+            for name, a, b, ok in (seg.get("segments") or []):
+                if ok:
+                    _win.append(f"{a[0]:02d}:{a[1]:02d}–{b[0]:02d}:{b[1]:02d}")
+            _txt = " / ".join(_win) or "交易时段"
+            _label = seg.get("label") or mkt
             return {"ok": False, "reason": "market_closed", "as_of": as_of,
-                    "phase": phase, "now": now.isoformat(timespec="seconds"),
-                    "hint": f"A股已收盘（{phase}），盘后不能成交。"
-                            f"请在交易日 09:30–11:30 / 13:00–15:00 调仓；"
-                            f"盘中会用实时价成交，不是收盘价"}
+                    "phase": phase, "market": mkt,
+                    "now": now.isoformat(timespec="seconds"),
+                    "hint": f"{_label}当前是「{phase}」，不在可成交时段。"
+                            f"请在{_label}常规盘中 {_txt} 调仓"
+                            f"（{_S.MARKET_SESSIONS.get(mkt, {}).get('tz', '本地时间')}）；"
+                            f"延长时段流动性薄，默认不用于成交，"
+                            f"确需成交请显式 allow_extended"}
     return {"ok": True, "as_of": as_of, "lag": 0, "phase": phase,
-            "price_mode": price_mode,
+            "price_mode": price_mode, "market": mkt,
+            "extended": price_mode == "extended",
             "backfilled": bool(allow_backfill)}
 
 
@@ -423,7 +467,8 @@ def _infer_market(code: str) -> str:
 def rebalance(picks: Optional[Dict] = None, market: str = "CN",
               top_k: Optional[int] = None, dry_run: bool = False,
               verbose: bool = True, horizon: int = 1,
-              force: bool = False, allow_backfill: bool = False) -> Dict:
+              force: bool = False, allow_backfill: bool = False,
+              allow_extended: bool = False) -> Dict:
     """
     按 picks 调仓。返回 {orders, filled, skipped, account}。
 
@@ -482,7 +527,8 @@ def rebalance(picks: Optional[Dict] = None, market: str = "CN",
     # ① as_of 是交易日 ② as_of 是「最近已收盘交易日」（陈旧信号不许成交）
     # ③ 执行时刻落在「as_of 收盘之后、下一交易日开盘之前」（盘中不许拿旧收盘价成交）
     _gate = _assert_tradable(as_of_hint=picks, dry_run=dry_run,
-                             allow_backfill=allow_backfill)
+                             allow_backfill=allow_backfill, market=market,
+                             allow_extended=allow_extended)
     if not _gate["ok"]:
         return {**_gate, "market": market, "horizon": h}
 

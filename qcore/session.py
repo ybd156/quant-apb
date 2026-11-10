@@ -311,46 +311,166 @@ def postclose(verbose: bool = True) -> Dict:
 
 
 # ------------------------------------------------------------------ 调度
-def in_window(now: Optional[datetime] = None) -> str:
-    """判断当前处于哪个时段。返回 premarket|morning|lunch|afternoon|intraday|postclose|closed
+#: 各市场的时段表（**各自本地时间**）。
+#:
+#: 每个市场都是多段的，美股还有一段**跨午夜**的夜盘（20:00–04:00 ET），
+#: 所以窗口用「分钟数区间」表示，start > end 表示跨午夜。
+#:
+#: `tradable` 决定这一段算不算「可以成交」：
+#:   · 只有**常规盘中**默认 tradable=True
+#:   · 盘前/盘后/夜盘 tradable=False —— 不是不能下单，而是流动性薄、
+#:     价差宽，用那些价成交会污染这台测量仪的读数。
+#:     真要在这几段成交，显式传 `allow_extended=True`。
+MARKET_SESSIONS: Dict[str, Dict] = {
+    "CN": {
+        "label": "A股", "tz": "Asia/Shanghai", "has_calendar": True,
+        # (名称, 起, 止, 是否可成交)  起止都是 (时, 分)，左闭右开
+        # **顺序有讲究**：segment() 倒序检查，越具体的段放越后面。
+        "segments": [
+            ("premarket",    (8, 30), (9, 30), False),
+            ("auction_open", (9, 15), (9, 25), False),
+            ("morning",      (9, 30), (11, 30), True),
+            ("lunch",        (11, 30), (13, 0), False),
+            ("afternoon",    (13, 0), (15, 0), True),
+            ("auction_close", (14, 57), (15, 0), False),
+            ("postclose",    (15, 5), (17, 0), False),
+        ],
+    },
+    "HK": {
+        "label": "港股", "tz": "Asia/Hong_Kong", "has_calendar": False,
+        "segments": [
+            ("auction_open", (9, 0), (9, 30), False),
+            ("morning",      (9, 30), (12, 0), True),
+            ("lunch",        (12, 0), (13, 0), False),
+            ("afternoon",    (13, 0), (16, 0), True),
+            ("auction_close", (16, 0), (16, 10), False),
+        ],
+    },
+    "US": {
+        "label": "美股", "tz": "America/New_York", "has_calendar": False,
+        "segments": [
+            # 夜盘跨午夜：20:00 → 次日 04:00
+            ("overnight",  (20, 0), (4, 0), False),
+            ("premarket",  (4, 0), (9, 30), False),
+            ("regular",    (9, 30), (16, 0), True),
+            ("afterhours", (16, 0), (20, 0), False),
+        ],
+    },
+}
 
-    两处历史缺陷（实测，2026-11-10）：
-      1. 只判 `weekday() >= 5`，**不含节假日** —— 2026-10-01 10:00 返回 "intraday"，
-         而 `calendar_cn.is_trading_day` 说 False。国庆/春节期间调度器照常跑盘中逻辑。
-      2. `(9,30) <= hm <= (15,0)` 一整段 —— **午休 11:30–13:00 被判成盘中**，
-         于是 `python -m qcore.session` 在 11:47 也会执行 intraday()。
 
-    修法：交易日交给 `calendar_cn`（唯一真源），时段拆成上午/午休/下午三段。
-    返回值保留 "intraday"（上午或下午），另增 "morning"/"lunch"/"afternoon"
-    供需要细分的调用方使用 —— 旧调用方拿到的语义不变（午休不再被算作 intraday）。
+def _market_now(now: Optional[datetime], market: str) -> datetime:
+    """把「现在」换算到该市场的本地时间。
+
+    用 `zoneinfo`（标准库，3.9+）：美东有夏令时，写死 UTC-5 会在夏天错一小时。
+    naive 时间按**本机时区**解释。
     """
     n = now or _now()
+    cfg = MARKET_SESSIONS.get(str(market).upper()) or MARKET_SESSIONS["CN"]
+    tzname = cfg.get("tz")
+    if not tzname:
+        return n
     try:
-        from . import calendar_cn as CAL
-        if not CAL.is_trading_day_bool(n.date()):
-            return "closed"
+        from zoneinfo import ZoneInfo
+        if n.tzinfo is None:
+            n = n.astimezone()
+        return n.astimezone(ZoneInfo(tzname))
     except Exception:  # noqa: BLE001
-        # 日历不可用时退回周末判断（宁严勿宽：不确定就按休市处理会更危险，
-        # 所以这里保留旧行为，但**只作为兜底**）
+        return n
+
+
+def _mins(hm) -> int:
+    return int(hm[0]) * 60 + int(hm[1])
+
+
+def _seg_hit(m: int, seg) -> bool:
+    """分钟数 m 是否落在**左闭右开** [起, 止) 内。起 > 止 表示跨午夜。
+
+    必须左闭右开：美股「盘后 16:00–20:00」与「夜盘 20:00–04:00」在 20:00 处
+    首尾相接，两端都闭会让 20:00 同时命中两段（实测：20:00 被判成盘后，
+    夜盘整段被吞掉）。
+    """
+    a, b = _mins(seg[0]), _mins(seg[1])
+    if a == b:
+        return False
+    if a < b:
+        return a <= m < b
+    return m >= a or m < b           # 跨午夜
+
+
+def segment(now: Optional[datetime] = None, market: str = "CN") -> Dict:
+    """返回当前所处**段**的完整信息（含是否可成交）。
+
+    {"phase", "tradable", "label", "market", "local", "segments": [...]}
+    """
+    m = str(market or "CN").upper()
+    cfg = MARKET_SESSIONS.get(m) or MARKET_SESSIONS["CN"]
+    n = _market_now(now, m)
+
+    if cfg.get("has_calendar"):
+        try:
+            from . import calendar_cn as CAL
+            if not CAL.is_trading_day_bool(n.date()):
+                return {"phase": "closed", "tradable": False, "market": m,
+                        "label": cfg.get("label", m), "local": n, "segments": []}
+        except Exception:  # noqa: BLE001
+            if n.weekday() >= 5:
+                return {"phase": "closed", "tradable": False, "market": m,
+                        "label": cfg.get("label", m), "local": n, "segments": []}
+    else:
         if n.weekday() >= 5:
-            return "closed"
-    hm = (n.hour, n.minute)
-    if (8, 30) <= hm < (9, 30):
-        return "premarket"
-    if (9, 30) <= hm <= (11, 30):
-        return "morning"
-    if (11, 30) < hm < (13, 0):
-        return "lunch"
-    if (13, 0) <= hm <= (15, 0):
-        return "afternoon"
-    if (15, 5) <= hm <= (17, 0):
-        return "postclose"
-    return "closed"
+            return {"phase": "closed", "tradable": False, "market": m,
+                    "label": cfg.get("label", m), "local": n, "segments": []}
+
+    cur = _mins((n.hour, n.minute))
+    # 倒序检查：后面的段更具体（如 A 股 14:57 的收盘竞价覆盖 afternoon）
+    hit = None
+    for name, a, b, ok in reversed(cfg.get("segments") or []):
+        if _seg_hit(cur, (a, b)):
+            hit = (name, ok)
+            break
+    if hit is None:
+        return {"phase": "closed", "tradable": False, "market": m,
+                "label": cfg.get("label", m), "local": n,
+                "segments": cfg.get("segments") or []}
+    return {"phase": hit[0], "tradable": bool(hit[1]), "market": m,
+            "label": cfg.get("label", m), "local": n,
+            "segments": cfg.get("segments") or []}
 
 
-def in_session(now: Optional[datetime] = None) -> bool:
-    """是否处于连续竞价（上午或下午）。午休/盘前/盘后/节假日一律 False。"""
-    return in_window(now) in ("morning", "afternoon")
+#: 旧调用方兼容：把新段名映射回老的粗分类
+_PHASE_ALIAS = {
+    "morning": "morning", "afternoon": "afternoon",
+    "regular": "morning", "lunch": "lunch",
+    "premarket": "premarket", "auction_open": "premarket",
+    "afterhours": "postclose", "overnight": "overnight",
+    "auction_close": "postclose",
+    "postclose": "postclose",        # ← 漏了这条会让 A 股盘后全被判成 closed
+    "closed": "closed",
+}
+
+
+def in_window(now: Optional[datetime] = None, market: str = "CN") -> str:
+    """当前时段（粗分类，向后兼容）：premarket|morning|lunch|afternoon|
+    postclose|overnight|closed
+
+    需要「这一段能不能成交」用 `segment()`，它给的是原始段名 + tradable。
+    """
+    return _PHASE_ALIAS.get(segment(now, market)["phase"], "closed")
+
+
+def in_session(now: Optional[datetime] = None, market: str = "CN",
+               allow_extended: bool = False) -> bool:
+    """是否**可以成交**。
+
+    默认只认常规盘中（美股 regular / A 股 morning+afternoon / 港股同）。
+    盘前盘后夜盘流动性薄、价差宽，默认不算 —— 用那些价成交会污染读数。
+    需要时显式 `allow_extended=True`。
+    """
+    seg = segment(now, market)
+    if seg["phase"] == "closed":
+        return False
+    return bool(seg["tradable"]) or bool(allow_extended)
 
 
 def run(session: str = "auto", verbose: bool = True) -> Dict:

@@ -1345,7 +1345,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
         if which == "auto":
-            cur = S.in_window()
+            _mk = str((query.get("market") or ["CN"])[0]).upper()
+            cur = S.in_window(market=_mk)
             if cur == "closed":
                 return self._ok({"session": "closed",
                                  "note": "不在任何交易时段窗口内",

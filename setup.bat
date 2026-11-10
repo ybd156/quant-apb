@@ -33,4 +33,7 @@ echo       Run train.bat once first (it bootstraps a portable runtime).
 goto END
 
 :END
+rem Keep the window open on double-click failure,
+rem otherwise the user sees nothing at all.
+pause
 endlocal

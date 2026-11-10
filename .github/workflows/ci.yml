@@ -76,8 +76,10 @@ jobs:
       - name: 配置向导（令牌探测 / 保留其它字段 / 脚本编码）
         run: python -m tests.test_kit_setup
 
-      - name: 训练机套件闭包完整性（所有任务类型可承接）
-        run: python -m scripts.kit_manifest --verify . --no-import
+      # 必须跑导入层（不要 --no-import）：AST 看不见 importlib/字符串 import
+      # 这类动态依赖，只有真 import 一遍才能证明「训练机接得住所有任务」。
+      - name: 训练机套件闭包完整性（文件层 + 导入层）
+        run: python -m scripts.kit_manifest --verify .
 
       - name: 入口脚本语法（python -c 块里的反引号会被 sh 当命令替换）
         run: |

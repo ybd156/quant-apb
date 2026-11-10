@@ -147,7 +147,7 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     _live_meta = None
     try:
         from . import session as _S
-        _phase = _S.in_window()
+        _phase = _S.in_window(market=market)
         if _phase in ("morning", "lunch", "afternoon"):
             from .paper_auto import _live_quotes
             _live = _live_quotes(codes)

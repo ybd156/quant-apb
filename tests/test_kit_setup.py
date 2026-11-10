@@ -142,6 +142,62 @@ def main() -> int:
         ctrl = [b for b in raw if b < 0x09 or 0x0b <= b <= 0x0c or 0x0e <= b <= 0x1f]
         check("无控制字符", not ctrl, str(ctrl[:3]))
 
+    print(chr(10) + "[3b] 地址带子路径 -> path 阶段（不是 net）")
+
+    class _Sub(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            return
+
+        def do_GET(self):
+            b = b'{"ok":false}'
+            self.send_response(200 if self.path == "/api/version" else 404)
+            self.send_header("Content-Length", str(len(b)))
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b)
+
+    srv2 = HTTPServer(("127.0.0.1", 0), _Sub)
+    p2 = srv2.server_address[1]
+    threading.Thread(target=srv2.serve_forever, daemon=True).start()
+    r = KS.probe(f"http://127.0.0.1:{p2}/apb", "tok", "", timeout=5)
+    check("子路径 -> stage=path", r["stage"] == "path",
+          f"{r['stage']}: {r['detail'][:50]}")
+    check("提示里说明是子路径问题", "子路径" in r["detail"], r["detail"][:50])
+    srv2.shutdown()
+
+    print(chr(10) + "[3c] CLI 保存失败不抛 traceback")
+
+    def t_cli_ro():
+        tmp2 = os.path.join(ROOT, "tmp", "kit_setup_ro")
+        os.makedirs(tmp2, exist_ok=True)
+        f = os.path.join(tmp2, "apb_defaults.json")
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        try:
+            os.chmod(f, 0o444)
+        except Exception:  # noqa: BLE001
+            return "chmod 不支持，跳过"
+        old_d = KS.DEFAULTS
+        KS.DEFAULTS = f
+        try:
+            try:
+                KS.save_cfg("http://y:2", "t", "")
+                raise AssertionError("只读文件竟然写入成功")
+            except OSError:
+                pass
+        finally:
+            KS.DEFAULTS = old_d
+            try:
+                os.chmod(f, 0o644)
+            except Exception:  # noqa: BLE001
+                pass
+        src2 = open(os.path.join(ROOT, "tools", "kit_setup.py"), encoding="utf-8").read()
+        assert "except OSError as e:" in src2, "CLI 没有捕获 OSError"
+        assert "_run_cli_inner" in src2, "CLI 没有拆出可测函数"
+        return "只读文件抛 OSError，CLI 已捕获"
+    check("CLI 保存失败有友好提示", t_cli_ro)
+
+
     print("\n[4] 无图形环境时能退回控制台")
     src = open(os.path.join(ROOT, "tools", "kit_setup.py"), encoding="utf-8").read()
     check("有 --cli 分支", "--cli" in src)

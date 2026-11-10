@@ -92,6 +92,12 @@ def probe(nas: str, token: str = "", password: str = "", timeout: int = 12) -> d
             body = json.loads(r.read().decode("utf-8", "replace"))
         ver = ((body.get("data") or {}) if isinstance(body, dict) else {}).get("version")
     except urllib.error.HTTPError as e:
+        # 404/403 说明**服务器是通的**，只是路径不对（常见于反代 /apb 前缀）。
+        # 报成「网络故障」会让用户去查网络，方向完全错。
+        if e.code in (404, 403):
+            return {"ok": False, "stage": "path",
+                    "detail": f"能连上，但 {nas}/api/version 返回 HTTP {e.code} —— "
+                              f"地址可能带了子路径（APB 的 API 在根路径 /api/ 下）"}
         return {"ok": False, "stage": "net", "detail": f"HTTP {e.code}"}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "stage": "net",
@@ -176,12 +182,15 @@ def run_gui() -> int:
     tk.Label(root, text="训练机配置", font=("", 13, "bold")).pack(anchor="w", **pad)
     tk.Label(root, text="填好点「测试连接」，通了再保存。", fg="#666").pack(anchor="w", padx=14)
 
+    state = {"probed": False, "version": ""}
+
     frm = tk.Frame(root)
     frm.pack(fill="x", **pad)
 
     tk.Label(frm, text="NAS 地址").grid(row=0, column=0, sticky="w", pady=4)
     v_nas = tk.StringVar(value=cfg.get("nas_url") or "https://apbcdn.683868.xyz")
-    tk.Entry(frm, textvariable=v_nas, width=46).grid(row=0, column=1, columnspan=2, sticky="we", pady=4)
+    e_nas = tk.Entry(frm, textvariable=v_nas, width=46)
+    e_nas.grid(row=0, column=1, columnspan=2, sticky="we", pady=4)
 
     tk.Label(frm, text="令牌").grid(row=1, column=0, sticky="w", pady=4)
     v_tok = tk.StringVar(value=cfg.get("token") or "")
@@ -193,20 +202,31 @@ def run_gui() -> int:
     def toggle():
         e_tok.config(show="" if v_show.get() else "*")
 
+    def invalidate(*_a):
+        if state["probed"]:
+            state["probed"] = False
+            v_msg.set("配置已修改，请重新「测试连接」")
+            lbl.config(fg="#b7791f")
+
     tk.Checkbutton(frm, text="显示", variable=v_show, command=toggle).grid(row=1, column=2, sticky="w")
 
     tk.Label(frm, text="或密码").grid(row=2, column=0, sticky="w", pady=4)
     v_pw = tk.StringVar(value=cfg.get("password") or "")
-    tk.Entry(frm, textvariable=v_pw, width=38, show="*").grid(row=2, column=1, sticky="we", pady=4)
+    e_pw = tk.Entry(frm, textvariable=v_pw, width=38, show="*")
+    e_pw.grid(row=2, column=1, sticky="we", pady=4)
     tk.Label(frm, text="（二选一）", fg="#888").grid(row=2, column=2, sticky="w")
 
     v_msg = tk.StringVar(value="")
     lbl = tk.Label(root, textvariable=v_msg, wraplength=520, justify="left", fg="#b7791f")
     lbl.pack(anchor="w", padx=14, pady=(0, 4))
 
+    # 任一字段变化 -> 作废「已验证」：否则测通 A 地址后改成 B 再保存，
+    # state["probed"] 仍是 True，会静默保存未验证的配置。
+    for _w in (e_nas, e_tok, e_pw):
+        _w.bind("<KeyRelease>", invalidate)
+
     btns = tk.Frame(root)
     btns.pack(fill="x", **pad)
-    state = {"probed": False, "version": ""}
 
     def do_probe():
         v_msg.set("测试中…")
@@ -250,6 +270,14 @@ def run_gui() -> int:
 # ---------------------------------------------------------------- 控制台模式
 def run_cli() -> int:
     cfg = load_cfg()
+    try:
+        return _run_cli_inner(cfg)
+    except (EOFError, KeyboardInterrupt):
+        print('已取消（非交互环境或用户中断）')
+        return 1
+
+
+def _run_cli_inner(cfg: dict) -> int:
     print("=" * 56)
     print("  APB 训练机配置")
     print("=" * 56)
@@ -267,7 +295,17 @@ def run_cli() -> int:
             return 1
     else:
         print(f"  成功 · 服务端 v{r.get('version')} · 鉴权通过")
-    save_cfg(nas, tok, pw)
+    # 保存必须包异常：只读文件/权限不足时，用户不该看到一屏 traceback
+    try:
+        save_cfg(nas, tok, pw)
+    except OSError as e:
+        print('写入失败：' + DEFAULTS)
+        print('  原因：' + type(e).__name__ + ': ' + str(e))
+        print('  处理：用管理员权限运行，或确认该文件不是只读。')
+        return 1
+    except Exception as e:
+        print('写入失败：' + type(e).__name__ + ': ' + str(e))
+        return 1
     print(f"\n已写入 {DEFAULTS}")
     return 0
 
