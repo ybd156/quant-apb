@@ -592,7 +592,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         if path == "/api/export":
             return self._api_export(query)
         if path == "/api/tokens":
-            return self._api_tokens()
+            return self._api_tokens(query)
         if path == "/api/data/version":
             return self._api_data_version()
         if path == "/api/data/qlib":
@@ -1451,15 +1451,17 @@ class ApiHandler(BaseHTTPRequestHandler):
         return {"ok": True, "path": cache, "bytes": size,
                 "n_files": n_files, "n_codes": len(wanted), "cached": False}
 
-    def _api_tokens(self):
+    def _api_tokens(self, query=None):
         """列出访问令牌（不含哈希、不含明文）。
 
-        为什么要有这个功能：原来只有一个 APB_TOKEN 环境变量，
-        部署到别处不好改、多台训练机无法单独吊销、泄露只能全部换掉。
+        `?include_revoked=1` 才返回已吊销的 —— 默认不显示，
+        否则用户会问「吊销了为什么还在列表里」。
         """
+        q = query or {}
+        inc = str((q.get("include_revoked") or ["0"])[0]) in ("1", "true", "yes")
         try:
             from qcore import tokens as TK
-            return self._ok(TK.summary())
+            return self._ok(TK.summary(include_revoked=inc))
         except Exception as e:  # noqa: BLE001
             return self._fail("tokens_failed", 500, detail=str(e)[:160])
 

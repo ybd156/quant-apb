@@ -1126,6 +1126,39 @@ def _f_breadth(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
     return d, s
 
 
+def _f_seat(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """龙虎榜席位信号族 —— 「操盘手法」维度。
+
+    数据：`event_data.fetch_seats`（RPT_BILLBOARD_DAILYDETAILSBUY/SELL，
+    实测 300750 有 13 个上榜日的席位明细）。
+
+    三类席位含义完全不同（分类规则见 `event_data.SEAT_RULES`，机械可复现）：
+      · 机构专用   —— 公募/险资/社保，偏中期，买入看多
+      · 券商营业部 —— 游资，偏短线，买入可顺势也可次日兑现（两种都提供）
+      · 拉萨席位   —— 散户/量化聚集，大量买入往往是接盘，**反向**
+    指标是「净买入额 / 当日成交额 %」，相对量，可跨股票比较。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    kind = str(params.get("kind", "inst"))
+    col = {"inst": "seat_inst_net", "hot": "seat_hot_net",
+           "retail": "seat_retail_net"}.get(kind, "seat_inst_net")
+    raw = view.flow.get(col)
+    if raw is None:
+        return d, s
+    v = np.nan_to_num(np.asarray(raw, dtype=np.float64), nan=0.0)
+    th = float(params.get("th", 5.0))
+    invert = bool(params.get("invert", False))
+    with np.errstate(invalid="ignore"):
+        d = np.where(v >= th, -1.0 if invert else 1.0,
+                     np.where(v <= -th, 1.0 if invert else -1.0, 0.0))
+        s = np.clip(np.abs(v) / (th * 3.0), 0.0, 1.0)
+    return d, s
+
+
 _IMPL: Dict[str, Callable[[Any, dict], Tuple[np.ndarray, np.ndarray]]] = {
     "ma_cross": _f_ma_cross,
     "ma_slope": _f_ma_slope,
@@ -1152,6 +1185,7 @@ _IMPL: Dict[str, Callable[[Any, dict], Tuple[np.ndarray, np.ndarray]]] = {
     "lift": _f_lift,
     "forecast": _f_forecast,
     "breadth": _f_breadth,
+    "seat": _f_seat,
 }
 
 _KIND = {
@@ -1169,6 +1203,7 @@ _KIND = {
     "lift": "event",
     "forecast": "event",
     "breadth": "sentiment",
+    "seat": "flow",
 }
 
 # 需要"可信 OHLC"的族（加性除息污染区置 0）
@@ -1354,6 +1389,15 @@ def _table() -> List[tuple]:
               "z>2 顺势看多(+1) / z<-2 看空(-1)：与 contra 互为对照"))
     t.append(("breadth", {"kind": "raw", "th": 0.7, "contrarian": True}, "brd_ratio70",
               "上涨家数占比>70% 看空(-1)：市场过热"))
+    # ---- seat (4)：龙虎榜席位 —— 操盘手法。上榜日才发声。
+    t.append(("seat", {"kind": "inst", "th": 5.0}, "seat_inst_buy",
+              "机构专用席位净买入占成交额 >5%(+1)：机构进场"))
+    t.append(("seat", {"kind": "hot", "th": 5.0}, "seat_hot_buy",
+              "游资席位净买入占成交额 >5%(+1)：游资进场"))
+    t.append(("seat", {"kind": "hot", "th": 10.0, "invert": True}, "seat_hot_fade",
+              "游资净买入 >10% 反向(-1)：与 seat_hot_buy 互为对照，测短线兑现"))
+    t.append(("seat", {"kind": "retail", "th": 5.0, "invert": True}, "seat_retail_fade",
+              "散户席位（拉萨）净买入 >5% 看空(-1)：散户接盘"))
     return t
 
 

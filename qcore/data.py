@@ -296,6 +296,15 @@ def load_index(code: str = "000300", now=None) -> pd.DataFrame:
             last = None
         if last is not None and last == _now.date() and (_now.hour, _now.minute) >= (15, 5):
             df = None
+        # 数据落后于交易日历 → **必须重取**，不能只标 stale。
+        # 实测：指数缓存停在 2026-11-06，而个股已经到 11-10，
+        # build_dataset 以指数为主日历 → 整个面板被截到 11-06，
+        # 于是「盘中实时价补丁」永远打不到（面板里根本没有今天的行）。
+        # 加 30 分钟节流，避免每次读盘都打接口。
+        if df is not None:
+            _probe = _annotate_freshness(_strip_forming_bar(df, _now), _now)
+            if _probe.attrs.get("stale") and (time.time() - os.path.getmtime(path)) > 1800:
+                df = None
     if df is None:
         df = fetch_index(code)
         df.to_csv(path, index=False, encoding="utf-8")

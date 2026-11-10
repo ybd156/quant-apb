@@ -17,21 +17,64 @@ echo "[kit] version=$VERSION"
 KIT="$WORK/apb-train-kit"
 mkdir -p "$KIT"
 
-# ---------- 1. 训练需要的代码 ----------
-cp -a "$ROOT/qcore" "$KIT/"
+# ---------- 1. 训练需要的代码（**只拷闭包**）----------
+# 原来整个 qcore/ 都拷（126 个模块 / 42,222 行），但训练机只需要
+# 训练 + 外包 pipeline/prewarm 真正用到的 62 个 / 24,424 行。
+# 闭包由 scripts/kit_manifest.py 用 AST 算出来，可复现、可复核。
 mkdir -p "$KIT/tools" "$KIT/scripts"
+python -m scripts.kit_manifest --json > "$KIT/kit_manifest.json" 2>/dev/null || true
+if [ -s "$KIT/kit_manifest.json" ]; then
+  SLIM_OK=1
+  # 逐行读出 files 数组，按相对路径拷贝
+  python - "$ROOT" "$KIT" <<'PYEOF_SLIM' || SLIM_OK=0
+import json, os, shutil, sys
+root, kit = sys.argv[1], sys.argv[2]
+man = json.load(open(os.path.join(kit, "kit_manifest.json"), encoding="utf-8"))
+n = 0
+for rel in man.get("files") or []:
+    src = os.path.join(root, rel)
+    if not os.path.isfile(src):
+        continue
+    dst = os.path.join(kit, rel)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+    n += 1
+print(f"[kit] slim: copied {n} files")
+sys.exit(0 if n > 40 else 1)
+PYEOF_SLIM
+  if [ "$SLIM_OK" = "1" ]; then
+    echo "[kit] slim qcore (closure only)"
+  else
+    echo "[kit] slim failed -> fallback to full qcore"
+    rm -rf "$KIT/qcore"
+    cp -a "$ROOT/qcore" "$KIT/"
+  fi
+else
+  echo "[kit] no manifest -> full qcore"
+  cp -a "$ROOT/qcore" "$KIT/"
+fi
 cp "$ROOT/tools/train_one_click.py" "$KIT/tools/"
 cp "$ROOT/tools/sync_agent.py" "$KIT/tools/"
 cp "$ROOT/tools/train_missing.py" "$KIT/tools/"
 cp "$ROOT/tools/defaults.py" "$KIT/tools/"
 cp "$ROOT/tools/bootstrap.ps1" "$KIT/tools/"
+cp "$ROOT/tools/kit_selftest.py" "$KIT/tools/"
+cp "$ROOT/tools/agent_daemon.py" "$KIT/tools/"
+cp "$ROOT/start_agent.bat" "$ROOT/start_agent_hidden.vbs" "$KIT/" 2>/dev/null || true
+cp "$ROOT/scripts/kit_manifest.py" "$KIT/scripts/"
 cp "$ROOT/scripts/benchmark_alpha158.py" "$KIT/scripts/"
 cp "$ROOT/requirements.txt" "$KIT/"
 cp "$ROOT/VERSION" "$KIT/"
 cp "$ROOT/LICENSE" "$KIT/" 2>/dev/null || true
 cp "$ROOT/train.bat" "$ROOT/train.sh" "$KIT/"
-cp "$ROOT/daemon.bat" "$KIT/" 2>/dev/null || true
+# daemon.bat 是 NAS/常驻侧的东西，训练机不需要（拷过去只会让人困惑）
 chmod +x "$KIT/train.sh" 2>/dev/null || true
+
+# ---------- 1.5 构建后校验：这个套件能不能承接所有任务 ----------
+if [ -f "$KIT/tools/kit_selftest.py" ]; then
+  if python tools/kit_selftest.py --json >/dev/null 2>&1; then :; fi
+  ( cd "$KIT" && python tools/kit_selftest.py >/dev/null 2>&1 ) &&     echo "[kit] selftest OK (train / pipeline / prewarm / sync)" ||     echo "[kit] WARN: selftest failed in built kit -- check before shipping"
+fi
 
 # ---------- 2. 清掉不需要的 ----------
 find "$KIT" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true

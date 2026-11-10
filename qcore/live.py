@@ -140,8 +140,26 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     codes = pool["code"].tolist()
     _log(f"incremental: {last} -> {as_of_ts.date()}, {len(codes)} stocks")
 
+    # 盘中（含午休）：取一次实时快照，把「今天这根未收盘 bar」补成当前价。
+    # 这样信号反映的是**现在**，而不是昨天收盘。
+    # 非交易时段不取（收盘价已定，用 K 线即可），也避免无谓的网络请求。
+    _live = None
+    _live_meta = None
+    try:
+        from . import session as _S
+        _phase = _S.in_window()
+        if _phase in ("morning", "lunch", "afternoon"):
+            from .paper_auto import _live_quotes
+            _live = _live_quotes(codes)
+            if _live:
+                _live_meta = {"phase": _phase, "n": len(_live),
+                              "as_of": next(iter(_live.values())).get("as_of")}
+                _log(f"live quotes: {len(_live)}/{len(codes)} @ {_live_meta['as_of']}")
+    except Exception as e:  # noqa: BLE001
+        _log(f"live quotes unavailable: {type(e).__name__}")
+
     p3d = build_dataset(codes, start=start, horizon=horizon, cutoff=str(as_of_ts.date()),
-                        verbose=False)
+                        verbose=False, live_quotes=_live)
     dates = pd.DatetimeIndex(p3d.dates)
 
     # 本地索引：从"上次处理日的下一交易日"开始
@@ -193,6 +211,15 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     st["data_through"] = str(dates[-1].date())
     st["sealed_through"] = _sealed_day
     st["pending_tail_days"] = int(int(cfg.exec_lag) + int(horizon))
+    # 如实记录「这次打分用了实时价」—— 盘中分数因此不可复现，
+    # 必须让人能看出来，而不是事后猜。
+    if _live_meta:
+        st["used_live_quotes"] = True
+        st["live_quotes"] = _live_meta
+        st["score_basis"] = "live_partial_bar"
+    else:
+        st["used_live_quotes"] = False
+        st["score_basis"] = "closed_bar"
     st["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     st["new_predictions"] = len(new_rows)
     store.write_json("status", st)

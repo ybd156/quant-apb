@@ -3668,7 +3668,7 @@
       S.auth = (au && au.ok && au.data) ? au.data : {};
     } catch (e) { S.auth = {}; }
     try {
-      const tk = await apiCached('/api/tokens', 3000);
+      const tk = await apiCached('/api/tokens' + (S.showRevoked ? '?include_revoked=1' : ''), 3000);
       S.tokens = (tk && tk.ok && tk.data) ? tk.data : {};
     } catch (e) { S.tokens = {}; }
     try {
@@ -3893,14 +3893,35 @@
         '<td>' + (revoked
           ? '<span class="tag miss">已吊销</span>'
           : '<span class="tag hit">有效</span>') + '</td>' +
-        '<td>' + (revoked ? '' :
-          '<button type="button" class="btn ghost sm tk-revoke" data-id="' +
-          esc(t.id) + '">吊销</button>') + '</td>' +
+        '<td>' + (revoked
+          ? '<button type="button" class="btn ghost sm tk-del" data-id="' +
+            esc(t.id) + '">删除</button>'
+          : '<button type="button" class="btn ghost sm tk-revoke" data-id="' +
+            esc(t.id) + '">吊销</button>') + '</td>' +
         '</tr>';
     }).join('');
 
+    const NT = S.newToken || null;
+    const newTokenHtml = NT ? (
+      '<div style="margin-top:12px;padding:12px;border-radius:8px;' +
+      'background:var(--surface-3,#1c2434);border:1px solid var(--warn,#b7791f)">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;gap:10px">' +
+          '<div><strong>' + esc(NT.name) + '</strong> 的令牌 ' +
+          '<span style="color:var(--warn)">（只显示这一次，关掉就再也看不到）</span></div>' +
+          '<button type="button" class="btn ghost sm" id="tk-hide">我已保存，隐藏</button>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px;align-items:center;margin-top:8px">' +
+          '<input type="text" readonly id="tk-plain" value="' + esc(NT.token) + '"' +
+          ' style="flex:1;font-family:monospace;font-size:12px">' +
+          '<button type="button" class="btn sm" id="tk-copy">复制</button>' +
+        '</div>' +
+      '</div>') : '';
+
     const tokenCard = card({
       title: '访问令牌', sub: '给每台训练机 / 外部集成单独发一把，可单独吊销',
+      tools: '<button type="button" class="btn ghost sm" id="tk-showrev">' +
+        (S.showRevoked ? '隐藏已吊销' : '显示已吊销' + (TK.revoked ? '（' + TK.revoked + '）' : '')) +
+        '</button>',
       body:
         // 新建
         '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
@@ -3908,7 +3929,7 @@
             '<input type="text" id="tk-name" placeholder="例如 训练机-A / 云主机"></label>' +
           '<button type="button" class="btn" id="tk-create">' + ICON('plus') + '新建令牌</button>' +
         '</div>' +
-        '<div id="tk-new" style="margin-top:10px"></div>' +
+        newTokenHtml +
         // 列表
         (tkRows
           ? '<div class="tbl-wrap" style="margin-top:14px"><table class="tbl"><thead><tr>' +
@@ -4643,6 +4664,42 @@
     });
 
     // ---- 访问令牌 ----
+      // ---- 管理令牌：隐藏明文 / 复制 / 显示已吊销 / 删除 ----
+      const tkHide = $('#tk-hide');
+      if (tkHide) tkHide.addEventListener('click', () => {
+        S.newToken = null; rerender();
+      });
+      const tkCopy = $('#tk-copy');
+      if (tkCopy) tkCopy.addEventListener('click', () => {
+        const el = $('#tk-plain');
+        if (!el) return;
+        el.select();
+        try {
+          navigator.clipboard.writeText(el.value).then(
+            () => toast('已复制到剪贴板', 'ok'),
+            () => toast('复制失败，请手动选中复制', 'warn'));
+        } catch (e) { toast('复制失败，请手动选中复制', 'warn'); }
+      });
+      const tkShowRev = $('#tk-showrev');
+      if (tkShowRev) tkShowRev.addEventListener('click', async () => {
+        S.showRevoked = !S.showRevoked;
+        try {
+          const r = await api('/api/tokens' + (S.showRevoked ? '?include_revoked=1' : ''), { cache: 'no-store' });
+          S.tokens = (r && r.ok && r.data) ? r.data : {};
+        } catch (e) { /* ignore */ }
+        rerender();
+      });
+      $$('.tk-del').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const r = await api('/api/tokens', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'delete', id: btn.getAttribute('data-id') })
+          });
+          if (r && r.ok) { toast('已删除', 'ok'); rerender(); }
+          else { toast('删除失败：' + errText(r), 'err'); }
+        });
+      });
+
       // ---- 管理令牌：新建 / 吊销 ----
       const tkCreate = $('#tk-create');
       if (tkCreate) {
@@ -4655,14 +4712,9 @@
           const box = $('#tk-new');
           if (r && r.ok) {
             const d = r.data || {};
-            if (box) {
-              box.innerHTML = '<div class="callout" style="padding:10px;border-radius:6px;' +
-                'background:var(--surface-3,#1c2434)">' +
-                '<div style="margin-bottom:6px"><strong>' + esc(d.name) + '</strong> 的令牌' +
-                '（<span style="color:var(--warn)">只显示这一次</span>）：</div>' +
-                '<code class="mono" style="word-break:break-all;user-select:all">' +
-                esc(d.token) + '</code></div>';
-            }
+            // 存进 S：rerender 会重画整页，不存的话明文立刻消失
+            // （实测用户抱怨「刚新建就关了，看不到令牌」）
+            S.newToken = { name: d.name, token: d.token, id: d.id };
             toast('令牌已创建，请立刻复制', 'ok');
             rerender();
           } else {

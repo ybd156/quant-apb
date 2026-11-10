@@ -44,7 +44,8 @@ _BASE = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 #: 对外承诺的列（信号族只读这些）
 COLUMNS = ["date", "bt_shares_ratio", "bt_premium", "bb_net_ratio",
            "mg_net_ratio", "mg_bal_ratio", "mg_short_ratio",
-           "hold_net_ratio", "fc_lift_ratio", "eps_revision"]
+           "hold_net_ratio", "fc_lift_ratio", "eps_revision",
+           "seat_inst_net", "seat_hot_net", "seat_retail_net"]
 
 
 def _get_json(url: str, timeout: int = 20) -> Dict:
@@ -258,6 +259,76 @@ def fetch_forecast(code: str) -> pd.DataFrame:
     return g.sort_values("date").reset_index(drop=True)
 
 
+#: 席位分类规则（机械可复现，不猜）
+#:   机构专用      -> 公募/险资/社保等机构专用席位
+#:   拉萨          -> 东方财富拉萨营业部群，公认的散户/量化聚集地
+#:   沪股通/深股通 -> 北向资金
+#:   其它营业部    -> 游资（知名游资都在券商营业部席位上）
+SEAT_RULES = (
+    ("inst", ("机构专用",)),
+    ("retail", ("拉萨",)),
+    ("north", ("沪股通", "深股通", "港股通")),
+    ("hot", ("证券营业部", "营业部", "证券股份有限公司")),
+)
+
+
+def _seat_kind(name: str) -> str:
+    n = str(name or "")
+    for kind, keys in SEAT_RULES:
+        if any(k in n for k in keys):
+            return kind
+    return "other"
+
+
+def fetch_seats(code: str) -> pd.DataFrame:
+    """龙虎榜**席位明细** -> 按日聚合 [date, seat_inst_net, seat_hot_net, seat_retail_net]。
+
+    数据源（实测 2026-11-10）：
+      · RPT_BILLBOARD_DAILYDETAILSBUY   买入席位明细（含 OPERATEDEPT_NAME/BUY/SELL）
+      · RPT_BILLBOARD_DAILYDETAILSSELL  卖出席位明细
+      · RPT_OPERATEDEPT_ACTIVE          活跃营业部（游资榜）
+
+    指标口径：各类席位的**净买入额 / 当日成交额**（%），相对量，可跨股票比较。
+    这是「操盘手法」维度的核心：机构在买、游资在买、还是散户在买，
+    对后续走势的含义完全不同。
+    """
+    cols = ["date", "seat_inst_net", "seat_hot_net", "seat_retail_net"]
+    frames = []
+    for rpt in ("RPT_BILLBOARD_DAILYDETAILSBUY", "RPT_BILLBOARD_DAILYDETAILSSELL"):
+        try:
+            raw = _datacenter(rpt, code, sort="TRADE_DATE")
+        except Exception:  # noqa: BLE001
+            continue
+        if raw is None or raw.empty:
+            continue
+        df = pd.DataFrame({
+            "date": pd.to_datetime(raw.get("TRADE_DATE"), errors="coerce").dt.normalize(),
+            "seat": raw.get("OPERATEDEPT_NAME").astype(str),
+            "buy": pd.to_numeric(raw.get("BUY"), errors="coerce").fillna(0.0),
+            "sell": pd.to_numeric(raw.get("SELL"), errors="coerce").fillna(0.0),
+            "amt": pd.to_numeric(raw.get("ACCUM_AMOUNT"), errors="coerce"),
+        }).dropna(subset=["date"])
+        if df.empty:
+            continue
+        df["net"] = df["buy"] - df["sell"]
+        df["kind"] = df["seat"].map(_seat_kind)
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame(columns=cols)
+    allf = pd.concat(frames, ignore_index=True)
+    # 每日每类席位净买入求和；成交额取当日最大值（同一天多行相同）
+    g = allf.groupby(["date", "kind"], as_index=False).agg(net=("net", "sum"))
+    amt = allf.groupby("date", as_index=False).agg(amt=("amt", "max"))
+    wide = g.pivot(index="date", columns="kind", values="net").reset_index()
+    wide = wide.merge(amt, on="date", how="left")
+    denom = wide["amt"].replace(0, pd.NA)
+    for kind in ("inst", "hot", "retail"):
+        col = f"seat_{kind}_net"
+        wide[col] = (wide[kind] / denom * 100.0) if kind in wide.columns else pd.NA
+        wide[col] = wide[col].replace([float("inf"), float("-inf")], pd.NA)
+    return wide[["date"] + cols[1:]].sort_values("date").reset_index(drop=True)
+
+
 def _cache_path(code: str) -> str:
     return os.path.join(EXT_DIR, f"{str(code).zfill(6)}.csv")
 
@@ -294,7 +365,8 @@ def load_events(code: str, refresh: bool = False,
         hc = fetch_holder_change(code)
         lf = fetch_lift(code)
         fc = fetch_forecast(code)
-        parts = [x for x in (bt, bb, mg, hc, lf, fc) if x is not None and len(x)]
+        st = fetch_seats(code)
+        parts = [x for x in (bt, bb, mg, hc, lf, fc, st) if x is not None and len(x)]
         if not parts:
             out = pd.DataFrame(columns=COLUMNS)
         else:
@@ -325,7 +397,8 @@ def available(code: str) -> Dict:
             "n_margin": int(df["mg_net_ratio"].notna().sum()),
             "n_holder": int(df["hold_net_ratio"].notna().sum()),
             "n_lift": int(df["fc_lift_ratio"].notna().sum()),
-            "n_forecast": int(df["eps_revision"].notna().sum())}
+            "n_forecast": int(df["eps_revision"].notna().sum()),
+            "n_seats": int(df["seat_inst_net"].notna().sum())}
 
 
 if __name__ == "__main__":

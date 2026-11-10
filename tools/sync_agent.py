@@ -281,19 +281,32 @@ def main(argv=None) -> int:
         return 1
     print(f"已连接 {nas}  版本 {h.get('data', {}).get('version', '?')}")
 
-    def _maybe_update() -> None:
-        """服务端下发更新：版本比自己新就覆盖代码（不动 data/dist/runtime）。"""
+    def _maybe_update() -> bool:
+        """服务端下发更新：版本比自己新就覆盖代码（不动 data/dist/runtime）。
+
+        返回 True 表示**代码已换，必须重启进程才能生效**。
+        原来只打印「重启后生效」就继续用内存里的旧代码跑 ——
+        版本永远追不上，除非人手动重启（实测就这么错过好几版）。
+        """
         if not (a.auto_update or a.update_only):
-            return
+            return False
         try:
             from qcore import kit_update as KU
             r = KU.check_and_update(nas, token, verbose=True)
             if r.get("action") == "updated":
-                print(f"  已更新到 {r.get('to')}（重启后生效）")
+                print(f"  已更新到 {r.get('to')}，需要重启进程加载新代码")
+                return True
         except Exception as e:  # noqa: BLE001
             print(f"  更新检查失败：{type(e).__name__}: {str(e)[:60]}")
+        return False
 
-    _maybe_update()
+    if _maybe_update():
+        if a.update_only:
+            return 0
+        # 退出码 42 = 「已更新，请用新代码重启我」
+        # 由 tools/agent_daemon.py 负责拉起；直接手动跑的话等价于「该重启了」
+        print("  退出（EXIT_UPDATED=42），守护进程会用新代码重启")
+        return 42
     if a.update_only:
         return 0
 
@@ -332,7 +345,10 @@ def main(argv=None) -> int:
         print(f"常驻模式，每 {a.loop} 秒轮询一次（Ctrl+C 退出）")
         while True:
             try:
-                _maybe_update()
+                if _maybe_update():
+                    # 循环中途拿到新版本：退出让守护进程重启，
+                    # 否则后面每一轮都还在跑旧代码
+                    return 42
                 _one()
             except KeyboardInterrupt:
                 print("\n退出")

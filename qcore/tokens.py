@@ -182,12 +182,18 @@ def _touch(tid: Optional[str]) -> None:
         pass
 
 
-def summary() -> Dict:
-    toks = list_tokens()
-    live = [t for t in toks if not t.get("revoked")]
-    return {"ok": True, "total": len(toks), "active": len(live),
-            "revoked": len(toks) - len(live),
-            "tokens": toks,
+def summary(include_revoked: bool = False) -> Dict:
+    """令牌总览。**默认不返回已吊销的** —— 实测用户抱怨「吊销了还显示」。
+
+    已吊销的只保留计数，要看明细用 include_revoked=True。
+    """
+    all_toks = list_tokens()
+    live = [t for t in all_toks if not t.get("revoked")]
+    dead = [t for t in all_toks if t.get("revoked")]
+    return {"ok": True, "total": len(all_toks), "active": len(live),
+            "revoked": len(dead),
+            "tokens": all_toks if include_revoked else live,
+            "revoked_tokens": dead if include_revoked else [],
             "note": "明文只在创建时显示一次；这里只存 SHA-256 哈希，无法反推"}
 
 

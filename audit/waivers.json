@@ -1,6 +1,6 @@
 {
  "criterion": "MEDIUM 分流规则：文件是否在打分链路闭包内。闭包根 = ['signals', 'learner', 'engine', 'dataset']；闭包内不豁免，闭包外按文件豁免。这条规则可重复执行：python -m audit.gen_waivers",
- "generated_at": "2026-11-10T17:28:42+08:00",
+ "generated_at": "2026-11-10T20:07:14+08:00",
  "by": "lead",
  "chain_modules": [
   "account_config",
@@ -429,6 +429,11 @@
    "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
   },
   {
+   "path": "qcore/event_data.py",
+   "n": 5,
+   "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
+  },
+  {
    "path": "qcore/signed.py",
    "n": 5,
    "why": "L56 是 axis=1 横截面去均值；L88-89 的 mu/sd 在 fit 时用**训练矩阵**拟合并存盘、预测时复用（标准做法），非泄漏；核心保留告警"
@@ -436,11 +441,6 @@
   {
    "path": "qcore/sentiment_store.py",
    "n": 4,
-   "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
-  },
-  {
-   "path": "qcore/event_data.py",
-   "n": 3,
    "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
   },
   {

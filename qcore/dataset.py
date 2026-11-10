@@ -79,6 +79,26 @@ def build_regime(index_df: pd.DataFrame, dates: np.ndarray,
 
 
 # ------------------------------------------------------------------ build
+def _health_pick(need: str) -> Optional[str]:
+    """从 `data/state/datasource_health.json` 读上次探测选中的源（不联网）。
+
+    为什么读缓存而不是每次探测：探测要打 3~5 个接口，300 只票就是上千次请求。
+    健康表由 `python -m qcore.datasource` 定期刷新，回测只读它。
+    没有健康表时返回 None，调用方走内置默认源（向后兼容）。
+    """
+    try:
+        import json as _json
+        p = os.path.join(ROOT, "data", "state", "datasource_health.json")
+        if not os.path.isfile(p):
+            return None
+        with open(p, encoding="utf-8") as f:
+            d = _json.load(f)
+        rec = ((d.get("picked") or {}).get(need) or {})
+        return str(rec.get("source") or "") or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def external_loader(code: str, cache_only: bool = True):
     """把「资金流 + 事件」合并成一张按日索引的外部数据表，供 compute_signals 用。
 
@@ -86,6 +106,10 @@ def external_loader(code: str, cache_only: bool = True):
     资金流只有 120 天（东财接口上限），事件数据有多年（实测 600519 272 笔跨 19 年）。
     """
     frames = []
+    # 选源：有健康表就按它（`python -m qcore.datasource` 定期刷新），
+    # 没有就用内置默认 —— 保证任何部署都能跑，不会因为缺健康表就崩。
+    src = {"flow": _health_pick("flow") or "eastmoney-fflow",
+           "event": _health_pick("block_trade") or "eastmoney-blocktrade"}
     try:
         from . import flow_factor as FF
         # 资金流：cache_only 时只用磁盘缓存（读不到就跳过，绝不联网）。
@@ -118,7 +142,10 @@ def external_loader(code: str, cache_only: bool = True):
             e["date"] = pd.to_datetime(e["date"]).dt.normalize()
             keep = ["date"] + [c for c in ("bt_shares_ratio", "bt_premium",
                                            "bb_net_ratio", "mg_net_ratio",
-                                           "mg_bal_ratio", "mg_short_ratio")
+                                           "mg_bal_ratio", "mg_short_ratio",
+                                           "hold_net_ratio", "fc_lift_ratio",
+                                           "eps_revision", "seat_inst_net",
+                                           "seat_hot_net", "seat_retail_net")
                                if c in e.columns]
             e = e[keep]
             # 两融/大宗/龙虎榜都是 **T+1 披露**（T 日盘后公布 T 日数据，
@@ -175,7 +202,10 @@ def external_loader(code: str, cache_only: bool = True):
     out = frames[0]
     for f in frames[1:]:
         out = pd.merge(out, f, on="date", how="outer")
-    return out.sort_values("date").reset_index(drop=True)
+    out = out.sort_values("date").reset_index(drop=True)
+    # 把实际选用的数据源挂到 attrs，便于事后审计「这批数字是哪来的」
+    out.attrs["sources"] = src
+    return out
 
 
 def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
@@ -183,7 +213,8 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
                   exec_lag: int = 1, str_dtype: str = "uint8", n_univ: int = 100,
                   chunk: int = 25, cutoff: Optional[str] = None,
                   verbose: bool = True, loader=None, pad: bool = True,
-                  market: str = "CN", extra_loader=None) -> Panel3D:
+                  market: str = "CN", extra_loader=None,
+                  live_quotes: Optional[dict] = None) -> Panel3D:
     from .signals import compute_signals, signal_zoo
 
     zoo = signal_zoo()
@@ -268,6 +299,50 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
 
     for n, code in enumerate(code_list):
         df = panel[code]
+        # 实时行情补丁：盘中把**今天这根未收盘 bar** 的收盘/高低/量换成实时快照，
+        # 让信号反映当前状态，而不是昨天收盘。
+        #
+        # 三个约束：
+        #   1. 只改「日期 == 今天」的那一根，历史 bar 一个字节都不动
+        #   2. 只改价格类字段，不改日期轴（不能凭空多一根 bar）
+        #   3. 只用于 live/paper 路径 —— 回测永远不传 live_quotes（INV-1 不受影响）
+        if live_quotes:
+            q = live_quotes.get(str(code).zfill(6))
+            if q and q.get("price"):
+                try:
+                    _d = pd.to_datetime(df["date"])
+                    if len(df):
+                        # 打的是**最后一根** bar，不是「日期==今天」的那根。
+                        # 原因：`_strip_forming_bar` 盘中会把「今天未收盘」那根丢掉
+                        # （为了不让部分 bar 污染信号），于是盘中根本没有今天的行 ——
+                        # 按日期匹配会永远匹配不到，补丁静默失效（实测 DIR 差异 0 格）。
+                        # 改成打最后一根，并校验它离今天不超过 1 个交易日，避免给
+                        # 陈旧数据凭空造一个假 bar。
+                        _last = _d.iloc[-1]
+                        _ok = True
+                        try:
+                            from . import calendar_cn as _CAL
+                            _ref = _CAL.prev_trading_day(pd.Timestamp.now().date())
+                            _ok = _last.normalize() >= pd.Timestamp(_ref)
+                        except Exception:  # noqa: BLE001
+                            _ok = (_last.normalize() >= pd.Timestamp.now().normalize()
+                                   - pd.Timedelta(days=4))
+                        if _ok:
+                            _i = df.index[-1]
+                            _px = float(q["price"])
+                            df = df.copy()
+                            _old_close = float(df.loc[_i, "close"])
+                            df.loc[_i, "close"] = _px
+                            for _c in ("high", "low"):
+                                if _c in df.columns:
+                                    _old = float(df.loc[_i, _c])
+                                    if _old > 0:
+                                        df.loc[_i, _c] = max(_old, _px) if _c == "high" else min(_old, _px)
+                            df.attrs["live_patched"] = {
+                                "date": str(_last.date()), "old_close": _old_close,
+                                "live": _px}
+                except Exception:  # noqa: BLE001
+                    pass
         # 外部数据（资金流 / 大宗交易 / 龙虎榜）按票加载；取不到就 None，
         # 对应信号族输出 0（预热），不影响其余信号。
         _extra = None
