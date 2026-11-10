@@ -1,6 +1,6 @@
 {
  "criterion": "MEDIUM 分流规则：文件是否在打分链路闭包内。闭包根 = ['signals', 'learner', 'engine', 'dataset']；闭包内不豁免，闭包外按文件豁免。这条规则可重复执行：python -m audit.gen_waivers",
- "generated_at": "2026-11-10T10:06:24+08:00",
+ "generated_at": "2026-11-10T14:36:00+08:00",
  "by": "lead",
  "chain_modules": [
   "account_config",
@@ -8,6 +8,7 @@
   "analysis",
   "behavior_report",
   "behavioral",
+  "calendar_cn",
   "capital",
   "costs",
   "daily_append",
@@ -17,11 +18,13 @@
   "engine",
   "ensemble",
   "ensemble_model",
+  "event_data",
   "event_learning",
   "events",
   "feature_select",
   "fees",
   "flow",
+  "flow_factor",
   "gbdt",
   "horizon_ledger",
   "horizons",
@@ -31,6 +34,7 @@
   "live_model",
   "lot",
   "meta",
+  "names",
   "neutral",
   "news_live",
   "online_calib",
@@ -41,6 +45,8 @@
   "residual",
   "reward",
   "sample_weight",
+  "sentiment_store",
+  "session",
   "signals",
   "signed",
   "sources",
@@ -297,12 +303,6 @@
    "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
   },
   {
-   "path": "qcore/session.py",
-   "scope": "file",
-   "n": 6,
-   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
-  },
-  {
    "path": "qcore/stock_chart.py",
    "scope": "file",
    "n": 6,
@@ -423,9 +423,19 @@
    "why": "逐日重放核心：告警点全部是 axis=1（信号维）归一化与横截面 mean，非时序统计；核心代码保留告警"
   },
   {
+   "path": "qcore/session.py",
+   "n": 6,
+   "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
+  },
+  {
    "path": "qcore/signed.py",
    "n": 5,
    "why": "L56 是 axis=1 横截面去均值；L88-89 的 mu/sd 在 fit 时用**训练矩阵**拟合并存盘、预测时复用（标准做法），非泄漏；核心保留告警"
+  },
+  {
+   "path": "qcore/sentiment_store.py",
+   "n": 4,
+   "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
   },
   {
    "path": "qcore/learner.py",

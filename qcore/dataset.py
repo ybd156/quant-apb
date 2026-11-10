@@ -79,12 +79,72 @@ def build_regime(index_df: pd.DataFrame, dates: np.ndarray,
 
 
 # ------------------------------------------------------------------ build
+def external_loader(code: str):
+    """把「资金流 + 事件」合并成一张按日索引的外部数据表，供 compute_signals 用。
+
+    三者都是**外部数据**，取不到就返回 None（对应信号族输出 0，绝不报错）。
+    资金流只有 120 天（东财接口上限），事件数据有多年（实测 600519 272 笔跨 19 年）。
+    """
+    frames = []
+    try:
+        from . import flow_factor as FF
+        raw = FF.fetch_flow(code)
+        if raw is not None and len(raw):
+            f = raw.copy()
+            f["date"] = pd.to_datetime(f["date"]).dt.normalize()
+            # fetch_flow 已带 main_ratio（主力净流入占成交额 %）；
+            # super_ratio 不一定存在，有就带上，没有 _f_flow 会回退到 main_ratio。
+            keep = ["date", "main_ratio"] + (["super_ratio"] if "super_ratio" in f.columns else [])
+            frames.append(f[keep])
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from . import event_data as ED
+        e = ED.load_events(code)
+        if e is not None and len(e):
+            e = e.copy()
+            e["date"] = pd.to_datetime(e["date"]).dt.normalize()
+            keep = ["date"] + [c for c in ("bt_shares_ratio", "bt_premium",
+                                           "bb_net_ratio", "mg_net_ratio",
+                                           "mg_bal_ratio", "mg_short_ratio")
+                               if c in e.columns]
+            frames.append(e[keep])
+    except Exception:  # noqa: BLE001
+        pass
+    # 散户情绪：只读已落盘快照（绝不联网）。没有快照时为空，信号族输出 0。
+    try:
+        from . import sentiment_store as SS
+        sn = SS.load_sentiment(code)
+        if sn is not None and len(sn):
+            sn = sn.copy()
+            sn["date"] = pd.to_datetime(sn["date"]).dt.normalize()
+            frames.append(sn)
+    except Exception:  # noqa: BLE001
+        pass
+    # 政策/新闻事件：全市场事件对所有票生效（板块级过滤需要板块映射，暂不猜）
+    try:
+        from . import sentiment_store as SS
+        ev = SS.load_events(code)
+        if ev is not None and len(ev):
+            ev = ev.copy()
+            ev["date"] = pd.to_datetime(ev["date"]).dt.normalize()
+            frames.append(ev)
+    except Exception:  # noqa: BLE001
+        pass
+    if not frames:
+        return None
+    out = frames[0]
+    for f in frames[1:]:
+        out = pd.merge(out, f, on="date", how="outer")
+    return out.sort_values("date").reset_index(drop=True)
+
+
 def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
                   extra_horizons: Optional[List[int]] = None,
                   exec_lag: int = 1, str_dtype: str = "uint8", n_univ: int = 100,
                   chunk: int = 25, cutoff: Optional[str] = None,
                   verbose: bool = True, loader=None, pad: bool = True,
-                  market: str = "CN") -> Panel3D:
+                  market: str = "CN", extra_loader=None) -> Panel3D:
     from .signals import compute_signals, signal_zoo
 
     zoo = signal_zoo()
@@ -169,8 +229,16 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
 
     for n, code in enumerate(code_list):
         df = panel[code]
+        # 外部数据（资金流 / 大宗交易 / 龙虎榜）按票加载；取不到就 None，
+        # 对应信号族输出 0（预热），不影响其余信号。
+        _extra = None
+        if extra_loader is not None:
+            try:
+                _extra = extra_loader(code)
+            except Exception:  # noqa: BLE001
+                _extra = None
         try:
-            dir_df, str_df = compute_signals(df)
+            dir_df, str_df = compute_signals(df, flow_df=_extra)
         except Exception as e:  # noqa: BLE001
             if verbose:
                 print(f"  [signal-fail] {code}: {e}")

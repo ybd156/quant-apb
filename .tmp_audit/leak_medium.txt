@@ -1,0 +1,554 @@
+==============================================================================
+audit/leak_scan.py  --  static look-ahead / data-leak scan
+==============================================================================
+scanned 122 file(s) under 'qcore'
+  - qcore\account.py
+  - qcore\account_config.py
+  - qcore\advanced.py
+  - qcore\alert.py
+  - qcore\alpha158.py
+  - qcore\altdata.py
+  - qcore\analysis.py
+  - qcore\attribution.py
+  - qcore\auth.py
+  - qcore\backtest.py
+  - qcore\behavior_report.py
+  - qcore\behavioral.py
+  - qcore\brief.py
+  - qcore\bt.py
+  - qcore\bt_rules.py
+  - qcore\calendar_cn.py
+  - qcore\capital.py
+  - qcore\chart.py
+  - qcore\claims.py
+  - qcore\cleaning.py
+  - qcore\combo.py
+  - qcore\confidence.py
+  - qcore\context.py
+  - qcore\costs.py
+  - qcore\crossmarket.py
+  - qcore\daily_append.py
+  - qcore\data.py
+  - qcore\data_sync.py
+  - qcore\dataset.py
+  - qcore\datasource.py
+  - qcore\distill.py
+  - qcore\docker_api.py
+  - qcore\drift.py
+  - qcore\engine.py
+  - qcore\ensemble.py
+  - qcore\ensemble_model.py
+  - qcore\env_guard.py
+  - qcore\event_data.py
+  - qcore\event_learning.py
+  - qcore\events.py
+  - qcore\feature_select.py
+  - qcore\fees.py
+  - qcore\flow.py
+  - qcore\flow_factor.py
+  - qcore\forecast.py
+  - qcore\gbdt.py
+  - qcore\gpu.py
+  - qcore\health.py
+  - qcore\horizon_ledger.py
+  - qcore\horizons.py
+  - qcore\hotspot.py
+  - qcore\impact.py
+  - qcore\indicators2.py
+  - qcore\info.py
+  - qcore\intraday.py
+  - qcore\intraday_factor.py
+  - qcore\intraday_online.py
+  - qcore\intraday_signals.py
+  - qcore\invariants.py
+  - qcore\kit_doctor.py
+  - qcore\kit_update.py
+  - qcore\learner.py
+  - qcore\live.py
+  - qcore\live_features.py
+  - qcore\live_model.py
+  - qcore\longshort.py
+  - qcore\lot.py
+  - qcore\market_live.py
+  - qcore\meta.py
+  - qcore\metrics.py
+  - qcore\model.py
+  - qcore\model_bootstrap.py
+  - qcore\model_health.py
+  - qcore\model_transfer.py
+  - qcore\multihorizon.py
+  - qcore\names.py
+  - qcore\net.py
+  - qcore\net_guard.py
+  - qcore\neutral.py
+  - qcore\news_live.py
+  - qcore\noon.py
+  - qcore\online_calib.py
+  - qcore\optimizer.py
+  - qcore\paper.py
+  - qcore\paper_auto.py
+  - qcore\pipeline.py
+  - qcore\policy_calendar.py
+  - qcore\position.py
+  - qcore\probe_sources.py
+  - qcore\qlib_data.py
+  - qcore\ranker.py
+  - qcore\report.py
+  - qcore\report_stats.py
+  - qcore\residual.py
+  - qcore\retail_index.py
+  - qcore\reward.py
+  - qcore\risk.py
+  - qcore\sample_weight.py
+  - qcore\sentiment.py
+  - qcore\session.py
+  - qcore\signals.py
+  - qcore\signed.py
+  - qcore\slippage.py
+  - qcore\sources.py
+  - qcore\stats.py
+  - qcore\stock_chart.py
+  - qcore\store.py
+  - qcore\stress.py
+  - qcore\survival.py
+  - qcore\sync.py
+  - qcore\tactics.py
+  - qcore\tech_extra.py
+  - qcore\thresholds.py
+  - qcore\tick.py
+  - qcore\transfer.py
+  - qcore\update_apply.py
+  - qcore\update_check.py
+  - qcore\update_progress.py
+  - qcore\us_data.py
+  - qcore\versioning.py
+  - qcore\watch.py
+  - qcore\weekly.py
+------------------------------------------------------------------------------
+qcore\backtest.py:50: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | return float(v.mean())
+
+qcore\backtest.py:71: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | valid_cnt = np.isfinite(scores).sum(axis=0)
+
+qcore\backtest.py:187: [INFO] np.nanmin( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | return float(np.nanmin(dd)) if np.isfinite(dd).any() else NAN
+
+qcore\backtest.py:192: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | sd = float(np.std(ret, ddof=1))
+
+qcore\backtest.py:192: [INFO] np.std( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | sd = float(np.std(ret, ddof=1))
+
+qcore\backtest.py:195: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | return float(np.mean(ret) / sd * math.sqrt(TRADING_DAYS))
+
+qcore\backtest.py:195: [INFO] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | return float(np.mean(ret) / sd * math.sqrt(TRADING_DAYS))
+
+qcore\backtest.py:202: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | to_avg = float(np.mean(np.asarray(to_long_list) + np.asarray(to_short_list)))
+
+qcore\backtest.py:202: [INFO] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | to_avg = float(np.mean(np.asarray(to_long_list) + np.asarray(to_short_list)))
+
+qcore\backtest.py:207: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | gs = dict(long=dict(mean=float(np.mean(size_long)), min=int(np.min(size_long)),
+
+qcore\backtest.py:207: [INFO] .min() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | gs = dict(long=dict(mean=float(np.mean(size_long)), min=int(np.min(size_long)),
+
+qcore\backtest.py:207: [INFO] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | gs = dict(long=dict(mean=float(np.mean(size_long)), min=int(np.min(size_long)),
+
+qcore\backtest.py:207: [INFO] np.min( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | gs = dict(long=dict(mean=float(np.mean(size_long)), min=int(np.min(size_long)),
+
+qcore\backtest.py:208: [INFO] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | max=int(np.max(size_long))))
+
+qcore\backtest.py:208: [INFO] np.max( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | max=int(np.max(size_long))))
+
+qcore\backtest.py:210: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | gs["short"] = dict(mean=float(np.mean(size_short)), min=int(np.min(size_short)),
+
+qcore\backtest.py:210: [INFO] .min() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | gs["short"] = dict(mean=float(np.mean(size_short)), min=int(np.min(size_short)),
+
+qcore\backtest.py:210: [INFO] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | gs["short"] = dict(mean=float(np.mean(size_short)), min=int(np.min(size_short)),
+
+qcore\backtest.py:210: [INFO] np.min( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | gs["short"] = dict(mean=float(np.mean(size_short)), min=int(np.min(size_short)),
+
+qcore\backtest.py:211: [INFO] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | max=int(np.max(size_short)))
+
+qcore\backtest.py:211: [INFO] np.max( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | max=int(np.max(size_short)))
+
+qcore\backtest.py:223: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | ann_vol=float(np.std(ret_ls, ddof=1) * math.sqrt(TRADING_DAYS)) if n_days > 1 else NAN,
+
+qcore\backtest.py:223: [INFO] np.std( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | ann_vol=float(np.std(ret_ls, ddof=1) * math.sqrt(TRADING_DAYS)) if n_days > 1 else NAN,
+
+qcore\backtest.py:225: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | win_rate=float((ret_ls > 0).mean()) if n_days else NAN,
+
+qcore\dataset.py:76: [MEDIUM] .rank(pct=True) 若为全样本排名则泄漏（按日横截面才安全）
+      | vol_pct = vol.rolling(vol_pct_win, min_periods=vol_win).rank(pct=True)
+
+qcore\engine.py:96: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | w /= w.sum()
+
+qcore\engine.py:110: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | denom[:] = tmp.sum(axis=1)
+
+qcore\engine.py:112: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | num[:] = tmp.sum(axis=1)
+
+qcore\engine.py:123: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | cc = np.where(denom > 1e-9, tmp.sum(axis=1) / np.maximum(denom, 1e-9), np.nan)
+
+qcore\engine.py:126: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | nact = act.sum(axis=1).astype(np.float32)
+
+qcore\engine.py:130: [MEDIUM] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n_active_hist[t] = int(nact.mean())
+
+qcore\engine.py:142: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | cnt = act_m.sum(axis=0)
+
+qcore\engine.py:147: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | payoff[active] = y_m.sum(axis=0)[active] / cnt[active]
+
+qcore\engine.py:246: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | nact = act.sum(axis=1).astype(np.float32)
+
+qcore\ensemble_model.py:82: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n = r.notna().sum(axis=0).to_numpy(dtype=np.float64)
+
+qcore\event_data.py:174: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | "n_block": int(df["bt_shares_ratio"].notna().sum()),
+
+qcore\event_data.py:175: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | "n_billboard": int(df["bb_net_ratio"].notna().sum())}
+
+qcore\flow_factor.py:447: [INFO] .min() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | print(f"\n--- {label} 因子统计 (n_rows={len(f)}, 区间 {f.index.min()} .. {f.index.max()}) ---")
+
+qcore\flow_factor.py:447: [INFO] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | print(f"\n--- {label} 因子统计 (n_rows={len(f)}, 区间 {f.index.min()} .. {f.index.max()}) ---")
+
+qcore\flow_factor.py:481: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | nan_a = int(np.isnan(a).sum())
+
+qcore\flow_factor.py:482: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | nan_b = int(np.isnan(b).sum())
+
+qcore\flow_factor.py:533: [INFO] .min() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | print(f"  原始资金流: {len(raw)} 行, {raw['date'].min()} .. {raw['date'].max()} "
+
+qcore\flow_factor.py:533: [INFO] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | print(f"  原始资金流: {len(raw)} 行, {raw['date'].min()} .. {raw['date'].max()} "
+
+qcore\gbdt.py:191: [MEDIUM] .quantile() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | e = np.unique(np.quantile(sub, qs)).astype(np.float32)
+
+qcore\gbdt.py:191: [MEDIUM] np.quantile( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | e = np.unique(np.quantile(sub, qs)).astype(np.float32)
+
+qcore\gbdt.py:329: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | G = float(g[idx].sum())
+
+qcore\gbdt.py:330: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | H = float(h[idx].sum())
+
+qcore\gbdt.py:513: [MEDIUM] .min() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | self._counts_from_hess = bool(h.min() == h.max() and h[0] > 0.0)
+
+qcore\gbdt.py:513: [MEDIUM] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | self._counts_from_hess = bool(h.min() == h.max() and h[0] > 0.0)
+
+qcore\gbdt.py:520: [MEDIUM] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | self.evals_result_["train_l2"].append(float(np.mean((pred - y) ** 2)))
+
+qcore\gbdt.py:520: [MEDIUM] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | self.evals_result_["train_l2"].append(float(np.mean((pred - y) ** 2)))
+
+qcore\gbdt.py:524: [MEDIUM] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | l2v = float(np.mean((predv - yv) ** 2))
+
+qcore\gbdt.py:524: [MEDIUM] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | l2v = float(np.mean((predv - yv) ** 2))
+
+qcore\gbdt.py:556: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | s = float(self._gain.sum())
+
+qcore\gbdt.py:574: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | ss_res = float(np.sum((y_true - y_pred) ** 2))
+
+qcore\gbdt.py:575: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
+
+qcore\gbdt.py:575: [MEDIUM] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
+
+qcore\gbdt.py:575: [MEDIUM] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | ss_tot = float(np.sum((y_true - np.mean(y_true)) ** 2))
+
+qcore\intraday_factor.py:441: [INFO] .min() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | f"{', 区间 ' + str(f.index.min()) + ' .. ' + str(f.index.max()) if len(f) else ''}) ---")
+
+qcore\intraday_factor.py:441: [INFO] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | f"{', 区间 ' + str(f.index.min()) + ' .. ' + str(f.index.max()) if len(f) else ''}) ---")
+
+qcore\intraday_factor.py:477: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | nan_a = int(np.isnan(a).sum())
+
+qcore\intraday_factor.py:478: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | nan_b = int(np.isnan(b).sum())
+
+qcore\intraday_factor.py:531: [INFO] .min() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | f"({bars['datetime'].min()} .. {bars['datetime'].max()})  取数 {t_fetch:.2f}s")
+
+qcore\intraday_factor.py:531: [INFO] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | f"({bars['datetime'].min()} .. {bars['datetime'].max()})  取数 {t_fetch:.2f}s")
+
+qcore\learner.py:95: [MEDIUM] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | e = np.exp(c.tau * (z - z.max()))
+
+qcore\learner.py:96: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | p = e / max(e.sum(), 1e-12)
+
+qcore\learner.py:99: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | return w / w.sum()
+
+qcore\metrics.py:111: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | sa, sb = ra.std(), rb.std()
+
+qcore\metrics.py:111: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | sa, sb = ra.std(), rb.std()
+
+qcore\metrics.py:114: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | return float(((ra - ra.mean()) * (rb - rb.mean())).mean() / (sa * sb))
+
+qcore\metrics.py:114: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | return float(((ra - ra.mean()) * (rb - rb.mean())).mean() / (sa * sb))
+
+qcore\metrics.py:114: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | return float(((ra - ra.mean()) * (rb - rb.mean())).mean() / (sa * sb))
+
+qcore\metrics.py:145: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | if int(mask.sum()) == 0:
+
+qcore\metrics.py:151: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n = int(sel.sum())
+
+qcore\metrics.py:152: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | out[int(u)] = float(vv[sel].mean()) if n else NAN
+
+qcore\metrics.py:190: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n_samples = int(mask.sum())
+
+qcore\metrics.py:192: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n_days=int((mask.sum(axis=0) > 0).sum()),
+
+qcore\metrics.py:192: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n_days=int((mask.sum(axis=0) > 0).sum()),
+
+qcore\metrics.py:193: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | coverage=float(finite.sum() / max(int(np.isfinite(sc).sum()), 1)))
+
+qcore\metrics.py:193: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | coverage=float(finite.sum() / max(int(np.isfinite(sc).sum()), 1)))
+
+qcore\metrics.py:204: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n_zero = int((rr == 0).sum())
+
+qcore\metrics.py:213: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | p = float(hit.mean())
+
+qcore\metrics.py:219: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | mean_signed_ret=float((np.sign(s) * rr).mean()),
+
+qcore\metrics.py:278: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n = int(m.sum())
+
+qcore\metrics.py:285: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | n_days = int(ok.sum())
+
+qcore\metrics.py:293: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | mean = float(vals.mean())
+
+qcore\metrics.py:294: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | std = float(vals.std(ddof=1)) if n_days > 1 else NAN
+
+qcore\metrics.py:303: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | positive_ratio=float((vals > 0).mean()),
+
+qcore\metrics.py:315: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | by_y[int(y)] = float(ic[sel].mean())
+
+qcore\metrics.py:316: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | by_yn[int(y)] = int(sel.sum())
+
+qcore\metrics.py:346: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | row = ws.sum(axis=1, keepdims=True)
+
+qcore\metrics.py:355: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | topk = srt[:, :k].sum(axis=1)
+
+qcore\metrics.py:361: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | if ok.sum() >= 4 and half >= 1:
+
+qcore\metrics.py:365: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | trend = float(b.mean() - a.mean())
+
+qcore\metrics.py:365: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | trend = float(b.mean() - a.mean())
+
+qcore\metrics.py:378: [INFO] np.nanmean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | hhi_mean=float(np.nanmean(hhi)) if ok.any() else NAN,
+
+qcore\metrics.py:379: [INFO] np.nanmedian( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | hhi_median=float(np.nanmedian(hhi)) if ok.any() else NAN,
+
+qcore\metrics.py:381: [INFO] np.nanmean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | topk_mean=float(np.nanmean(topk)) if ok.any() else NAN,
+
+qcore\metrics.py:382: [INFO] np.nanmean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | effective_n_mean=float(np.nanmean(eff_n)) if ok.any() else NAN,
+
+qcore\metrics.py:396: [INFO] np.nanmean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | by_y[int(y)] = dict(hhi=float(np.nanmean(hhi[sel])),
+
+qcore\metrics.py:397: [INFO] np.nanmean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | topk=float(np.nanmean(topk[sel])))
+
+qcore\metrics.py:447: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | sums[g] += float(v.mean())
+
+qcore\metrics.py:449: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | cnt_obs[g] += int(ok.sum())
+
+qcore\metrics.py:450: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | hit_sum[g] += float(((v > 0).sum()))
+
+qcore\metrics.py:479: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | if finite.sum() >= 2:
+
+qcore\model_transfer.py:163: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | and np.isfinite(np.asarray(p, dtype=float)).mean() > 0.9)
+
+qcore\model_transfer.py:165: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | f"有限值占比 {np.isfinite(np.asarray(p, dtype=float)).mean():.2f}")
+
+qcore\qlib_data.py:323: [INFO] .min() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | print(f"{codes[0]}: {len(df)} 根  {df['date'].min().date()} -> {df['date'].max().date()}")
+
+qcore\qlib_data.py:323: [INFO] .max() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | print(f"{codes[0]}: {len(df)} 根  {df['date'].min().date()} -> {df['date'].max().date()}")
+
+qcore\report.py:140: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | tradable = int(np.isfinite(scores).sum())
+
+qcore\session.py:218: [MEDIUM] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | "mean_dev_pct": round(float(np.mean(devs)), 4) if devs else None,
+
+qcore\session.py:218: [MEDIUM] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | "mean_dev_pct": round(float(np.mean(devs)), 4) if devs else None,
+
+qcore\session.py:296: [MEDIUM] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | "hit_rate": round(float(np.mean(hits)), 4) if hits else None,
+
+qcore\session.py:296: [MEDIUM] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | "hit_rate": round(float(np.mean(hits)), 4) if hits else None,
+
+qcore\session.py:297: [MEDIUM] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | "mean_ret_pct": round(float(np.mean(rets)), 3) if rets else None,
+
+qcore\session.py:297: [MEDIUM] np.mean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | "mean_ret_pct": round(float(np.mean(rets)), 3) if rets else None,
+
+qcore\signed.py:56: [MEDIUM] np.nanmean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | return x - np.nanmean(x, axis=1, keepdims=True)
+
+qcore\signed.py:88: [MEDIUM] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | self.mu = X.mean(axis=0)
+
+qcore\signed.py:89: [MEDIUM] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | sd = X.std(axis=0)
+
+qcore\signed.py:169: [MEDIUM] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | if m.sum() >= 10:
+
+qcore\signed.py:171: [MEDIUM] np.nanmean( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | ys.append(y[m] - np.nanmean(y[m]))
+
+qcore\stats.py:81: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | e = x - x.mean()
+
+qcore\stats.py:82: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | s = (e * e).sum() / n
+
+qcore\stats.py:85: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | s += 2.0 * w * (e[L:] * e[:-L]).sum() / n
+
+qcore\stats.py:98: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | mu = float(x.mean())
+
+qcore\stats.py:133: [INFO] .quantile() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | lo, hi = np.quantile(vals, [alpha / 2, 1 - alpha / 2])
+
+qcore\stats.py:133: [INFO] np.quantile( 数组级统计 -> 若作用于全样本序列则泄漏（需人工确认）
+      | lo, hi = np.quantile(vals, [alpha / 2, 1 - alpha / 2])
+
+qcore\stats.py:136: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | "p_positive": float((vals > 0).mean()),
+
+qcore\stats.py:137: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | "se_boot": float(vals.std(ddof=1)), "n_boot": int(n_boot)}
+
+qcore\stats.py:144: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | if r.size < 3 or r.std(ddof=1) == 0:
+
+qcore\stats.py:146: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | return float(r.mean() / r.std(ddof=1) * math.sqrt(periods))
+
+qcore\stats.py:146: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | return float(r.mean() / r.std(ddof=1) * math.sqrt(periods))
+
+qcore\stats.py:232: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | frac_active = float((state == 1).mean())
+
+qcore\stats.py:246: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | if m.sum() < 30:
+
+qcore\stats.py:264: [INFO] .std() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | _sd = float(x.std(ddof=1)) if x.size > 2 else 0.0
+
+qcore\stats.py:265: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | sr_pp = float(x.mean() / _sd) if _sd > 0 else float("nan")
+
+qcore\us_data.py:288: [INFO] .sum() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | df.attrs["amount_missing"] = int(fake_zero.sum())
+
+qcore\us_data.py:722: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | out.attrs["mkt_coverage"] = float(out["mktcap"].notna().mean())
+
+qcore\us_data.py:739: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | out.attrs["mkt_coverage"] = float(out["mktcap"].notna().mean()) if len(out) else 0.0
+
+qcore\us_data.py:793: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | df.attrs["mkt_coverage"] = float(df["mktcap"].notna().mean())
+
+qcore\us_data.py:845: [INFO] .mean() 未挂在 rolling/expanding 链上 -> 疑似全样本口径（评估/报表类文件里通常是正常汇总；特征类文件里需人工确认）
+      | print(f"pool: n={len(p)} mktcap_cov={p['mktcap'].notna().mean():.2%} "
+
+------------------------------------------------------------------------------
+RESULT: HIGH=0  MEDIUM=39  INFO=102  WAIVED=782（行内 103 / 文件级 679）
+VERDICT: PASS with warnings -- MEDIUM items need human confirmation
+         (re-run with --verbose to list them).

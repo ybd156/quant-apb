@@ -46,6 +46,12 @@ def _bad(name: str, detail: str = "") -> None:
     print(f"  [FAIL] {name}" + (f" :: {detail}" if detail else ""))
 
 
+#: 依赖**外部数据**（资金流 / 大宗交易 / 龙虎榜）的信号族。
+#: 这些族在没有喂数据时必须输出 0（预热），不算「死族」。
+EXT_FAMILIES = ("flow", "block_trade", "billboard", "margin", "sentiment", "event")
+EXT_PREFIX = ("flow", "bt", "bb", "mg", "snt", "evt")
+
+
 def check(name: str, fn) -> None:
     """跑一个断言块，异常即记失败（不中断其余用例）。"""
     try:
@@ -135,15 +141,18 @@ def main() -> int:
 
     def t_spec():
         assert all(isinstance(s, SignalSpec) for s in zoo)
-        assert 50 <= len(zoo) <= 90, len(zoo)
+        # 上限随外部数据族扩展而上调（73 手写 + 20 外部数据 = 93）
+        assert 50 <= len(zoo) <= 120, len(zoo)
         assert all(len(s.sid) > 3 and s.note for s in zoo)
         fam = {}
         for s in zoo:
             fam[s.family] = fam.get(s.family, 0) + 1
-        assert len(fam) == 15, f"expected 15 families, got {len(fam)}: {fam}"
+        # 16-21 族：新增 6 个**外部数据族**（资金流/大宗/龙虎榜/融资融券/散户情绪/政策事件）。
+        # 它们没有数据时输出 0 是正确行为（预热），由 [4b] 专测覆盖「喂数据必须发声」。
+        assert len(fam) == 21, f"expected 21 families, got {len(fam)}: {fam}"
         assert all(v >= 2 for v in fam.values()), fam
-        return f"15 families, min variants={min(fam.values())}"
-    check("SignalSpec dataclass / 15 families / >=2 variants each", t_spec)
+        return f"{len(fam)} families, min variants={min(fam.values())}"
+    check("SignalSpec dataclass / 21 families / >=2 variants each", t_spec)
 
     # ---------------- 2. 截断一致性（无未来函数硬检验） ----------------
     print("\n[2] truncation invariance (no-lookahead hard test)")
@@ -232,7 +241,13 @@ def main() -> int:
         for sid in sids:
             if int(nz[sid]) <= 0:
                 dead_sid.append(sid)
+        # 三个外部数据族：本用例不喂数据，它们输出 0 是**正确行为**（预热不发声）。
+        # 由下面的 [4b] 专测覆盖。
+        dead_fam = [f for f in dead_fam if f not in EXT_FAMILIES]
         assert not dead_fam, f"dead families: {dead_fam}"
+        # flow 的 sid 同理：不喂资金流数据时输出 0 是正确行为，由 [4b] 专测覆盖
+        dead_sid = [x for x in dead_sid
+                    if not any(x.startswith(p + "_") for p in EXT_PREFIX)]
         assert not dead_sid, f"dead sids: {dead_sid[:8]}"
         # 非零行上 STR 必须真的 >0
         d = DIR.to_numpy()
@@ -242,6 +257,49 @@ def main() -> int:
             print(f"        {fam:<12} variants={cnt:<2} nonzero_dir_rows={tot}")
         return f"{len(fam_rows)} families all alive"
     check("every family (and every sid) fires at least once", t_live)
+
+    # ---------------- 4b. flow 族：喂数据必须发声，不喂必须全 0 ----------------
+    print(chr(10) + "[4b] flow family (needs external capital-flow data)")
+
+    def t_ext():
+        import pandas as pd
+        from qcore.signals import compute_signals
+        df = load_df(find_kline())
+        n = len(df)
+        cases = [
+            ("flow", {"main_ratio": 3.0, "super_ratio": 2.0}, {1.0}),
+            ("block_trade", {"bt_shares_ratio": 1.0, "bt_premium": 8.0}, {1.0}),
+            ("billboard", {"bb_net_ratio": 12.0}, {1.0}),
+            # 只喂 net 列：short 变体是反向解释（融券上升看空），
+            # 同时喂三列会让方向混在一起，测不出「方向是否正确」。
+            ("margin", {"mg_net_ratio": 5.0}, {1.0}),
+            # 情绪族同时有反向(snt_contra)与顺势(snt_follow)两个变体，
+            # 同一份输入必然同时出现 -1 和 +1 —— 这是设计，不是错误。
+            ("sentiment", {"snt_bull_ratio": 0.85}, {-1.0, 1.0}),
+            ("event", {"evt_direction": 1.0, "evt_level": 3.0}, {1.0}),
+        ]
+        out = []
+        for fam, cols, expect in cases:
+            expect = set(expect) if not isinstance(expect, set) else expect
+            specs = [s for s in signal_zoo() if s.family == fam]
+            assert specs, f"no {fam} signals in zoo"
+            # 不喂数据 -> 必须全 0（预热），且不得报错
+            d0, _ = compute_signals(df, specs=specs)
+            assert float(abs(d0.to_numpy()).sum()) == 0.0, f"{fam} fired without data"
+            # 喂数据 -> 必须发声且方向正确
+            f = pd.DataFrame({"date": df["date"]})
+            for c, v in cols.items():
+                f[c] = np.full(n, float(v))
+            d1, _ = compute_signals(df, flow_df=f, specs=specs)
+            nz = int((d1.to_numpy() != 0).sum())
+            assert nz > 0, f"{fam} did not fire even with data"
+            vals = d1.to_numpy()[d1.to_numpy() != 0]
+            got = set(vals.tolist())
+            assert got and got <= expect, f"{fam} direction wrong: {got} not in {expect}"
+            out.append(f"{fam}:{nz}")
+        return "fired -> " + " ".join(out)
+
+    check("外部数据族：无数据=0，有数据=发声且方向正确", t_ext)
 
     # ---------------- 5. 性能与内存 ----------------
     print("\n[5] performance / memory")

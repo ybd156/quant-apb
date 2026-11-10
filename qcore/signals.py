@@ -206,9 +206,10 @@ class _Ctx:
     """单只股票的全部基础序列 + 指标缓存。价格基准为成交均价 px。"""
 
     __slots__ = ("n", "index", "c", "o", "h", "l", "v", "turn", "amt",
-                 "ohlc_ok", "bar_ok", "idx_c", "_k")
+                 "ohlc_ok", "bar_ok", "idx_c", "_k", "flow")
 
-    def __init__(self, df: pd.DataFrame, index_df: Optional[pd.DataFrame] = None):
+    def __init__(self, df: pd.DataFrame, index_df: Optional[pd.DataFrame] = None,
+                 flow_df: Optional[pd.DataFrame] = None):
         n = len(df)
         self.n = n
         self._k: Dict[Any, np.ndarray] = {}
@@ -228,6 +229,20 @@ class _Ctx:
         l_raw = _col(df, "low")
         self.turn = _col(df, "turnover")
         self.amt = amt
+        # 资金流按**日期**对齐到本票的日期轴；对不上的位置留 NaN。
+        # 绝不允许 forward-fill 到未来 —— 那等于用后面的资金流预测前面。
+        self.flow: Dict[str, np.ndarray] = {}
+        if flow_df is not None and len(flow_df):
+            try:
+                _f = flow_df.copy()
+                _f["date"] = pd.to_datetime(_f["date"]).dt.normalize()
+                _f = _f.drop_duplicates("date").set_index("date")
+                for _cname in _f.columns:
+                    _vals = pd.to_numeric(_f[_cname], errors="coerce")
+                    self.flow[str(_cname)] = _vals.reindex(
+                        idx.normalize()).to_numpy(dtype=np.float64)
+            except Exception:  # noqa: BLE001
+                self.flow = {}
         self.v = np.where(np.isfinite(vol) & (vol > 0), vol, np.nan)
 
         # --- 价格基准：后复权 close 优先（恒正、口径可比）
@@ -371,7 +386,7 @@ class _View:
     """tail 模式下的切片视图：基础序列切片，指标先全量算再切片。"""
 
     __slots__ = ("_ctx", "_s", "n", "index", "c", "o", "h", "l", "v", "turn",
-                 "amt", "ohlc_ok", "bar_ok", "idx_c")
+                 "amt", "ohlc_ok", "bar_ok", "idx_c", "flow")
 
     def __init__(self, ctx: _Ctx, start: int):
         self._ctx = ctx
@@ -381,6 +396,7 @@ class _View:
         for name in ("c", "o", "h", "l", "v", "turn", "amt", "ohlc_ok", "bar_ok"):
             setattr(self, name, getattr(ctx, name)[self._s:])
         self.idx_c = None if ctx.idx_c is None else ctx.idx_c[self._s:]
+        self.flow = {k: v[self._s:] for k, v in (ctx.flow or {}).items()}
 
     def sma(self, w: int) -> np.ndarray:
         return self._ctx.sma(w)[self._s:]
@@ -807,6 +823,200 @@ def _f_dist_ma(ctx, p: dict):
     return d, s
 
 
+def _roll_mean(a: np.ndarray, w: int) -> np.ndarray:
+    """因果滚动均值（只用 ≤t 的 w 个点）。NaN 不计入分母。
+
+    必须**全向量化**：早一版用 Python 循环，单只 3000 根就 119ms，
+    超了 40ms 预算 3 倍（6 个 flow 信号 × 逐点循环）。
+    前缀和版本 O(n)、无循环。
+    """
+    n = a.size
+    if w <= 0 or n == 0:
+        return np.full(n, np.nan, dtype=np.float64)
+    ok = np.isfinite(a)
+    v = np.where(ok, a, 0.0)
+    cv = np.concatenate(([0.0], np.cumsum(v)))
+    cc = np.concatenate(([0.0], np.cumsum(ok.astype(np.float64))))
+    idx = np.arange(n)
+    lo = np.maximum(0, idx - w + 1)
+    sum_v = cv[idx + 1] - cv[lo]
+    sum_c = cc[idx + 1] - cc[lo]
+    need = max(2, w // 2)
+    return np.where(sum_c >= need, sum_v / np.maximum(sum_c, 1.0), np.nan)
+
+
+def _f_flow(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """资金流信号族。
+
+    数据来源：东财个股资金流历史（`flow_factor.fetch_flow`，接口上限 120 天）。
+    **只用相对量**（`main_ratio` 是主力净流入占成交额的百分比，本身就是相对量），
+    不使用绝对金额 —— 后复权价格与现价差 10 倍，绝对金额不可跨股票比较。
+
+    严格因果：滚动均值只用 ≤t 的点；flow 缺失处输出 0（预热），不输出 NaN。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    win = int(params.get("win", 5))
+    kind = str(params.get("kind", "main"))
+    col = "main_ratio" if kind == "main" else "super_ratio"
+    raw = view.flow.get(col)
+    if raw is None:
+        raw = view.flow.get("main_ratio")
+    if raw is None:
+        return d, s
+    mu = _roll_mean(np.asarray(raw, dtype=np.float64), win)
+    # 阈值：主力净流入占成交额 1% 以上才算有方向（经验值，非拟合）
+    th = float(params.get("th", 1.0))
+    with np.errstate(invalid="ignore"):
+        d = np.where(mu >= th, 1.0, np.where(mu <= -th, -1.0, 0.0))
+        s = np.clip(np.abs(np.nan_to_num(mu, nan=0.0)) / (th * 3.0), 0.0, 1.0)
+    d = np.nan_to_num(d, nan=0.0)
+    return d, s
+
+
+def _f_block_trade(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """大宗交易信号族。
+
+    数据：`event_data.load_events`（东财 datacenter，600519 实测 272 笔跨 19 年）。
+    只用相对量：
+      · `bt_shares_ratio` 当日大宗成交量占总股本 %（跨股票可比）
+      · `bt_premium`      按成交额加权的溢价率 %（正=溢价成交，负=折价甩卖）
+    稀疏事件：没有大宗的日子输出 0，不影响其它信号。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    ratio = view.flow.get("bt_shares_ratio")
+    prem = view.flow.get("bt_premium")
+    if ratio is None or prem is None:
+        return d, s
+    ratio = np.nan_to_num(np.asarray(ratio, dtype=np.float64), nan=0.0)
+    prem = np.nan_to_num(np.asarray(prem, dtype=np.float64), nan=0.0)
+    min_ratio = float(params.get("min_ratio", 0.1))     # 占总股本 0.1% 以上才算有意义
+    disc = float(params.get("disc", -5.0))              # 折价 5% 以上算甩卖
+    prem_th = float(params.get("prem", 3.0))            # 溢价 3% 以上算看好
+    has = ratio >= min_ratio
+    with np.errstate(invalid="ignore"):
+        d = np.where(has & (prem <= disc), -1.0,
+                     np.where(has & (prem >= prem_th), 1.0, 0.0))
+        s = np.clip(ratio / (min_ratio * 10.0), 0.0, 1.0) * has
+    return d, s
+
+
+def _f_billboard(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """龙虎榜信号族。
+
+    数据：`event_data.load_events` 的 `bb_net_ratio` = 龙虎榜净买入额 / 当日成交额 %。
+    上榜本身就是异常，净买入方向给出方向；阈值用相对量，不用绝对金额。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    net = view.flow.get("bb_net_ratio")
+    if net is None:
+        return d, s
+    net = np.nan_to_num(np.asarray(net, dtype=np.float64), nan=0.0)
+    th = float(params.get("th", 5.0))                   # 净买入占成交额 5% 以上
+    with np.errstate(invalid="ignore"):
+        d = np.where(net >= th, 1.0, np.where(net <= -th, -1.0, 0.0))
+        s = np.clip(np.abs(net) / (th * 4.0), 0.0, 1.0)
+    return d, s
+
+
+def _f_margin(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """融资融券信号族。
+
+    数据：东财 RPTA_WEB_RZRQ_GGMX（实测 600519 有 4015 条，2010-03-31 起）。
+    只用相对量：
+      · `mg_net_ratio`   融资净买入额 / 当日成交额 %
+      · `mg_bal_ratio`   融资余额 / 流通市值 %
+      · `mg_short_ratio` 融券余额 / 融资余额 %
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    kind = str(params.get("kind", "net"))
+    col = {"net": "mg_net_ratio", "bal": "mg_bal_ratio",
+           "short": "mg_short_ratio"}.get(kind, "mg_net_ratio")
+    raw = view.flow.get(col)
+    if raw is None:
+        return d, s
+    win = int(params.get("win", 5))
+    th = float(params.get("th", 1.0))
+    mu = _roll_mean(np.asarray(raw, dtype=np.float64), win)
+    inv = bool(params.get("invert", False))   # 融券/高杠杆反向解释
+    with np.errstate(invalid="ignore"):
+        d = np.where(mu >= th, -1.0 if inv else 1.0,
+                     np.where(mu <= -th, 1.0 if inv else -1.0, 0.0))
+        s = np.clip(np.abs(np.nan_to_num(mu, nan=0.0)) / (th * 3.0), 0.0, 1.0)
+    return np.nan_to_num(d, nan=0.0), s
+
+
+def _f_sentiment(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """散户情绪信号族（股吧）。
+
+    **没有历史**：股吧帖子只能从采集日往前累积，回测前期必然全 0。
+    这不是 bug —— 是数据不存在。任何「情绪信号有效」的结论在攒够样本前不可采信。
+
+    `contrarian=True`（默认）：散户极度看多时反向（bull_ratio 高 -> 看空）。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    br = view.flow.get("snt_bull_ratio")
+    if br is None:
+        return d, s
+    br = np.asarray(br, dtype=np.float64)
+    win = int(params.get("win", 1))
+    if win > 1:
+        br = _roll_mean(br, win)
+    th = float(params.get("th", 0.65))
+    contrarian = bool(params.get("contrarian", True))
+    with np.errstate(invalid="ignore"):
+        hot = np.nan_to_num(br, nan=0.0) >= th
+        cold = (np.nan_to_num(br, nan=0.0) > 0) & (np.nan_to_num(br, nan=0.0) <= (1.0 - th))
+        d = np.where(hot, -1.0 if contrarian else 1.0,
+                     np.where(cold, 1.0 if contrarian else -1.0, 0.0))
+        s = np.clip(np.abs(np.nan_to_num(br, nan=0.0) - 0.5) * 2.0, 0.0, 1.0)
+    return d, s
+
+
+def _f_event(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """政策/新闻事件信号族。
+
+    数据：`data/state/event_ledger.jsonl`（实测 80 条，带 date/direction/level）。
+    事件是板块级或全市场级的，已由 `sentiment_store.load_events` 按股票所属板块过滤。
+    稀疏事件：没有事件的日子输出 0。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    ev = view.flow.get("evt_direction")
+    lvl = view.flow.get("evt_level")
+    if ev is None:
+        return d, s
+    ev = np.nan_to_num(np.asarray(ev, dtype=np.float64), nan=0.0)
+    lvl = np.nan_to_num(np.asarray(lvl, dtype=np.float64), nan=0.0) if lvl is not None else np.ones(m)
+    min_lvl = float(params.get("min_level", 1.0))
+    with np.errstate(invalid="ignore"):
+        d = np.where(lvl >= min_lvl, ev, 0.0)
+        s = np.clip(lvl / 3.0, 0.0, 1.0) * (d != 0)
+    return np.nan_to_num(d, nan=0.0), s
+
+
 _IMPL: Dict[str, Callable[[Any, dict], Tuple[np.ndarray, np.ndarray]]] = {
     "ma_cross": _f_ma_cross,
     "ma_slope": _f_ma_slope,
@@ -823,6 +1033,12 @@ _IMPL: Dict[str, Callable[[Any, dict], Tuple[np.ndarray, np.ndarray]]] = {
     "pattern": _f_pattern,
     "rs": _f_rs,
     "dist_ma": _f_dist_ma,
+    "flow": _f_flow,
+    "block_trade": _f_block_trade,
+    "billboard": _f_billboard,
+    "margin": _f_margin,
+    "sentiment": _f_sentiment,
+    "event": _f_event,
 }
 
 _KIND = {
@@ -830,6 +1046,12 @@ _KIND = {
     "kdj": "reversal", "boll": "reversal", "vol_break": "volume", "vol_shrink": "volume",
     "volume_anom": "volume", "atr_stop": "volatility", "mom": "momentum",
     "gap": "pattern", "pattern": "pattern", "rs": "momentum", "dist_ma": "reversal",
+    "flow": "flow",
+    "block_trade": "flow",
+    "billboard": "flow",
+    "margin": "flow",
+    "sentiment": "sentiment",
+    "event": "event",
 }
 
 # 需要"可信 OHLC"的族（加性除息污染区置 0）
@@ -953,6 +1175,46 @@ def _table() -> List[tuple]:
                       f"乖离率(收盘/MA{n}-1) > {th:.0%} 视为超买回归(-1)"))
     t.append(("dist_ma", {"mode": "z", "n": 20, "th": 2.0}, "dist_ma_20_z2",
               "20 日乖离率 z 值 <-2 超跌(+1)，>2 超买(-1)"))
+    # ---- flow (6)：资金流。数据源是东财个股资金流历史（接口上限 120 天），
+    #      没有 flow 数据时该族输出 0（预热），不会污染回测。
+    #      只用相对量 main_ratio / super_ratio（净流入占成交额 %），不用绝对金额。
+    for w, th in ((3, 1.0), (5, 1.0), (10, 0.8), (20, 0.5)):
+        t.append(("flow", {"kind": "main", "win": w, "th": th}, f"flow_main_{w}",
+                  f"主力净流入占成交额 {w} 日均值 >{th:g}%(+1) / <-{th:g}%(-1)"))
+    for w, th in ((5, 0.8), (10, 0.6)):
+        t.append(("flow", {"kind": "super", "win": w, "th": th}, f"flow_super_{w}",
+                  f"超大单净流入占成交额 {w} 日均值 >{th:g}%(+1) / <-{th:g}%(-1)"))
+    # ---- block_trade (3)：大宗交易。稀疏事件，无大宗的日子输出 0。
+    t.append(("block_trade", {"min_ratio": 0.1, "disc": -5.0, "prem": 3.0},
+              "bt_disc_prem", "大宗占总股本>0.1% 时：折价>5% 看空(-1) / 溢价>3% 看多(+1)"))
+    t.append(("block_trade", {"min_ratio": 0.5, "disc": -3.0, "prem": 1.0},
+              "bt_big", "大额大宗(占总股本>0.5%)：折价>3%(-1) / 溢价>1%(+1)"))
+    t.append(("block_trade", {"min_ratio": 0.1, "disc": -10.0, "prem": 99.0},
+              "bt_disc_only", "只认深度折价甩卖：大宗折价>10% 看空(-1)"))
+    # ---- billboard (2)：龙虎榜。上榜日才发声。
+    for th in (5.0, 10.0):
+        t.append(("billboard", {"th": th}, f"bb_net_{int(th)}",
+                  f"龙虎榜净买入占成交额 >{th:g}%(+1) / <-{th:g}%(-1)"))
+    # ---- margin (4)：融资融券。2010 起有历史，是这批外部数据里最厚的。
+    for w, th in ((5, 1.0), (20, 0.5)):
+        t.append(("margin", {"kind": "net", "win": w, "th": th}, f"mg_net_{w}",
+                  f"融资净买入占成交额 {w} 日均 >{th:g}%(+1) / <-{th:g}%(-1)"))
+    t.append(("margin", {"kind": "bal", "win": 20, "th": 0.3}, "mg_bal_20",
+              "融资余额占流通市值 20 日均 >0.3%(+1)：杠杆资金持续加仓"))
+    t.append(("margin", {"kind": "short", "win": 5, "th": 1.0, "invert": True}, "mg_short_5",
+              "融券余额/融资余额 5 日均 >1%(-1)：做空压力上升"))
+    # ---- sentiment (3)：散户情绪。**无历史**，只能前向累积。
+    t.append(("sentiment", {"win": 1, "th": 0.70, "contrarian": True}, "snt_contra_1",
+              "股吧看多占比>70% 反向看空(-1)：散户情绪过热"))
+    t.append(("sentiment", {"win": 3, "th": 0.65, "contrarian": True}, "snt_contra_3",
+              "股吧看多占比 3 日均>65% 反向看空(-1)"))
+    t.append(("sentiment", {"win": 1, "th": 0.70, "contrarian": False}, "snt_follow_1",
+              "股吧看多占比>70% 顺势看多(+1)：与 snt_contra_1 互为对照"))
+    # ---- event (2)：政策/新闻事件。稀疏，事件日才发声。
+    t.append(("event", {"min_level": 1.0}, "evt_dir_1",
+              "政策/新闻事件方向（level>=1）直接作为信号"))
+    t.append(("event", {"min_level": 2.0}, "evt_dir_2",
+              "只认强事件（level>=2）的方向"))
     return t
 
 
@@ -1025,7 +1287,8 @@ def signal_zoo(cfg: Optional[dict] = None) -> List[SignalSpec]:
 def compute_signals(df: pd.DataFrame,
                     tail: Optional[int] = None,
                     index_df: Optional[pd.DataFrame] = None,
-                    specs: Optional[Sequence[SignalSpec]] = None
+                    specs: Optional[Sequence[SignalSpec]] = None,
+                    flow_df: Optional[pd.DataFrame] = None
                     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """单只股票日线 -> (DIR, STR)。
 
@@ -1043,7 +1306,7 @@ def compute_signals(df: pd.DataFrame,
         empty = pd.DataFrame(index=pd.DatetimeIndex([]), columns=sids, dtype=_F32)
         return empty.copy(), empty.copy()
 
-    ctx = _Ctx(df, index_df=index_df)
+    ctx = _Ctx(df, index_df=index_df, flow_df=flow_df)
 
     k = 0 if tail is None else int(tail)
     if k > 0 and k < n:

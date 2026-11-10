@@ -1,0 +1,12 @@
+打分链路闭包: 50 个模块
+MEDIUM 分流: 可豁免 666 条 / 59 个文件 · 需人工确认 39 条 / 6 个文件
+
+需人工确认的文件（在打分链路内）:
+  qcore/gbdt.py                              15 条
+  qcore/engine.py                             9 条
+  qcore/session.py                            6 条
+  qcore/signed.py                             5 条
+  qcore/learner.py                            3 条
+  qcore/dataset.py                            1 条
+
+[check] 现有 waivers.json 与当前扫描一致
