@@ -591,6 +591,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/tokens":
+            return self._api_tokens()
         if path == "/api/data/version":
             return self._api_data_version()
         if path == "/api/data/qlib":
@@ -1449,6 +1451,53 @@ class ApiHandler(BaseHTTPRequestHandler):
         return {"ok": True, "path": cache, "bytes": size,
                 "n_files": n_files, "n_codes": len(wanted), "cached": False}
 
+    def _api_tokens(self):
+        """列出访问令牌（不含哈希、不含明文）。
+
+        为什么要有这个功能：原来只有一个 APB_TOKEN 环境变量，
+        部署到别处不好改、多台训练机无法单独吊销、泄露只能全部换掉。
+        """
+        try:
+            from qcore import tokens as TK
+            return self._ok(TK.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("tokens_failed", 500, detail=str(e)[:160])
+
+    def _post_tokens(self):
+        """创建 / 吊销 / 删除访问令牌。
+
+        body:
+          {"action":"create","name":"训练机-A","note":"...","scopes":["sync","write"]}
+          {"action":"revoke","id":"tk_xxx"}
+          {"action":"delete","id":"tk_xxx"}
+        """
+        denied = self._write_allowed()
+        if denied is not None:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        action = str(body.get("action") or "create").lower()
+        try:
+            from qcore import tokens as TK
+        except Exception as e:  # noqa: BLE001
+            return self._fail("import_error", 500, detail=str(e)[:160])
+        if action == "create":
+            r = TK.create(name=str(body.get("name") or ""),
+                          note=str(body.get("note") or ""),
+                          scopes=body.get("scopes") or None)
+            return self._ok(r)
+        if action in ("revoke", "delete"):
+            tid = str(body.get("id") or "")
+            if not tid:
+                return self._fail("bad_param", 400, hint="需要 id")
+            ok = TK.revoke(tid) if action == "revoke" else TK.delete(tid)
+            if not ok:
+                return self._fail("not_found", 404, id=tid)
+            return self._ok({"ok": True, "action": action, "id": tid})
+        return self._fail("bad_param", 400, hint="action 只能是 create/revoke/delete")
+
     def _api_data_version(self):
         """数据版本（本地 qlib 日历最后一天）—— 给训练机判断要不要更新用。
 
@@ -2180,10 +2229,20 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         expected = os.environ.get("APB_TOKEN", "")
         given = (self.headers.get("X-APB-Token") or self.headers.get("X-Token") or "")
+        # 管理令牌（每台训练机一把，可单独吊销）—— 与老的 APB_TOKEN 并存
+        if given:
+            try:
+                from qcore import tokens as TK
+                ok_t, _rec = TK.verify(given, scope="sync")
+                if ok_t:
+                    return None
+            except Exception:  # noqa: BLE001
+                pass
         if expected:
             if not hmac.compare_digest(given, expected):
                 return self._fail("unauthorized", 403,
-                                  hint="X-APB-Token 与 APB_TOKEN 不匹配")
+                                  hint="X-APB-Token 与 APB_TOKEN 不匹配，"
+                                       "且不是有效的管理令牌（设置 → 访问令牌）")
         else:
             client = (self.client_address or ("", 0))[0]
             if not self._is_internal():
@@ -2905,6 +2964,8 @@ f.addEventListener('submit',async(e)=>{
             return self._api_login()
         if path == "/api/logout":
             return self._api_logout()
+        if path == "/api/tokens":
+            return self._post_tokens()
         if path == "/api/sync/task":
             return self._post_sync_task()
         if path == "/api/sync/result":

@@ -3668,6 +3668,10 @@
       S.auth = (au && au.ok && au.data) ? au.data : {};
     } catch (e) { S.auth = {}; }
     try {
+      const tk = await apiCached('/api/tokens', 3000);
+      S.tokens = (tk && tk.ok && tk.data) ? tk.data : {};
+    } catch (e) { S.tokens = {}; }
+    try {
       const fe = await apiCached('/api/fees', 30000);
       S.fees = (fe && fe.ok && fe.data) ? fe.data : {};
     } catch (e) { S.fees = {}; }
@@ -3877,19 +3881,60 @@
 
     // ---- 访问令牌 ----
     const curTok = getToken();
+    const TK = S.tokens || {};
+    const tkRows = (TK.tokens || []).map((t) => {
+      const revoked = Boolean(t.revoked);
+      return '<tr>' +
+        '<td>' + esc(t.name || '—') + '</td>' +
+        '<td class="mono muted">' + esc(t.prefix || '') + '…</td>' +
+        '<td class="muted">' + esc(String(t.created_at || '').slice(5, 16)) + '</td>' +
+        '<td class="muted">' + (t.last_used_at
+          ? esc(String(t.last_used_at).slice(5, 16)) : '<span class="muted">从未使用</span>') + '</td>' +
+        '<td>' + (revoked
+          ? '<span class="tag miss">已吊销</span>'
+          : '<span class="tag hit">有效</span>') + '</td>' +
+        '<td>' + (revoked ? '' :
+          '<button type="button" class="btn ghost sm tk-revoke" data-id="' +
+          esc(t.id) + '">吊销</button>') + '</td>' +
+        '</tr>';
+    }).join('');
+
     const tokenCard = card({
-      title: '访问令牌', sub: '服务端设了 APB_TOKEN 后，所有写操作都要带它',
+      title: '访问令牌', sub: '给每台训练机 / 外部集成单独发一把，可单独吊销',
       body:
+        // 新建
         '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
-          '<label class="field" style="flex:1;min-width:260px"><span>令牌</span>' +
-            '<input type="password" id="tok-input" placeholder="粘贴 APB_TOKEN 的值" value="' +
-            esc(curTok) + '"></label>' +
-          '<button type="button" class="btn" id="tok-save">' + ICON('check') + '保存</button>' +
-          '<button type="button" class="btn ghost" id="tok-clear">清除</button>' +
+          '<label class="field" style="flex:1;min-width:200px"><span>令牌名称</span>' +
+            '<input type="text" id="tk-name" placeholder="例如 训练机-A / 云主机"></label>' +
+          '<button type="button" class="btn" id="tk-create">' + ICON('plus') + '新建令牌</button>' +
         '</div>' +
-        '<p class="muted" style="margin-top:10px">当前状态：' +
-          (curTok ? '<span class="tag hit">已设置</span>' : '<span class="tag miss">未设置</span>') +
-          ' · 只存在本机 localStorage，不上传任何地方。</p>'
+        '<div id="tk-new" style="margin-top:10px"></div>' +
+        // 列表
+        (tkRows
+          ? '<div class="tbl-wrap" style="margin-top:14px"><table class="tbl"><thead><tr>' +
+            '<th>名称</th><th>前缀</th><th>创建</th><th>最后使用</th><th>状态</th><th></th>' +
+            '</tr></thead><tbody>' + tkRows + '</tbody></table></div>'
+          : '<p class="muted" style="margin-top:14px">还没有管理令牌。' +
+            '老的 <code>APB_TOKEN</code> 环境变量仍然有效（向后兼容）。</p>') +
+        '<p class="muted" style="margin-top:12px">' +
+          '明文<strong>只在创建时显示一次</strong>，库里只存 SHA-256 哈希，无法反推。' +
+          '训练机把它写进 <code>apb_defaults.json</code> 的 <code>token</code> 字段，' +
+          '或用 <code>--token</code> / 环境变量 <code>APB_TOKEN</code>。' +
+        '</p>' +
+        // 本机浏览器用的令牌
+        '<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line,#2a3446)">' +
+          '<div style="font-weight:600;margin-bottom:8px">本机浏览器使用的令牌</div>' +
+          '<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">' +
+            '<label class="field" style="flex:1;min-width:260px"><span>令牌</span>' +
+              '<input type="password" id="tok-input" placeholder="粘贴令牌" value="' +
+              esc(curTok) + '"></label>' +
+            '<button type="button" class="btn" id="tok-save">' + ICON('check') + '保存</button>' +
+            '<button type="button" class="btn ghost" id="tok-clear">清除</button>' +
+          '</div>' +
+          '<p class="muted" style="margin-top:8px">当前状态：' +
+            (curTok ? '<span class="tag hit">已设置</span>' : '<span class="tag miss">未设置</span>') +
+            ' · 只存在本机 localStorage，不上传任何地方。</p>' +
+        '</div>'
     });
 
     const trainCard = card({
@@ -4598,6 +4643,45 @@
     });
 
     // ---- 访问令牌 ----
+      // ---- 管理令牌：新建 / 吊销 ----
+      const tkCreate = $('#tk-create');
+      if (tkCreate) {
+        tkCreate.addEventListener('click', async () => {
+          const name = (($('#tk-name') || {}).value || '').trim() || '未命名';
+          const r = await api('/api/tokens', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'create', name: name })
+          });
+          const box = $('#tk-new');
+          if (r && r.ok) {
+            const d = r.data || {};
+            if (box) {
+              box.innerHTML = '<div class="callout" style="padding:10px;border-radius:6px;' +
+                'background:var(--surface-3,#1c2434)">' +
+                '<div style="margin-bottom:6px"><strong>' + esc(d.name) + '</strong> 的令牌' +
+                '（<span style="color:var(--warn)">只显示这一次</span>）：</div>' +
+                '<code class="mono" style="word-break:break-all;user-select:all">' +
+                esc(d.token) + '</code></div>';
+            }
+            toast('令牌已创建，请立刻复制', 'ok');
+            rerender();
+          } else {
+            toast('创建失败：' + errText(r), 'err');
+          }
+        });
+      }
+      $$('.tk-revoke').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-id');
+          const r = await api('/api/tokens', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'revoke', id: id })
+          });
+          if (r && r.ok) { toast('已吊销', 'warn'); rerender(); }
+          else { toast('吊销失败：' + errText(r), 'err'); }
+        });
+      });
+
       const tokSave = $('#tok-save');
       if (tokSave) {
         tokSave.addEventListener('click', () => {

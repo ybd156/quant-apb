@@ -61,6 +61,9 @@ jobs:
       - name: 任务队列超时与重领
         run: python -m tests.test_sync_tasks
 
+      - name: 访问令牌（多令牌/哈希存储/单独吊销）
+        run: python -m tests.test_tokens
+
       - name: 入口脚本语法（python -c 块里的反引号会被 sh 当命令替换）
         run: |
           sh -n docker/start.sh
