@@ -104,7 +104,11 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
             _log(f"[!] {_v.get('warn')}")
     except Exception:
         env = cfg.get("Env") or []
-    cmd = cfg.get("Cmd") or []
+    # 这三个字段必须一起复制，否则更新后容器的运行身份/入口会掉回镜像默认。
+    # 实测风险：原来 uid 1000 写的 ./data，更新后变 10001 -> 写不进去。
+    cmd = cfg.get("Cmd") or None
+    entrypoint = cfg.get("Entrypoint") or None
+    user = cfg.get("User") or None
     binds = hc.get("Binds") or []
     port_bindings = hc.get("PortBindings") or {}
     restart = ((hc.get("RestartPolicy") or {}).get("Name")) or "unless-stopped"
@@ -164,7 +168,8 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
                        group_add=group_add,
                        network_mode=(network_mode if network_mode not in ("", "default") else None),
                        extra_hosts=extra_hosts, cap_add=cap_add,
-                       devices=devices)
+                       devices=devices, cmd=cmd,
+                       entrypoint=entrypoint, user=user)
     if not created.get("ok"):
         _log(f"重建失败: {created.get('error')}，尝试回滚")
         rb = D.create(target, old_image, ports=port_bindings, env=env,
@@ -172,7 +177,8 @@ def apply_update(target: str, image_ref: str, tag: Optional[str] = None,
                       group_add=group_add,
                       network_mode=(network_mode if network_mode not in ("", "default") else None),
                       extra_hosts=extra_hosts, cap_add=cap_add,
-                      devices=devices)
+                      devices=devices, cmd=cmd,
+                      entrypoint=entrypoint, user=user)
         if rb.get("ok"):
             D.start(rb["id"], sock)
             _log("回滚成功，已用旧镜像恢复")

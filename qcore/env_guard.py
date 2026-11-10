@@ -74,6 +74,11 @@ def capture(env: List[str]) -> Dict:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, SNAPSHOT)
+        # 快照含 APB_PASSWORD / APB_TOKEN 明文，必须 0600
+        try:
+            os.chmod(SNAPSHOT, 0o600)
+        except OSError:
+            pass
     except Exception:
         pass
     return snap
@@ -172,6 +177,11 @@ def capture_hostconfig(info: Dict) -> Dict:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, SNAPSHOT)
+        # 快照含 APB_PASSWORD / APB_TOKEN 明文，必须 0600
+        try:
+            os.chmod(SNAPSHOT, 0o600)
+        except OSError:
+            pass
     except Exception:
         pass
     return keep

@@ -67,6 +67,26 @@ def load_calendar() -> pd.DatetimeIndex:
     with open(p, encoding="utf-8") as f:
         dates = [ln.strip() for ln in f if ln.strip()]
     idx = pd.DatetimeIndex(pd.to_datetime(dates))
+
+    # 合并 overlay 里的日期。
+    # 不能只靠「往 day.txt 追加」—— data_sync 重下 tarball 会解压覆盖
+    # 整个 qlib 目录，追加的日期就被抹掉了（实测：11-09 加过又消失）。
+    # 读取时合并最稳，不依赖文件状态。
+    try:
+        extra = []
+        # overlay 在 <root>/data/qlib/overlay，而 base_dir 是
+        # <root>/data/qlib/x/qlib_bin —— 要从 base_dir 往上跳两层
+        od = os.path.join(os.path.dirname(os.path.dirname(base_dir())), "overlay")
+        if os.path.isdir(od):
+            for fn in os.listdir(od):
+                if fn.endswith(".json") and len(fn) == 13:
+                    extra.append(f"{fn[:4]}-{fn[4:6]}-{fn[6:8]}")
+        if extra:
+            merged = sorted(set(dates) | set(extra))
+            idx = pd.DatetimeIndex(pd.to_datetime(merged))
+    except Exception:
+        pass
+
     _cache[key] = idx
     return idx
 

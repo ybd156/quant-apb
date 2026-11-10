@@ -1099,3 +1099,15 @@ select { cursor: pointer; }
 .fee-inp:hover { border-color: var(--line, #2a3444); background: var(--surface-3, #1c2434); }
 .fee-inp:focus { outline: none; border-color: var(--brand, #4a7dff);
   background: var(--surface-3, #1c2434); }
+
+/* ---- 自选 chip（个股页顶部）----
+   .btn.sm 全站已有，但 .wl-chip 是新加的，之前忘了配样式：
+   结果 chip 是全尺寸按钮，当前股票的高亮也不生效。 */
+.btn.sm { padding: 4px 10px; font-size: 12px; line-height: 1.6; border-radius: 7px; }
+.wl-chip { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wl-chip.is-active {
+  border-color: var(--brand, #4a7dff);
+  background: rgba(74, 125, 255, .16);
+  color: var(--brand, #4a7dff);
+  font-weight: 600;
+}

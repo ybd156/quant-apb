@@ -18,7 +18,12 @@ set -e
 #    fnOS 应用管理器重建容器时会覆盖手工设的 -e 参数 —— 实测 APB_PASSWORD
 #    消失后服务变成完全公开。data/ 是挂载卷，快照在那里，启动时读回来即可自愈。
 if [ -f /app/data/state/env_snapshot.json ] && [ -f /app/scripts/restore_env.py ]; then
-    eval "$(python /app/scripts/restore_env.py 2>/dev/null)" || true
+    # 恢复结果打到 stderr（docker logs 可见），不再 2>/dev/null 藏起来
+    eval "$(python /app/scripts/restore_env.py)" || true
+    # 启动成功后把当前生效环境回写快照：否则用户改了密码、快照还是旧的，
+    # 下次重建丢变量就会恢复出**已退役的旧密码**。
+    ( sleep 45; python /app/scripts/restore_env.py --refresh || true ) &
+    PIDS="$PIDS $!"
 fi
 
 HOST="${APB_HOST:-0.0.0.0}"

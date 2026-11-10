@@ -129,9 +129,13 @@ def record(h: int, picks: Dict, verbose: bool = False) -> Dict:
     as_of = str(picks.get("as_of") or "")[:10]
     if not as_of:
         return {"ok": False, "reason": "no_as_of"}
-    rows = picks.get("rows") or []
-    if not rows:
+    # 评估用 rows_all（固定 30 只），展示/下单用 rows（按周期 2~10 只）。
+    # 只有 rows 的话 h1(2只)/h3(3只) 永远凑不到 5 个样本 -> 永久 skipped。
+    rows_display = picks.get("rows") or []
+    rows_eval = picks.get("rows_all") or rows_display
+    if not rows_eval:
         return {"ok": False, "reason": "no_rows"}
+    rows = rows_eval
 
     cal = _calendar()
     entry = _trading_days_after(cal, as_of, 1) if cal else None
@@ -143,7 +147,8 @@ def record(h: int, picks: Dict, verbose: bool = False) -> Dict:
         "entry_date": entry,                 # 成交日（T+1）
         "exit_date": exit_,                  # 到期日（T+1+h）
         "recorded_at": _now(),
-        "n": len(rows),
+        "n": len(rows),                       # 评估样本数（rows_all）
+        "n_display": len(rows_display),       # 展示/下单数（按周期收窄）
         "items": [{"code": str(r.get("code", "")).zfill(6),
                    "name": r.get("name"),
                    "score": float(r.get("score") or 0.0),
@@ -154,7 +159,18 @@ def record(h: int, picks: Dict, verbose: bool = False) -> Dict:
         "result": None,
     }
 
-    old = [x for x in _read(h) if str(x.get("as_of")) != as_of]
+    existing = _read(h)
+    prev = next((x for x in existing
+                 if str(x.get("as_of")) == as_of), None)
+    if prev and str(prev.get("status")) not in ("pending", "", "None"):
+        # 已经对过账了：不要用新的 pending 覆盖它（INV-7 台账只追加）。
+        # 之前这里无条件重建记录，同一天重复预测会把 result 清空。
+        if verbose:
+            print(f"[h{h}] {as_of} 已对账（{prev.get('status')}），跳过登记", flush=True)
+        return {"ok": True, "horizon": h, "as_of": as_of,
+                "skipped": "already_reconciled",
+                "status": prev.get("status")}
+    old = [x for x in existing if str(x.get("as_of")) != as_of]
     old.append(rec)
     old.sort(key=lambda x: str(x.get("as_of")))
     _write_all(h, old)

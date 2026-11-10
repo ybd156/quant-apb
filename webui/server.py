@@ -363,6 +363,55 @@ def _json_safe(obj):
 # HTTP handler
 # --------------------------------------------------------------------------- #
 
+# kit 下载的单飞锁：并发请求只让一个去拉，避免半截 zip 被永久缓存
+_KIT_LOCK = threading.Lock()
+
+
+def _kit_fetch(cache, name: str, ver: str) -> None:
+    """
+    把训练套件拉到 cache。**先写 .part 再 os.replace**，
+    任何时刻 cache 要么不存在、要么是完整文件 —— 不会出现半截 zip
+    被 `if not cache.is_file()` 当成有效缓存。
+    """
+    import glob as _g
+    import shutil as _sh
+    import urllib.request as _ur
+
+    # 1) 项目目录里有构建产物就直接复制
+    local = _g.glob(os.path.join(str(PROJECT_ROOT), "apb-train-kit_*.zip"))
+    if local:
+        try:
+            _sh.copy2(sorted(local)[-1], cache)
+            if cache.is_file() and cache.stat().st_size > 50000:
+                return
+        except Exception:
+            pass
+
+    # 2) 从 GitHub 拉（只下一次，不再先跑一遍 net.get 当文本下）
+    repo = os.environ.get("APB_REPO", "ybd156/quant-apb")
+    url = f"https://github.com/{repo}/releases/download/v{ver}/{name}"
+    tmp = cache.with_suffix(".zip.part")
+    try:
+        req = _ur.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with _ur.urlopen(req, timeout=180) as r, open(tmp, "wb") as f:
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+        if tmp.stat().st_size > 50000:
+            os.replace(tmp, cache)        # 原子：只有完整才可见
+        else:
+            tmp.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        print(f"[kit] 拉取失败 {type(e).__name__}: {str(e)[:100]}", flush=True)
+
+
 class ApiHandler(BaseHTTPRequestHandler):
     server_version = "APBWebUI/1.0"
     protocol_version = "HTTP/1.1"
@@ -632,12 +681,67 @@ class ApiHandler(BaseHTTPRequestHandler):
         return self._ok({"rows": rows, "n": len(rows)})
 
     def _api_ledger(self, query):
+        """
+        预测台账。
+
+        ?horizon=N  -> 读实时台账 data/pred_ledger/horizon_N.jsonl（source=live）
+        省略        -> 读 walk-forward 回放 state/ledger.json（source=replay）
+
+        两者是**不同来源**：predict 只写 pred_ledger，从不碰 ledger.json。
+        之前只返回回放数据且不标注，用户点「生成预测」后台账页毫无变化。
+        """
         days = _clamp_int(query.get("days"), 30, 1, MAX_DAYS)
+        hz = (query.get("horizon") or [None])[0]
+        if hz not in (None, ""):
+            try:
+                h = int(hz)
+            except (TypeError, ValueError):
+                return self._fail("bad_horizon", 400, got=hz)
+            try:
+                from qcore import horizon_ledger as HL
+                recs = HL._read(h) or []
+            except Exception as e:  # noqa: BLE001
+                return self._fail("ledger_failed", 200, detail=str(e)[:160])
+            rows = []
+            for r in recs:
+                for it in (r.get("items") or []):
+                    rows.append({
+                        "as_of": r.get("as_of"),
+                        "code": it.get("code"),
+                        "name": it.get("name"),
+                        "score": it.get("score"),
+                        "weight": it.get("weight"),
+                        "status": r.get("status"),
+                        "horizon": h,
+                        "entry_date": r.get("entry_date"),
+                        "exit_date": r.get("exit_date"),
+                        "ret": (r.get("result") or {}).get("ret") if r.get("result") else None,
+                    })
+            rows = _slice_recent_days(rows, days)
+            return self._ok({"rows": rows, "n": len(rows), "days": days,
+                             "source": "live", "horizon": h,
+                             "total_records": len(recs),
+                             "n_display_note": "live 台账按周期收窄展示，"
+                                               "评估样本数见 n_display"})
+
         data, sent = self._load_or_not_ready("ledger")
         if sent is not None:
             return sent
         rows = _slice_recent_days(_rows_of(data), days)
-        return self._ok({"rows": rows, "n": len(rows), "days": days})
+        hz_meta = None
+        try:
+            import json as _json
+            _mp = STATE_DIR / "ledger_meta.json"
+            if _mp.is_file():
+                hz_meta = _json.loads(_mp.read_text(encoding="utf-8")).get("horizon")
+        except Exception:
+            hz_meta = None
+        return self._ok({"rows": rows, "n": len(rows), "days": days,
+                         "source": "replay", "horizon": hz_meta,
+                         "total_records": len(rows),
+                         "window_truncated": True,
+                         "note": "回放台账（walk-forward）只保留最近 60 天；"
+                                 "带 ?horizon=N 可看实时台账"})
 
     def _api_passthrough(self, key: str):
         data, sent = self._load_or_not_ready(key)
@@ -1341,37 +1445,13 @@ class ApiHandler(BaseHTTPRequestHandler):
             pass
 
         if not cache.is_file():
-            # 本地缓存没有：先看项目目录有没有构建产物，再不行从 GitHub 拉
-            import glob as _g
-            local = _g.glob(os.path.join(str(PROJECT_ROOT), "apb-train-kit_*.zip"))
-            if local:
-                try:
-                    import shutil as _sh
-                    _sh.copy2(sorted(local)[-1], cache)
-                except Exception:
-                    pass
+            # 单飞：并发请求只让一个去拉，其余等它完成
+            with _KIT_LOCK:
+                if not cache.is_file():          # double-check
+                    _kit_fetch(cache, name, ver)
             if not cache.is_file():
-                repo = os.environ.get("APB_REPO", "ybd156/quant-apb")
-                url = (f"https://github.com/{repo}/releases/download/"
-                       f"v{ver}/{name}")
-                try:
-                    from qcore import net as _net
-                    body, _mode = _net.get(url, timeout_direct=90, timeout_proxy=150)
-                    if body:
-                        # net.get 返回解码后的文本，二进制会坏 —— 用裸下载
-                        import urllib.request as _ur
-                        req = _ur.Request(url, headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                        with _ur.urlopen(req, timeout=180) as r, open(cache, "wb") as f:
-                            while True:
-                                chunk = r.read(1 << 20)
-                                if not chunk:
-                                    break
-                                f.write(chunk)
-                except Exception as e:  # noqa: BLE001
-                    return self._fail("kit_unavailable", 200,
-                                      detail=f"拉取失败: {type(e).__name__}: {str(e)[:80]}",
-                                      hint="该版本的训练机套件还没构建完成，稍后再试")
+                return self._fail("kit_unavailable", 200,
+                                  hint="该版本的训练机套件还没构建完成，稍后再试")
 
         if not cache.is_file():
             return self._fail("kit_not_built", 200,
@@ -1536,6 +1616,18 @@ class ApiHandler(BaseHTTPRequestHandler):
             h = int(body.get("horizon") or 1)
         except (TypeError, ValueError):
             h = 1
+        # 白名单：只允许训练过的周期。否则 h=7 会写出 picks_h7.json，
+        # 而 /api/horizons 不列它 —— 没人读的孤儿文件。
+        _allowed = (1, 3, 5, 10, 15)
+        try:
+            from qcore import horizons as _HZ
+            _allowed = tuple(int(x) for x in _HZ.all_horizons()) or _allowed
+        except Exception:
+            pass
+        if h not in _allowed:
+            return self._fail("bad_horizon", 400, got=h,
+                              allowed=sorted(_allowed))
+
         try:
             from qcore import live_model as LM
         except Exception as e:  # noqa: BLE001
@@ -1545,10 +1637,18 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._fail("no_model", 200, horizon=h,
                               hint=f"h={h} 还没有模型。训练在训练机做："
                                    f"跑 tools/train_one_click.py --horizons={h} 后上传")
+        # 单飞：predict 是几十秒的重活，连点两次会同时驻留两份特征矩阵。
+        # 锁贴着调用放 —— 放在前面的话，no_model / import_error 的提前
+        # return 会把锁漏掉，之后所有请求都 409。
+        if not _PREDICT_LOCK.acquire(blocking=False):
+            return self._fail("predict_busy", 409,
+                              hint="已有预测在跑，等它完成再试")
         try:
             r = LM.predict(horizon=h, verbose=False)
         except Exception as e:  # noqa: BLE001
             return self._fail("predict_failed", 200, detail=str(e)[:200], horizon=h)
+        finally:
+            _PREDICT_LOCK.release()
         if not r.get("ok"):
             return self._fail(r.get("reason", "predict_failed"), 200,
                               horizon=h, hint=r.get("hint"))
@@ -1621,10 +1721,21 @@ class ApiHandler(BaseHTTPRequestHandler):
         try:
             from qcore import paper_auto as PA
             if str((q.get("all") or ["0"])[0]) in ("1", "true", "yes"):
-                return self._ok(PA.summary_all())
-            if str((q.get("by_horizon") or ["0"])[0]) in ("1", "true", "yes"):
-                return self._ok(PA.by_horizon(m))
-            return self._ok(PA.summary(m, h))
+                data = PA.summary_all()
+            elif str((q.get("by_horizon") or ["0"])[0]) in ("1", "true", "yes"):
+                data = PA.by_horizon(m)
+            else:
+                data = PA.summary(m, h)
+            # 数据滞后天数由后端用真实交易日历算（INV-8：UI 不做计算）。
+            # 前端原来只数周一~周五，国庆后会把「差 1 天」误报成「差 7 天」。
+            try:
+                _acc = (data or {}).get("account") or {}
+                _as_of = _acc.get("as_of") or (data or {}).get("as_of")
+                if _as_of:
+                    data["as_of_lag_trading_days"] = PA.lag_trading_days(_as_of)
+            except Exception:
+                pass
+            return self._ok(data)
         except Exception as e:  # noqa: BLE001
             return self._fail("paper_auto_failed", 200, detail=str(e)[:160])
 
@@ -2829,15 +2940,24 @@ f.addEventListener('submit',async(e)=>{
         # 而 socket 权限是 root:994 660。若依赖 GroupAdd，fnOS 重建主容器
         # 丢掉组权限后就再也更新不了（实测死循环）。
         _grp = []
+        _binds = ["/var/run/docker.sock:/var/run/docker.sock"]
         try:
             _info = D.inspect(target)
             _grp = ((_info.get("HostConfig") or {}).get("GroupAdd") or [])
+            # 把主容器的 data / logs 卷透传给辅助容器。
+            # 不传的话 update_progress 和 update.log 都写进辅助容器自己的
+            # 临时层，容器退出即丢 —— UI 永远停在「排队中 5%」，
+            # 更新失败也没有任何日志可查（实测踩过）。
+            for _b in ((_info.get("HostConfig") or {}).get("Binds") or []):
+                _parts = str(_b).split(":")
+                if len(_parts) >= 2 and _parts[1] in ("/app/data", "/app/logs"):
+                    _binds.append(_b)
         except Exception:
             _grp = []
         created = D.create(
             helper, image,
             env=[f"APB_TARGET_NAME={target}", f"APB_IMAGE={repo}", f"APB_TAG={latest}"],
-            binds=["/var/run/docker.sock:/var/run/docker.sock"],
+            binds=_binds,
             restart="no",
             user="0",
             group_add=_grp or None,

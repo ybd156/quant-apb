@@ -135,6 +135,17 @@
   }
 
   /** ttl 内复用同一 GET（performance.json 近 1MB，避免翻页重复解析） */
+  // 非 GET 成功后统一清缓存。
+  // 之前只在 4 个地方手动 clearCache()，新加的 POST（加自选、生成预测、
+  // 清空重设）全都漏了 —— 用户点完按钮页面纹丝不动，以为按钮坏了。
+  const _apiRaw = api;
+  api = async function (url, options) {
+    const r = await _apiRaw(url, options);
+    const m = String((options && options.method) || 'GET').toUpperCase();
+    if (m !== 'GET' && m !== 'HEAD' && r && r.ok) _cache.clear();
+    return r;
+  };
+
   function apiCached(url, ttl) {
     const now = Date.now();
     const hit = _cache.get(url);
@@ -1073,7 +1084,7 @@
    * 11-07/08 是周末，11-06 就是最新交易日。把星期和落后天数写出来，
    * 一眼就能判断是「正常」还是「数据没同步」。
    */
-  function dataAsOf(d) {
+  function dataAsOf(d, lagDays) {
     if (!d) return '—';
     const s0 = String(d).slice(0, 10);
     const dt = new Date(s0 + 'T00:00:00');
@@ -1089,6 +1100,8 @@
       const w = tgt.getDay();
       if (w !== 0 && w !== 6) back += 1;
     }
+    // 滞后天数优先用后端给的（真实交易日历），前端只做兜底估算
+    if (typeof lagDays === 'number' && isFinite(lagDays)) back = lagDays;
     let note = '';
     if (back <= 0) note = '（今天）';
     else if (back === 1) note = '（落后 1 个交易日）';
@@ -2635,7 +2648,10 @@
   }
 
   async function pageLedger() {
-    const res = await apiCached('/api/ledger?days=' + S.filter.days);
+    // 带 horizon 读**实时**台账（pred_ledger）；predict 只写那里，
+    // 不带 horizon 读到的是 walk-forward 回放，点「生成预测」不会有变化。
+    const _hz = S.modelHorizon || 1;
+    const res = await apiCached('/api/ledger?days=' + S.filter.days + '&horizon=' + _hz);
     if (!res.ok || !res.data) { setSub('未就绪'); return notReadyBox(res); }
 
     const all = (res.data.rows || []).filter((r) => r && typeof r === 'object');
@@ -2998,19 +3014,20 @@
              ['累计收益', (A.total_return == null ? '—'
                : (A.total_return > 0 ? '+' : '') + (A.total_return * 100).toFixed(2) + '%')],
              ['成交笔数', (AU.account && AU.account.n_trades) || 0],
-             ['数据截至', dataAsOf(A.as_of)]]
+             ['数据截至', dataAsOf(A.as_of, AU.as_of_lag_trading_days)]]
               .map(([k, v]) => '<div class="qg-item"><span class="qg-k">' + k +
                 '</span><span class="qg-v">' + esc(String(v)) + '</span></div>').join('') +
           '</div>'
         : '') +
         (auTrades.length
           ? '<div class="tbl-wrap"><table class="tbl"><thead><tr>' +
-            '<th>日期</th><th>方向</th><th>代码</th><th>数量</th><th>价格</th><th>金额</th><th>费用</th><th>原因</th>' +
+            '<th>日期</th><th>方向</th><th>名称（代码）</th><th>数量</th><th>价格</th><th>金额</th><th>费用</th><th>原因</th>' +
             '</tr></thead><tbody>' + auTrades.slice().reverse().slice(0, 20).map((t) =>
               '<tr><td class="mono">' + esc(String(t.date || '').slice(5)) + '</td>' +
               '<td class="' + (t.side === 'buy' ? 'is-up' : 'is-down') + '">' +
                 (t.side === 'buy' ? '买入' : '卖出') + '</td>' +
-              '<td>' + codeCell(t.code) + '</td>' +
+              '<td><a class="link-btn" data-goto="' + esc(t.code) + '">' +
+                codeCell(t.code) + '</a></td>' +
               '<td class="num">' + esc(t.qty) + '</td>' +
               '<td class="num">' + (Number(t.price) || 0).toFixed(2) + '</td>' +
               '<td class="num">' + fmtMoney(t.amount) + '</td>' +

@@ -176,6 +176,31 @@ def _lot(code: str, market: str = "CN") -> int:
 HORIZON_TOP_K = {1: 2, 3: 3, 5: 5, 10: 8, 15: 10}
 
 
+def lag_trading_days(as_of: str) -> Optional[int]:
+    """
+    as_of 相对「最新交易日」落后几个交易日。
+
+    用真实交易日历算（qlib calendar），不是数周一~周五 ——
+    否则国庆/春节会被算成「落后 7 天」，而实际只差 1 天。
+    返回 None 表示算不出来（没有日历/日期非法）。
+    """
+    if not as_of:
+        return None
+    try:
+        import pandas as pd
+        from . import qlib_data as QD
+        cal = QD.load_calendar()
+        if cal is None or not len(cal):
+            return None
+        days = [str(pd.Timestamp(x).date()) for x in cal]
+        d = str(as_of)[:10]
+        if d not in days:
+            return None
+        return len(days) - 1 - days.index(d)
+    except Exception:
+        return None
+
+
 def default_top_k(horizon: int, market: str = "CN") -> int:
     """该周期的默认持仓数；配置里显式设了就用配置的。"""
     h = int(horizon or 1)

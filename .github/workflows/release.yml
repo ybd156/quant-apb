@@ -86,35 +86,64 @@ jobs:
             type=raw,value=latest
       # GHCR 推送偶发 permission_denied: write_package —— 同一 token
       # 上一次成功、下一次失败（实测 v0.27.0 重试即过、v0.27.1 又失败）。
-      # 改用 buildx 直接推送 + shell 重试；buildx 缓存让重试很快。
+      #
+      # 三个细节：
+      # 1) --label-file 而不是 --label：metadata-action 的 labels 是**多行**
+      #    的 k=v 列表，加引号会压成一个参数，标签全丢。
+      # 2) 只对瞬时错误重试：Dockerfile 语法错、pip 404 重试 4 次只会
+      #    把真因埋在 4 段同样的日志里。
+      # 3) push 完用 imagetools 校验：否则 release job 会在镜像没上去的
+      #    情况下继续发 fpk。
       - name: Build and push to GHCR (with retry)
         env:
           TAGS: ${{ steps.meta.outputs.tags }}
           LABELS: ${{ steps.meta.outputs.labels }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          IMAGE: ${{ env.IMAGE }}
         run: |
           set -u
-          TAGARGS=""
-          for t in $TAGS; do
-            TAGARGS="$TAGARGS -t $t"
-            echo "tag: $t"
-          done
+          [ -n "${TAGS:-}" ] || { echo "metadata 没产出 tag"; exit 1; }
+
+          # 多行 tags -> 数组
+          TAGARGS=()
+          while IFS= read -r t; do
+            [ -n "$t" ] && TAGARGS+=(-t "$t")
+          done <<< "$TAGS"
+
+          # 多行 labels -> 临时文件（buildx 的 --label-file 支持逐行 k=v）
+          printf '%s\n' "$LABELS" | grep -v '^$' > /tmp/labels.txt || true
+
           for attempt in 1 2 3 4; do
             echo "=== 第 $attempt 次构建+推送 ==="
             if docker buildx build \
                  --platform linux/amd64,linux/arm64 \
-                 $TAGARGS \
-                 --label "$LABELS" \
+                 "${TAGARGS[@]}" \
+                 --label-file /tmp/labels.txt \
                  --cache-from type=gha \
                  --cache-to type=gha,mode=max \
-                 --push . ; then
-              echo "推送成功"
-              exit 0
+                 --push . 2>&1 | tee /tmp/build.log; then
+              if [ "${PIPESTATUS[0]}" = "0" ]; then
+                echo "推送成功"
+                break
+              fi
             fi
-            echo "失败，20 秒后重试 ..."
-            sleep 20
+            # 只有瞬时错误才重试
+            if ! grep -qiE 'permission_denied|write_package|502|503|504|i/o timeout|TLS handshake|connection reset|toomanyrequests' /tmp/build.log; then
+              echo "非瞬时错误，不重试"
+              tail -40 /tmp/build.log
+              exit 1
+            fi
+            echo "瞬时错误，${attempt}0 秒后重试 ..."
+            sleep $((attempt * 10))
+            if [ "$attempt" = "4" ]; then
+              echo "重试 4 次仍失败"
+              exit 1
+            fi
           done
-          echo "重试 4 次仍失败"
-          exit 1
+
+          # 校验镜像真的上去了
+          echo "=== 校验镜像 ==="
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}" | head -20
 
   # ---------------- 4. 构建 fpk 并发布 ----------------
   release:
