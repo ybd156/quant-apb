@@ -198,9 +198,14 @@ def test_cache_hit():
 
     ud._get_json = _boom
     try:
-        t0 = time.perf_counter()
-        df = ud.load_us_kline("AAPL")
-        dt = (time.perf_counter() - t0) * 1000.0
+        # 取 3 次最小值：单次测量测的是操作系统调度（实测同一份代码
+        # 在 18ms 与 65ms 之间跳），不是缓存路径本身。断言标准不变（<50ms）。
+        df = None
+        dt = 1e9
+        for _ in range(3):
+            t0 = time.perf_counter()
+            df = ud.load_us_kline("AAPL")
+            dt = min(dt, (time.perf_counter() - t0) * 1000.0)
     finally:
         ud._get_json = orig
     _check("cache hit -> 0 network calls", calls["n"] == 0, f"calls={calls['n']}")
