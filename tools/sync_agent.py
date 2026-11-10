@@ -135,8 +135,70 @@ def _report(nas: str, tid, ok: bool, detail: dict, token: str,
     return False
 
 
+def _run_pipeline(params: dict, verbose: bool = True) -> dict:
+    """在训练机上跑全流程回测（外包重活）。"""
+    import subprocess as _sp
+    pool = int(params.get("pool") or 300)
+    start = str(params.get("start") or "2013-01-01")
+    cmd = [sys.executable, "-m", "qcore.pipeline", "--pool", str(pool), "--start", start]
+    if verbose:
+        print(f"    pipeline: pool={pool} start={start}", flush=True)
+    t0 = time.time()
+    try:
+        r = _sp.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=int(params.get("timeout_s") or 3600))
+        tail = (r.stdout or "")[-1500:]
+        ok = r.returncode == 0
+        return {"ok": ok, "seconds": round(time.time() - t0, 1),
+                "returncode": r.returncode, "tail": tail,
+                "stderr": (r.stderr or "")[-600:] if not ok else ""}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "seconds": round(time.time() - t0, 1),
+                "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+
+def _run_prewarm(params: dict, verbose: bool = True) -> dict:
+    """在训练机上预热外部数据缓存。"""
+    import subprocess as _sp
+    pool = int(params.get("pool") or 300)
+    cmd = [sys.executable, "-m", "tools.prewarm_external", "--pool", str(pool)]
+    if params.get("force"):
+        cmd.append("--force")
+    t0 = time.time()
+    try:
+        r = _sp.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=int(params.get("timeout_s") or 3600))
+        return {"ok": r.returncode == 0, "seconds": round(time.time() - t0, 1),
+                "tail": (r.stdout or "")[-1200:]}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "seconds": round(time.time() - t0, 1),
+                "error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+
 def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
-    """执行一个任务：训练 → 上传 → 回报。"""
+    """执行一个任务：按 job 类型分派 → 上传 → 回报。
+
+    job:
+      train     训练模型并上传（默认）
+      pipeline  跑全流程回测（重活外包给训练机，NAS 不做）
+      prewarm   预热外部数据缓存
+    """
+    _job = str(task.get("job") or "train")
+    _params = task.get("params") or {}
+    if _job in ("pipeline", "prewarm"):
+        tid = task.get("id")
+        if verbose:
+            print(f"  任务 {tid}: job={_job} params={_params}", flush=True)
+        _journal({"event": "claimed", "task": tid, "job": _job, "params": _params})
+        res = (_run_pipeline(_params, verbose) if _job == "pipeline"
+               else _run_prewarm(_params, verbose))
+        _journal({"event": _job, "task": tid, **res})
+        if verbose:
+            print(f"    {_job} {'OK' if res.get('ok') else 'FAIL'} "
+                  f"{res.get('seconds')}s", flush=True)
+        _report(nas, tid, bool(res.get("ok")), {_job: res}, token, verbose=verbose)
+        return {"ok": bool(res.get("ok")), _job: res}
+
     from qcore import live_model as LM
     hs = task.get("horizons") or [1]
     trees = int(task.get("trees") or 250)

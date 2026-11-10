@@ -97,13 +97,24 @@ def _expire(d: Dict) -> int:
 
 # ---------------------------------------------------------------- 任务
 def create_task(horizons: List[int], trees: int = 250, stocks: int = 300,
-                note: str = "", created_by: str = "api") -> Dict:
-    """排一个训练任务。"""
+                note: str = "", created_by: str = "api",
+                job: str = "train", params: Dict = None) -> Dict:
+    """排一个任务。`job` 决定训练机干什么：
+
+      train     —— 训练模型（默认）
+      pipeline  —— 跑全流程回测（`python -m qcore.pipeline`），用于测信号效果
+      prewarm   —— 预热外部数据缓存（`tools.prewarm_external`）
+
+    为什么要有 pipeline：102 个信号的完整回测在本机要几分钟到几十分钟，
+    而训练机本来就是干重活的 —— 把它外包出去，NAS 只负责取数与展示。
+    """
     d = _load()
     _expire(d)
     tid = uuid.uuid4().hex[:12]
     task = {
         "id": tid,
+        "job": str(job or "train")[:20],
+        "params": dict(params or {}),
         "horizons": [int(h) for h in horizons],
         "trees": int(trees), "stocks": int(stocks),
         "note": str(note)[:200],

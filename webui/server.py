@@ -2616,7 +2616,9 @@ f.addEventListener('submit',async(e)=>{
         return self._ok(SY.create_task(hs,
                                        trees=int(body.get("trees") or 250),
                                        stocks=int(body.get("stocks") or 300),
-                                       note=str(body.get("note") or "")))
+                                       note=str(body.get("note") or ""),
+                                       job=str(body.get("job") or "train"),
+                                       params=dict(body.get("params") or {})))
 
     def _post_sync_result(self):
         denied = self._sync_auth()
