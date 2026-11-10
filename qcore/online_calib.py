@@ -313,10 +313,46 @@ def summary() -> Dict:
     for h in (1, 3, 5, 10, 15):
         p = _params(d, h)
         x, y, days = collect(h)
+        # 每个周期的样本从哪来、为什么是 0 —— 必须说清楚。
+        # 实测：界面上五个周期只有 h=5 有 3000 样本，其余全是 0，
+        # 用户看到的是「在线学习没做好」，其实原因各不相同：
+        #   · h=1 刚记录 2 条预测，还没到期（要等 1 个交易日）
+        #   · h=3/h10/h15 连模型都没有 → 没有预测 → 不可能有样本
+        #   · h=5 有样本是因为主台账本来就是按 h=5 跑出来的
+        _pend = 0
+        _src = "none"
+        try:
+            from . import horizon_ledger as _HL
+            _rows = _HL._read(h)
+            _pend = sum(1 for r in _rows if r.get("status") == "pending")
+            if any(r.get("status") == "done" for r in _rows):
+                _src = "horizon_ledger"
+            elif _pend:
+                _src = "horizon_ledger_pending"
+        except Exception:  # noqa: BLE001
+            pass
+        if _src in ("none", "horizon_ledger_pending"):
+            try:
+                from . import horizon_ledger as _HL2
+                if _HL2._model_horizon() == h:
+                    _src = "main_ledger"
+            except Exception:  # noqa: BLE001
+                pass
+        if x.size >= MIN_SAMPLES:
+            _why = None
+        elif _src == "horizon_ledger_pending":
+            _why = f"已记录 {_pend} 条预测，等 {h} 个交易日后到期才有样本"
+        elif _src == "none":
+            _why = ("该周期还没有模型/预测（先在训练机训 h=%d，再 live_model --predict）" % h)
+        elif _src == "main_ledger":
+            _why = f"主台账样本不足（{int(x.size)} < {MIN_SAMPLES}）"
+        else:
+            _why = f"已到期样本 {int(x.size)} < {MIN_SAMPLES}"
         rows.append({
             "horizon": h, "a": round(p["a"], 6), "b": round(p["b"], 6),
             "n_updates": p["n_updates"], "updated_at": p["updated_at"],
             "n_samples": int(x.size), "n_days": days,
+            "n_pending": _pend, "source": _src, "why_zero": _why,
             "mse": (round(_mse(x, y, p["a"], p["b"]), 10) if x.size else None),
             "history": p["history"][-5:],
         })

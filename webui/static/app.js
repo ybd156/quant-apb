@@ -1787,11 +1787,22 @@
           '<td>h' + esc(x.horizon) + '</td>' +
           '<td class="num ' + aCls + '">' + (has ? num(x.a, 4) : '—') + '</td>' +
           '<td class="num">' + (has ? num(x.b, 6) : '—') + '</td>' +
-          '<td class="num">' + (x.n_samples || 0) + '</td>' +
+          '<td class="num">' + (x.n_samples || 0) +
+            (x.n_pending ? '<span class="muted" style="margin-left:4px">+' +
+              x.n_pending + ' 待到期</span>' : '') + '</td>' +
           '<td class="num">' + (x.n_updates || 0) + '</td>' +
           '<td class="muted">' + esc((x.updated_at || '—').slice(5, 16)) + '</td>' +
           '</tr>';
       }).join('');
+      // 样本为 0 的周期必须说明原因，否则用户看到的就是「在线学习没做好」。
+      // 实测：5 个周期只有 h=5 有样本，原因各不相同（没模型 / 没到期 / 主台账）。
+      const zeroWhy = OL.horizons
+        .filter((x) => (x.n_samples || 0) === 0 && x.why_zero)
+        .map((x) => 'h' + esc(x.horizon) + '：' + esc(x.why_zero));
+      const zeroHtml = zeroWhy.length
+        ? '<p class="muted" style="margin-top:10px">样本为 0 的原因 —— ' +
+          zeroWhy.join('；') + '</p>'
+        : '';
       const hist = learned.length
         ? learned[learned.length - 1].history || []
         : [];
@@ -1816,6 +1827,7 @@
           '<th>周期</th><th>a（区分力）</th><th>b（偏移）</th>' +
           '<th>样本</th><th>更新次数</th><th>最近更新</th>' +
           '</tr></thead><tbody>' + rows + '</tbody></table></div>' +
+          zeroHtml +
           (learned.length
             ? '<p class="muted" style="margin-top:10px">a &lt; 0 表示模型给的分数越高、' +
               '实际收益反而越低（方向反了，系统会自己把分数翻过来）；' +
