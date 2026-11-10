@@ -58,6 +58,9 @@ jobs:
       - name: 时间门禁（交易日/时段/成交价所属日）
         run: python -m tests.test_time_gates
 
+      - name: 任务队列超时与重领
+        run: python -m tests.test_sync_tasks
+
       - name: 入口脚本语法（python -c 块里的反引号会被 sh 当命令替换）
         run: |
           sh -n docker/start.sh

@@ -105,16 +105,37 @@ def local_date() -> Optional[str]:
 
 
 def remote_tag(timeout: int = 20) -> Optional[str]:
-    """远端最新 release tag（YYYY-MM-DD）。"""
+    """远端最新数据版本（YYYY-MM-DD）。
+
+    先查 GitHub release tag；拿不到就**问 NAS**（`/api/data/version`）。
+    为什么必须回退：训练机在国内常常连不上 GitHub，`tag_name` 拿不到 →
+    上层判定「远端版本未知」→ 跳过下载 → 数据永远停在旧日期。
+    实测：训练机停在 2026-11-06，而 NAS 已有 2026-11-09，中间差两个交易日。
+    """
     from . import net
     body, _mode = net.get(API, timeout_direct=10, timeout_proxy=20)
-    if not body:
-        return None
-    try:
-        d = json.loads(body)
-        return d.get("tag_name")
-    except Exception:
-        return None
+    if body:
+        try:
+            d = json.loads(body)
+            tag = d.get("tag_name")
+            if tag:
+                return tag
+        except Exception:  # noqa: BLE001
+            pass
+    # 回退：NAS 自己的数据版本
+    for base in _mirror_urls():
+        try:
+            b = base.split("/api/")[0] if "/api/" in base else base.rstrip("/")
+            body2, _m2 = net.get(f"{b}/api/data/version", timeout_direct=8, timeout_proxy=8)
+            if not body2:
+                continue
+            d2 = json.loads(body2)
+            v = ((d2.get("data") or {}) if isinstance(d2, dict) else {}).get("date")
+            if v:
+                return str(v)
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def _free_gb(path: str) -> float:

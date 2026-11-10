@@ -591,6 +591,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_events(query)
         if path == "/api/export":
             return self._api_export(query)
+        if path == "/api/data/version":
+            return self._api_data_version()
         if path == "/api/data/qlib":
             return self._api_data_qlib()
         if path == "/api/train/kit/download":
@@ -1446,6 +1448,23 @@ class ApiHandler(BaseHTTPRequestHandler):
         size = _os.path.getsize(cache)
         return {"ok": True, "path": cache, "bytes": size,
                 "n_files": n_files, "n_codes": len(wanted), "cached": False}
+
+    def _api_data_version(self):
+        """数据版本（本地 qlib 日历最后一天）—— 给训练机判断要不要更新用。
+
+        为什么需要：训练机 `data_sync.remote_tag()` 只查 GitHub，
+        国内拿不到时返回 None → 训练机「远端版本未知」→ **跳过下载**，
+        数据就永远停在旧日期（实测训练机停在 2026-11-06，而 NAS 已有 11-09）。
+        这里让 NAS 自己回答「我这份数据到哪天」，训练机只连 NAS 也能更新。
+        """
+        try:
+            from qcore import data_sync as DS
+            d = DS.local_date()
+        except Exception as e:  # noqa: BLE001
+            return self._fail("data_version_failed", 200, detail=str(e)[:120])
+        return self._ok({"date": d, "universe": "csi300",
+                         "source": "nas-local",
+                         "note": "qlib 日历最后一天；训练机用它判断是否需要更新"})
 
     def _api_data_qlib(self):
         """
