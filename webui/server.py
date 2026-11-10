@@ -2640,7 +2640,8 @@ f.addEventListener('submit',async(e)=>{
                                        params=dict(body.get("params") or {})))
 
     def _post_sync_result(self):
-        denied = self._sync_auth()
+        # 同样允许会话：训练机可能只配了密码
+        denied = self._sync_auth(allow_session=True)
         if denied:
             return denied
         body, err = self._read_body()
@@ -2660,8 +2661,14 @@ f.addEventListener('submit',async(e)=>{
         return self._ok(r) if r.get("ok") else self._fail(r.get("reason", "failed"), 200)
 
     def _post_sync_push(self):
-        """POST /api/sync/push —— 训练机直接上传模型（base64 zip）。"""
-        denied = self._sync_auth()
+        """POST /api/sync/push —— 训练机直接上传模型（base64 zip）。
+
+        鉴权：token 或**登录会话**都认。
+        实测：训练机没配 token 时上传一律 `login_required`，
+        模型训好了却永远传不回来（用户截图：「上传失败 login_required」）。
+        训练机是用户自己的机器，用 NAS 密码登录后上传是合理的。
+        """
+        denied = self._sync_auth(allow_session=True)
         if denied:
             return denied
         body, err = self._read_body()
