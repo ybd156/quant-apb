@@ -92,6 +92,14 @@ def main() -> int:
           "--password" not in " ".join(AD._child_cmd(60, "", "tok", "pw")))
 
     print("\n[6] 启动器符合陷阱 14")
+    # CRLF 依赖仓库根的 .gitattributes（`*.bat text eol=crlf`）。
+    # 没有它，git 在 Linux/CI 检出会把 CRLF 转成 LF —— 本地过、CI 红（实测踩过）。
+    ga = os.path.join(ROOT, ".gitattributes")
+    check(".gitattributes 存在（保证 bat 保持 CRLF）", os.path.isfile(ga))
+    if os.path.isfile(ga):
+        txt = open(ga, encoding="utf-8").read()
+        check(".gitattributes 给 *.bat 指定 eol=crlf",
+              "*.bat" in txt and "eol=crlf" in txt)
     for f in ("start_agent.bat", "start_agent_hidden.vbs"):
         p = os.path.join(ROOT, f)
         if not os.path.isfile(p):

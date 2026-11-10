@@ -22,3 +22,11 @@ deploy/fnos/fpk/ui/config       text eol=lf
 *.gz    binary
 *.fpk   binary
 *.npz   binary
+
+# Windows 脚本必须保持 CRLF，否则 cmd.exe 解析出错（陷阱 14）。
+# 原来只有 `* text=auto`，git 在 Linux/CI 检出时会把 CRLF 转成 LF，
+# 于是本地过、CI 报「启动器不是 CRLF」——实测踩过。
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.vbs   text eol=crlf
+*.ps1   text eol=crlf

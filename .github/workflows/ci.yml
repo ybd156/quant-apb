@@ -32,14 +32,20 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 单元测试
-        run: |
-          python -m tests.test_signals
-          python -m tests.test_metrics
-          python -m tests.test_events
-          python -m tests.test_info
-          python -m tests.test_us_data
-          python -m tests.test_intraday
+      # 每个测试单独一步：打包在一个 run 里失败时，日志只显示「exit 1」，
+      # 看不出是哪一个挂的（实测排查全靠猜）。拆开后失败步骤名就是测试名。
+      - name: 单元测试 · signals
+        run: python -m tests.test_signals
+      - name: 单元测试 · metrics
+        run: python -m tests.test_metrics
+      - name: 单元测试 · events
+        run: python -m tests.test_events
+      - name: 单元测试 · info
+        run: python -m tests.test_info
+      - name: 单元测试 · us_data
+        run: python -m tests.test_us_data
+      - name: 单元测试 · intraday
+        run: python -m tests.test_intraday
 
       - name: 接线层回归（台账幂等 / 朝向 / DSR 单位）
         run: |
