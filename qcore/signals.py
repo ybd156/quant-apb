@@ -1092,6 +1092,40 @@ def _f_forecast(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
     return d, s
 
 
+def _f_breadth(view: Any, params: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """市场宽度/情绪信号族（**全市场共用同一序列**）。
+
+    数据：`market_breadth.load()` 从本地 300 只日线自算，实测 **8697 天 / 1991 起**
+    —— 这是目前所有外部维度里历史最长的，因为它不依赖任何外部接口。
+
+    breadth_z   : 上涨家数占比相对过去 20 日的 z 值
+    up_ratio    : 当日上涨家数占比
+    极端宽度有均值回归倾向：z 极低（普跌）看多，z 极高（普涨）看空。
+    """
+    m = view.n
+    d = np.zeros(m, dtype=np.float64)
+    s = np.zeros(m, dtype=np.float64)
+    if not view.flow:
+        return d, s
+    kind = str(params.get("kind", "z"))
+    col = "breadth_z" if kind == "z" else "up_ratio"
+    raw = view.flow.get(col)
+    if raw is None:
+        return d, s
+    v = np.asarray(raw, dtype=np.float64)
+    th = float(params.get("th", 1.5))
+    contrarian = bool(params.get("contrarian", True))
+    with np.errstate(invalid="ignore"):
+        hi = np.nan_to_num(v, nan=0.0) >= th
+        lo = np.nan_to_num(v, nan=0.0) <= -th
+        if contrarian:
+            d = np.where(lo, 1.0, np.where(hi, -1.0, 0.0))     # 普跌看多 / 普涨看空
+        else:
+            d = np.where(hi, 1.0, np.where(lo, -1.0, 0.0))     # 顺势
+        s = np.clip(np.abs(np.nan_to_num(v, nan=0.0)) / (th * 2.0), 0.0, 1.0)
+    return d, s
+
+
 _IMPL: Dict[str, Callable[[Any, dict], Tuple[np.ndarray, np.ndarray]]] = {
     "ma_cross": _f_ma_cross,
     "ma_slope": _f_ma_slope,
@@ -1117,6 +1151,7 @@ _IMPL: Dict[str, Callable[[Any, dict], Tuple[np.ndarray, np.ndarray]]] = {
     "holder": _f_holder,
     "lift": _f_lift,
     "forecast": _f_forecast,
+    "breadth": _f_breadth,
 }
 
 _KIND = {
@@ -1133,6 +1168,7 @@ _KIND = {
     "holder": "event",
     "lift": "event",
     "forecast": "event",
+    "breadth": "sentiment",
 }
 
 # 需要"可信 OHLC"的族（加性除息污染区置 0）
@@ -1311,6 +1347,13 @@ def _table() -> List[tuple]:
               "业绩预告中值上修(+1) / 下修(-1)"))
     t.append(("forecast", {"win": 20, "th": 0.0}, "fcst_rev_20",
               "20 日预告修正均值 >0(+1) / <0(-1)"))
+    # ---- breadth (3)：市场宽度。**全市场共用序列，历史最长（1991 起）**。
+    t.append(("breadth", {"kind": "z", "th": 1.5, "contrarian": True}, "brd_z15_contra",
+              "上涨家数占比 z<-1.5 看多(+1) / z>1.5 看空(-1)：普跌反转"))
+    t.append(("breadth", {"kind": "z", "th": 2.0, "contrarian": False}, "brd_z20_follow",
+              "z>2 顺势看多(+1) / z<-2 看空(-1)：与 contra 互为对照"))
+    t.append(("breadth", {"kind": "raw", "th": 0.7, "contrarian": True}, "brd_ratio70",
+              "上涨家数占比>70% 看空(-1)：市场过热"))
     return t
 
 

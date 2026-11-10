@@ -150,6 +150,16 @@ def external_loader(code: str, cache_only: bool = True):
             frames.append(sn)
     except Exception:  # noqa: BLE001
         pass
+    # 市场宽度：全市场共用同一序列（从本地 300 只日线自算，1991 起全历史）
+    try:
+        from . import market_breadth as MB
+        bw = MB.load()
+        if bw is not None and len(bw):
+            bw = bw.copy()
+            bw["date"] = pd.to_datetime(bw["date"]).dt.normalize()
+            frames.append(bw[["date", "breadth_z", "up_ratio"]])
+    except Exception:  # noqa: BLE001
+        pass
     # 政策/新闻事件：全市场事件对所有票生效（板块级过滤需要板块映射，暂不猜）
     try:
         from . import sentiment_store as SS

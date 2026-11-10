@@ -49,8 +49,8 @@ def _bad(name: str, detail: str = "") -> None:
 #: 依赖**外部数据**（资金流 / 大宗交易 / 龙虎榜）的信号族。
 #: 这些族在没有喂数据时必须输出 0（预热），不算「死族」。
 EXT_FAMILIES = ("flow", "block_trade", "billboard", "margin", "sentiment", "event",
-                "holder", "lift", "forecast")
-EXT_PREFIX = ("flow", "bt", "bb", "mg", "snt", "evt", "hold", "lift", "fcst")
+                "holder", "lift", "forecast", "breadth")
+EXT_PREFIX = ("flow", "bt", "bb", "mg", "snt", "evt", "hold", "lift", "fcst", "brd")
 
 
 def check(name: str, fn) -> None:
@@ -151,10 +151,10 @@ def main() -> int:
         # 16-24 族：9 个**外部数据族**（资金流/大宗/龙虎榜/融资融券/散户情绪/
         # 政策事件/股东增减持/限售解禁/业绩预告）。没有数据时输出 0 是正确行为（预热），
         # 由 [4b] 专测覆盖「喂数据必须发声」。
-        assert len(fam) == 24, f"expected 24 families, got {len(fam)}: {fam}"
+        assert len(fam) == 25, f"expected 25 families, got {len(fam)}: {fam}"
         assert all(v >= 2 for v in fam.values()), fam
         return f"{len(fam)} families, min variants={min(fam.values())}"
-    check("SignalSpec dataclass / 24 families / >=2 variants each", t_spec)
+    check("SignalSpec dataclass / 25 families / >=2 variants each", t_spec)
 
     # ---------------- 2. 截断一致性（无未来函数硬检验） ----------------
     print("\n[2] truncation invariance (no-lookahead hard test)")
@@ -282,6 +282,8 @@ def main() -> int:
             ("holder", {"hold_net_ratio": 2.0}, {1.0}),
             ("lift", {"fc_lift_ratio": 15.0}, {-1.0}),      # 解禁压力看空
             ("forecast", {"eps_revision": 2.0}, {1.0}),
+            # breadth 同时有 contra 与 follow 两个变体，双向是设计
+            ("breadth", {"breadth_z": 2.5, "up_ratio": 0.9}, {-1.0, 1.0}),
         ]
         out = []
         for fam, cols, expect in cases:

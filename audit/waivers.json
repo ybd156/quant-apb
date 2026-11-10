@@ -1,6 +1,6 @@
 {
  "criterion": "MEDIUM 分流规则：文件是否在打分链路闭包内。闭包根 = ['signals', 'learner', 'engine', 'dataset']；闭包内不豁免，闭包外按文件豁免。这条规则可重复执行：python -m audit.gen_waivers",
- "generated_at": "2026-11-10T14:45:17+08:00",
+ "generated_at": "2026-11-10T14:51:29+08:00",
  "by": "lead",
  "chain_modules": [
   "account_config",
@@ -33,6 +33,7 @@
   "learner",
   "live_model",
   "lot",
+  "market_breadth",
   "meta",
   "names",
   "neutral",
@@ -446,6 +447,11 @@
    "path": "qcore/learner.py",
    "n": 3,
    "why": "权重更新核心：softmax 在信号维做归一化，非时序统计"
+  },
+  {
+   "path": "qcore/market_breadth.py",
+   "n": 2,
+   "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
   },
   {
    "path": "qcore/dataset.py",
