@@ -118,6 +118,25 @@ def main() -> int:
     check("能渲染成文本", "APB 训练机状态" in txt)
     check("渲染里有版本行", "版本" in txt)
 
+    print(chr(10) + "[4b] 成分股查询死锁（数据补不上的真因）")
+
+    def t_universe():
+        from qcore import qlib_data as QD
+        df = QD.load_instruments("csi300")
+        if df is None or not len(df):
+            return "本机无成分数据，跳过"
+        last_end = df["end"].max()
+        # 查询超出已知有效期 -> 必须兜底，不能返回 0 只
+        beyond = (last_end + __import__("pandas").Timedelta(days=7)).date().isoformat()
+        got = QD.universe_codes("csi300", start=beyond)
+        assert got, f"超出有效期({beyond}) 返回 0 只 —— daily_append 会抓空"
+        # 去重：历史成分同一只票多行，不能重复
+        allc = QD.universe_codes("csi300", start=None)
+        assert len(allc) == len(set(allc)), "返回了重复代码"
+        return f"last_end={last_end.date()} 兜底 {len(got)} 只，全量去重 {len(allc)}"
+    check("超出有效期用最近一期成分兜底", t_universe)
+
+    print(chr(10) + "[5] 单一入口（APB.bat + kit_menu.py）")
     print("\n[5] 单一入口（APB.bat + kit_menu.py）")
     apb = os.path.join(ROOT, "APB.bat")
     check("APB.bat 存在", os.path.isfile(apb))

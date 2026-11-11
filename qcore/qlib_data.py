@@ -283,12 +283,34 @@ def build_panel(codes: Iterable[str], start: str = "2008-01-01",
 
 
 def universe_codes(name: str = "csi300", start: Optional[str] = None) -> List[str]:
-    """取成分股代码。start 给定时只保留该时点仍在成分内的。"""
+    """取成分股代码。start 给定时只保留该时点仍在成分内的。
+
+    ## 一个必须兜底的死锁
+
+    成分数据（`instruments/csi300.txt`）里的有效期**跟着数据包走**。
+    实测（2026-11-11）：`end` 最大只到 **2026-11-06**，
+    于是 `start="2026-11-09"` 查出 **0 只**。
+
+    而 `daily_append` 正是用 `universe_codes(start=last_local)` 拿票池去补当日
+    K 线的 —— 票池空 → 抓 0 只 → `no_bars_fetched` → 数据永远补不上，
+    下一个数据包来了才有新成分，形成**死锁**（用户原话「数据也不是最新的」）。
+
+    兜底：查询时点超出已知有效期时，用**最近一期成分**当代替。
+    这是近似（期间若有调仓会漏掉新进/多算调出的），但比「一只都拿不到」好，
+    而且 `daily_append` 只补**当日行情**，成分近似不影响收益序列的连续性。
+    """
     df = load_instruments(name)
     if start is not None:
         t = pd.Timestamp(start)
-        df = df[(df["start"] <= t) & (df["end"] >= t)]
-    return df["code"].tolist()
+        sel = df[(df["start"] <= t) & (df["end"] >= t)]
+        if sel.empty and len(df):
+            # 超出已知有效期 → 用最近一期成分兜底（见上面的死锁说明）
+            last_end = df["end"].max()
+            sel = df[df["end"] == last_end]
+        df = sel
+    # 历史成分里同一只票会出现多次（每个成分期一行），必须去重，
+    # 否则 start=None 时返回 20998 条（实测），下游会重复抓同一只票。
+    return list(dict.fromkeys(df["code"].tolist()))
 
 
 def pit_membership(name: str = "csi300") -> Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]]:
