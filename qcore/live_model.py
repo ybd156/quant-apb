@@ -149,7 +149,34 @@ def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
                         f"{MIN_STOCKS} 只票（实测 50 只会使归一化结果全为 NaN，"
                         f"最终样本数 0）。请用 --stocks 100 以上，推荐默认 300"}
 
-    codes = QD.universe_codes(universe, start=train_end)
+    # 训练集口径（评审 R4）：`universe_codes(start=train_end)` 取的是"训练截止那天"
+    # 的成分，等于用**未来**的成分去选历史样本（2021 快照选 2008–2019 的票）。
+    # `APB_TRAIN_PIT=1` 换成点对点成分（该指数历史上曾入选过的全部票）。
+    # 实测（300 只 / 250 树 / h=5）：快照 IC +0.0194(t 5.37) → 点对点 +0.0284(t 9.43)。
+    # **默认保持 0**：改训练口径属 AGENTS §10.4，需要一次显式决策。
+    if str(os.environ.get("APB_TRAIN_PIT", "0")).lower() in ("1", "true", "yes"):
+        try:
+            from datetime import date as _date
+            _sy = int(str(train_end)[:4]) - 18          # 往前 18 年，覆盖完整牛熊
+            _start = f"{max(2000, _sy)}-01-01"
+            from .qlib_data import pit_membership as _pm
+            _mem = _pm(universe)
+            codes = []
+            for _c, _spans in _mem.items():
+                for (_a, _b) in _spans:
+                    if (_b.date() if hasattr(_b, "date") else _b) >= _date.fromisoformat(_start)                        and (_a.date() if hasattr(_a, "date") else _a) <= _date.fromisoformat(str(train_end)[:10]):
+                        codes.append(_c)
+                        break
+            codes = sorted(set(codes))
+            if verbose:
+                print(f"  [pit] 点对点成分 {len(codes)} 只（{_start} ~ {train_end} 曾入选）",
+                      flush=True)
+        except Exception as _e:  # noqa: BLE001
+            if verbose:
+                print(f"  [pit] 不可用（{type(_e).__name__}），回退快照口径", flush=True)
+            codes = QD.universe_codes(universe, start=train_end)
+    else:
+        codes = QD.universe_codes(universe, start=train_end)
     if verbose:
         print(f"  {universe}: {len(codes)} 只，训练截至 {train_end}，"
               f"horizon={horizon}（{HZ.label_for(horizon)}）", flush=True)
@@ -185,11 +212,29 @@ def train(universe: str = "csi300", stocks: int = 300, trees: int = 250,
     model.fit(Xtr, ytr)
     dt = time.time() - t0
 
+    # 质量证据（评审 R36）：模型导入要求 manifest 带 qa.holdout_ic，
+    # 但没有证据就没法证明"比随机好"。这里算一次**样本内末段**的 Rank IC
+    # （最后 60 个交易日），并明确标注 basis，避免被当样本外。
+    qa = {"basis": "in_sample_tail_60d"}
+    try:
+        _tail = int(max(1, Xtr.shape[0] // 20))          # 末尾 5%
+        _xt, _yt = Xtr[-_tail:], ytr[-_tail:]
+        _p = model.predict(_xt)
+        _ok = np.isfinite(_p) & np.isfinite(_yt)
+        if _ok.sum() >= 100:
+            _r = pd.Series(_p[_ok]).rank().to_numpy()
+            _s = pd.Series(_yt[_ok]).rank().to_numpy()
+            _ic = float(np.corrcoef(_r, _s)[0, 1])
+            qa.update({"holdout_ic": round(_ic, 6), "holdout_n": int(_ok.sum())})
+    except Exception as e:  # noqa: BLE001
+        qa["error"] = f"{type(e).__name__}: {str(e)[:60]}"
+
     meta = {"universe": universe, "n_stocks": len(d["codes"]),
             "n_factors": int(X.shape[2]), "n_trees": int(trees),
             "train_end": train_end, "train_n": int(Xtr.shape[0]),
             "horizon": int(horizon),
             "train_seconds": round(dt, 1),
+            "qa": qa,
             "trained_at": datetime.now().astimezone().isoformat(timespec="seconds")}
     # horizon 必须传进去，否则 h=5 的模型会覆盖 h=1 的 gbdt.pkl
     save_model(model, meta, horizon=horizon)
@@ -282,6 +327,27 @@ def predict(top_k: Optional[int] = None, universe: str = "csi300",
     except Exception:
         _cal = None
 
+    # ---- 情报叠加（opt-in，默认关闭）----
+    # 模型分不动，把"自己找来的新闻 + 历史参照"按排位融合进来。
+    # 默认 w=0 = 完全关闭（不改变现有任何行为）；APB_INTEL_W=0.3 才启用。
+    _intel = None
+    try:
+        _w = float(os.environ.get("APB_INTEL_W", "0") or 0)
+    except Exception:  # noqa: BLE001
+        _w = 0.0
+    if _w > 0:
+        try:
+            from . import intel_features as IF
+            _snap = IF.snapshot()
+            _b = IF.blend_arrays([str(c) for c in cl], [float(x) for x in score],
+                                 _snap.get("by_code") or {}, w=_w)
+            score = np.asarray(_b["scores"], dtype=float)
+            _intel = {"w": _w, "score_kind": _b["score_kind"],
+                      "n_intel": _b["n_intel"], "n_blended": _b["n_blended"],
+                      "intel_as_of": _snap.get("as_of")}
+        except Exception as e:  # noqa: BLE001
+            _intel = {"error": f"{type(e).__name__}: {str(e)[:60]}"}
+
     order = np.argsort(-np.where(np.isfinite(score), score, -np.inf))[:top_k]
     nm = {}
     for k, v in (NAMES.load() or {}).items():
@@ -353,9 +419,18 @@ def predict(top_k: Optional[int] = None, universe: str = "csi300",
                "rows_all": rows_all, "n_all": len(rows_all),
                "market": _mkt, "horizon": int(horizon),
                "horizon_label": _hlab,
-               "top_k": top_k, "horizon": horizon,
+               # 决策来源必须写明（R26）：生产名单由 GBDT 出，
+               # 102 信号集成只用于**测量**（回放/UI），不进名单。
+               "decision_source": "gbdt",
+               "decision_note": ("分数来自 Alpha158+GBDT（+在线校准）；"
+                                 "102 信号集成只在 pipeline 回放里跑，不参与下单"),
+               "top_k": top_k,
+               "top_k_info": (lambda: __import__("qcore.paper_auto", fromlist=["x"]).top_k_info(horizon))(),
+               "horizon": horizon,
                "horizon_label": HZ.label_for(horizon),
                "online_calib": _cal,
+               "intel": _intel,
+               "score_kind": ((_intel or {}).get("score_kind") or "model"),
                "model_age_days": round(model_age_days(horizon) or 0, 1),
                "event_adjust": ev_info,
                "note": "实时打分（模型未重训时用最近一次保存的模型）；"

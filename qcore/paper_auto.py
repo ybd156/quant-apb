@@ -431,6 +431,24 @@ def _assert_tradable(as_of_hint=None, dry_run: bool = False,
             "backfilled": bool(allow_backfill)}
 
 
+def top_k_info(horizon: int, market: str = "CN") -> Dict:
+    """配置的 top_k 与**实际生效**的 top_k（评审 R28：min() 会静默压小）。"""
+    h = int(horizon or 1)
+    base = HORIZON_TOP_K.get(h, 5)
+    cfg = 0
+    try:
+        from . import account_config as AC
+        cfg = int((AC.load(market) or {}).get("top_k") or 0)
+    except Exception:  # noqa: BLE001
+        cfg = 0
+    eff = min(cfg, base) if (cfg > 0 and cfg > base) else (cfg or base)
+    return {"horizon": h, "market": str(market).upper(),
+            "top_k_configured": cfg or None, "top_k_period_default": base,
+            "top_k_effective": int(eff),
+            "overridden": bool(cfg and eff != cfg),
+            "note": ("配置被周期默认值压小：%s → %s" % (cfg, eff)) if (cfg and eff != cfg) else ""}
+
+
 def default_top_k(horizon: int, market: str = "CN") -> int:
     """该周期的默认持仓数；配置里显式设了就用配置的。"""
     h = int(horizon or 1)

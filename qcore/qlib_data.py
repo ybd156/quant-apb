@@ -37,6 +37,7 @@ qlib_bin/
 from __future__ import annotations
 
 import os
+import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -47,7 +48,35 @@ DEFAULT_DIR = os.path.join(ROOT, "data", "qlib", "x", "qlib_bin")
 
 FIELDS = ("open", "high", "low", "close", "volume", "amount", "vwap", "factor")
 
+#: 带 TTL 的缓存：{key: (写入时刻, 值)}。
+#: 旧实现是裸 dict —— 长驻进程里 `load_calendar()` 首读之后就再也不刷新，
+#: 于是 daily_append 新写的 overlay 日期永远不可见（评审 R49：
+#: 对账/复盘全部卡在"下一交易日尚未发生"）。
 _cache: Dict[str, object] = {}
+CACHE_TTL = 60.0
+
+
+def _cache_get(key: str):
+    hit = _cache.get(key)
+    if not hit:
+        return None
+    try:
+        ts, val = hit
+    except Exception:  # noqa: BLE001
+        return None
+    if (time.time() - ts) > CACHE_TTL:
+        _cache.pop(key, None)
+        return None
+    return val
+
+
+def _cache_put(key: str, val):
+    _cache[key] = (time.time(), val)
+
+
+def cache_clear() -> None:
+    """外部改完数据（daily_append / data_sync）可主动清一下，不等 TTL。"""
+    _cache.clear()
 
 
 def base_dir() -> str:
@@ -61,8 +90,9 @@ def available() -> bool:
 
 def load_calendar() -> pd.DatetimeIndex:
     key = "calendar"
-    if key in _cache:
-        return _cache[key]  # type: ignore[return-value]
+    _hit = _cache_get(key)
+    if _hit is not None:
+        return _hit  # type: ignore[return-value]
     p = os.path.join(base_dir(), "calendars", "day.txt")
     with open(p, encoding="utf-8") as f:
         dates = [ln.strip() for ln in f if ln.strip()]
@@ -87,15 +117,16 @@ def load_calendar() -> pd.DatetimeIndex:
     except Exception:
         pass
 
-    _cache[key] = idx
+    _cache_put(key, idx)
     return idx
 
 
 def load_instruments(name: str = "all") -> pd.DataFrame:
     """返回 DataFrame[code, start, end]。"""
     key = f"inst:{name}"
-    if key in _cache:
-        return _cache[key]  # type: ignore[return-value]
+    _hit = _cache_get(key)
+    if _hit is not None:
+        return _hit  # type: ignore[return-value]
     p = os.path.join(base_dir(), "instruments", f"{name}.txt")
     rows = []
     with open(p, encoding="utf-8") as f:
@@ -106,7 +137,7 @@ def load_instruments(name: str = "all") -> pd.DataFrame:
                              "start": pd.Timestamp(parts[1]),
                              "end": pd.Timestamp(parts[2])})
     df = pd.DataFrame(rows)
-    _cache[key] = df
+    _cache_put(key, df)
     return df
 
 

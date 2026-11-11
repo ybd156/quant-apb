@@ -1,6 +1,6 @@
 {
  "criterion": "MEDIUM 分流规则：文件是否在打分链路闭包内。闭包根 = ['signals', 'learner', 'engine', 'dataset']；闭包内不豁免，闭包外按文件豁免。这条规则可重复执行：python -m audit.gen_waivers",
- "generated_at": "2026-11-11T11:03:11+08:00",
+ "generated_at": "2026-11-11T21:11:07+08:00",
  "by": "lead",
  "chain_modules": [
   "account_config",
@@ -13,12 +13,14 @@
   "costs",
   "daily_append",
   "data",
+  "data_sync",
   "dataset",
   "distill",
   "engine",
   "ensemble",
   "ensemble_model",
   "event_data",
+  "event_history",
   "event_learning",
   "events",
   "feature_select",
@@ -29,6 +31,7 @@
   "horizon_ledger",
   "horizons",
   "impact",
+  "intel_features",
   "intraday_online",
   "learner",
   "live_model",
@@ -36,6 +39,7 @@
   "market_breadth",
   "meta",
   "names",
+  "net",
   "neutral",
   "news_live",
   "online_calib",
@@ -232,6 +236,12 @@
    "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
   },
   {
+   "path": "qcore/fill_audit.py",
+   "scope": "file",
+   "n": 9,
+   "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
+  },
+  {
    "path": "qcore/info.py",
    "scope": "file",
    "n": 9,
@@ -298,6 +308,12 @@
    "reason": "[已核实] L209/L332-333 是事件后收益的均值与命中率（评估统计），产物写 event_learning.json 供 UI"
   },
   {
+   "path": "qcore/live_model.py",
+   "scope": "file",
+   "n": 6,
+   "reason": "[已核实] L256-258 是特征索引越界检查、L267 是样本数门槛、L279 是应用在线校准；没有全样本统计量进入打分"
+  },
+  {
    "path": "qcore/model_health.py",
    "scope": "file",
    "n": 6,
@@ -320,12 +336,6 @@
    "scope": "file",
    "n": 4,
    "reason": "评估层：不在打分链路闭包内（未被 signals/learner/engine/dataset 直接或间接 import），全样本统计只影响事后指标，不进信号与权重"
-  },
-  {
-   "path": "qcore/live_model.py",
-   "scope": "file",
-   "n": 4,
-   "reason": "[已核实] L256-258 是特征索引越界检查、L267 是样本数门槛、L279 是应用在线校准；没有全样本统计量进入打分"
   },
   {
    "path": "qcore/pipeline.py",
@@ -449,17 +459,22 @@
    "why": "权重更新核心：softmax 在信号维做归一化，非时序统计"
   },
   {
+   "path": "qcore/dataset.py",
+   "n": 2,
+   "why": "面板构造核心"
+  },
+  {
    "path": "qcore/market_breadth.py",
    "n": 2,
    "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
   },
   {
-   "path": "qcore/dataset.py",
+   "path": "qcore/qlib_data.py",
    "n": 1,
-   "why": "面板构造核心"
+   "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
   },
   {
-   "path": "qcore/qlib_data.py",
+   "path": "qcore/signals.py",
    "n": 1,
    "why": "在打分/建模链路闭包内，全样本统计可能污染信号/权重"
   }

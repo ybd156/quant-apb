@@ -133,9 +133,15 @@ def _sector_returns(pool: pd.DataFrame, start: str, max_stocks: int) -> Dict[str
         return {}
 
 
+#: 最近一次 compute() 的覆盖信息（供 preflight 判"空表是已知限制还是真故障"）。
+#: 真实教训：板块指数只取到 4/14 时 impact 会整表为空，而 preflight 把它当
+#: "事件研究未跑"直接拦发版 —— 拦对了现象、拦错了原因。
+LAST_META: Dict = {}
+
+
 def compute(pool: pd.DataFrame, start: str = "2016-01-01",
             horizons: Sequence[int] = (1, 5, 20), max_stocks: int = 120,
-            min_n: int = 8) -> List[Dict]:
+            min_n: Optional[int] = None) -> List[Dict]:
     """
     返回可直接写进 events.json 的 `impact` 数组。
     失败时返回空列表（调用方据此显示"暂无"），不抛异常。
@@ -144,6 +150,9 @@ def compute(pool: pd.DataFrame, start: str = "2016-01-01",
     _names = sorted({str(x) for ev in CALENDAR for x in (ev.sectors or [])})
     sec = _board_sector_returns(_names, start)
     _n_board = len(sec)
+    LAST_META.clear()
+    LAST_META.update({"sectors_requested": len(_names), "sectors_from_index": _n_board,
+                      "start": start, "min_n": min_n})
     if _n_board:
         print(f"      impact: 板块指数 {_n_board}/{len(_names)} 个（东财行业板块）", flush=True)
     # 缺的用池内等权补
@@ -151,17 +160,26 @@ def compute(pool: pd.DataFrame, start: str = "2016-01-01",
     for k, v in _eq.items():
         sec.setdefault(k, v)
     if not sec:
+        LAST_META["reason"] = "no_sector_returns"
         return []
     mkt = _market_ret(start)
     if mkt is None:
+        LAST_META["reason"] = "no_market_returns"
         return []
     try:
         tbl = E.impact_factor(CALENDAR, sec, mkt, horizons=tuple(horizons), min_n=min_n)
-    except Exception:
+    except Exception as _e:  # noqa: BLE001
+        # 这条路径以前**不留原因**，于是"表为空"看起来和"没跑过"一模一样。
+        LAST_META["reason"] = f"impact_factor_error: {type(_e).__name__}"
         return []
     if tbl is None or len(tbl) == 0:
+        LAST_META["reason"] = "impact_factor_empty"
+        LAST_META["n_groups_raw"] = 0
         return []
 
+    if min_n is None:
+        from .thresholds import MIN_TRADES
+        min_n = int(MIN_TRADES)          # R33：门槛只认 thresholds.py 一个真源
     out: List[Dict] = []
     for r in tbl.to_dict("records"):
         def _f(v):
@@ -186,9 +204,19 @@ def compute(pool: pd.DataFrame, start: str = "2016-01-01",
             "insufficient": bool(r.get("insufficient")),
             "level": r.get("level"),
         })
-    # 只保留有意义的：样本够且 t 有值，按 |t| 排序
-    out = [r for r in out if r["n"] >= min_n and r["mean_car"] is not None]
-    out.sort(key=lambda r: -(abs(r["t"]) if r["t"] is not None else 0))
+    # 保留"有数字但样本不足"的行，并打 insufficient 标记（评审 R33 的收尾）。
+    # 旧写法 `out = [r for r in out if r["n"] >= min_n]` 会把整张表清空 ——
+    # 实测 0 组，于是 preflight 报 "impact 表为空 → 不许发版"，
+    # 而真实情况是"有 12 组数据、但都不到 30 笔样本"。**空表**和**样本不足**
+    # 是两件事，不能靠删行来表达。
+    LAST_META["n_groups_raw"] = len(out)
+    out = [r for r in out if r["mean_car"] is not None and int(r.get("n") or 0) > 0]
+    for r in out:
+        r["insufficient"] = bool(int(r.get("n") or 0) < int(min_n))
+    out.sort(key=lambda r: (bool(r["insufficient"]),
+                            -(abs(r["t"]) if r["t"] is not None else 0)))
+    LAST_META["n_groups_kept"] = len(out)
+    LAST_META["reason"] = None if out else "no_usable_rows"
     return out
 
 
@@ -199,10 +227,12 @@ def summary(impact: List[Dict]) -> Dict:
     strong = [r for r in impact if r["t"] is not None and abs(r["t"]) >= 2.0
               and not r["insufficient"]]
     pos = [r for r in strong if (r["mean_car"] or 0) > 0]
+    n_ins = sum(1 for r in impact if r.get("insufficient"))
     return {
         "ok": True, "n_rows": len(impact), "n_significant": len(strong),
-        "n_positive": len(pos),
-        "note": (f"{len(impact)} 组事件×板块×周期，其中 {len(strong)} 组 |t|≥2；"
+        "n_positive": len(pos), "n_insufficient": n_ins,
+        "note": (f"{len(impact)} 组事件×板块×周期（其中 {n_ins} 组样本 < 门槛，"
+                 f"只作观察不许当结论）；|t|≥2 的 {len(strong)} 组；"
                  f"按事件方向押注平均为正的 {len(pos)} 组"),
     }
 

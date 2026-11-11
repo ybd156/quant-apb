@@ -85,12 +85,25 @@ def _names() -> Dict[str, str]:
 
 
 def _latest_trade_date() -> Optional[pd.Timestamp]:
-    """数据里最新的交易日（不是今天，是行情最后一天）。"""
+    """数据里最新的交易日（不是今天，是行情最后一天）。
+
+    优先 `data_sync.local_date()`：它直接读日历文件 + overlay 目录，**不走缓存**。
+    旧实现读 `qlib_data.load_calendar()`，而那个缓存曾经永不过期 ——
+    长驻进程里这个日期会停在启动那天，导致 postclose 永远判
+    "下一交易日尚未发生"（评审 R49）。
+    """
+    try:
+        from . import data_sync as DS
+        d = DS.local_date()
+        if d:
+            return pd.Timestamp(str(d)[:10])
+    except Exception:  # noqa: BLE001
+        pass
     try:
         from . import qlib_data as QD
         cal = QD.load_calendar()
         return pd.Timestamp(cal[-1])
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -241,6 +254,17 @@ def postclose(verbose: bool = True) -> Dict:
     from . import live_model as LM
 
     data_date = _latest_trade_date()
+
+    # 当日幂等（评审 R32）：start.sh 在 15:05–17:00 每 5 分钟调一次 run('auto')，
+    # 没有这道门就会重跑 postclose 二十多次（每次 predict + 整文件重写台账）。
+    try:
+        _prev = _read("postclose.json") or {}
+        if str(_prev.get("data_date") or "") == str(data_date.date() if data_date is not None else ""):
+            if str(_prev.get("generated_at") or "")[:10] == datetime.now().strftime("%Y-%m-%d"):
+                return {"ok": True, "skipped": True, "session": "postclose",
+                        "reason": "already_ran_today", "data_date": _prev.get("data_date")}
+    except Exception:  # noqa: BLE001
+        pass
     pm = _read("premarket.json")
     pm_rows = pm.get("rows") or []
     pm_data_date = pm.get("data_date")

@@ -44,6 +44,12 @@ jobs:
           PYV=$(python -c "import qcore;print(qcore.__version__)")
           echo "VERSION=$V qcore=$PYV"
           test "$V" = "$PYV" || { echo "VERSION 与 qcore.__version__ 不一致"; exit 1; }
+          # R35：镜像 tag 取自 git tag，必须与 VERSION 一致，否则会出现
+          # "镜像 0.33.0 / 容器里 VERSION 仍是 0.32.9" 的分裂
+          if [ "${{ github.event_name }}" = "push" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
+            test "v$V" = "${GITHUB_REF_NAME}" || {
+              echo "tag ${GITHUB_REF_NAME} 与 VERSION v$V 不一致"; exit 1; }
+          fi
 
   # ---------------- 2. 解析版本 ----------------
   meta:

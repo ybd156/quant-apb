@@ -213,7 +213,10 @@ def hit_rate(scores, RET, h: int, dates=None, regime=None,
     p = float(hit.mean())
     n_days = int(base["n_days"])
     se_naive = float(np.sqrt(max(p * (1.0 - p), 1e-12) / max(n_samples, 1)))
-    se_cluster = float(np.sqrt(max(p * (1.0 - p), 1e-12) / max(n_days, 1)))
+    # 重叠收益下，"天数"不是独立观测数：h=5 时 3335 天只有 667 个独立期。
+    # 用 n_days 会把 SE 低估 √h 倍（评审 R7）。
+    n_indep = int(n_days // max(int(h), 1))
+    se_cluster = float(np.sqrt(max(p * (1.0 - p), 1e-12) / max(n_indep, 1)))
     out.update(
         hit_rate=p,
         mean_signed_ret=float((np.sign(s) * rr).mean()),
@@ -222,8 +225,8 @@ def hit_rate(scores, RET, h: int, dates=None, regime=None,
         se_cluster=se_cluster,
         ci95_naive=[p - 1.96 * se_naive, p + 1.96 * se_naive],
         ci95_cluster=[p - 1.96 * se_cluster, p + 1.96 * se_cluster],
-        n_eff=n_days,                                  # 有效独立观测数（聚类口径）
-        n_indep=int(n_days // max(int(h), 1)),          # 非重叠期数（重叠收益口径）
+        n_eff=n_indep,                                 # 有效独立观测数（非重叠期）
+        n_indep=n_indep,
         insufficient=bool(n_days < MIN_TRADES),
         insufficient_reason=(f"n_days={n_days} < MIN_TRADES={MIN_TRADES}"
                              if n_days < MIN_TRADES else ""),

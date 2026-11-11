@@ -34,7 +34,7 @@ import os
 import time
 import urllib.request
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional
+from typing import Tuple, Dict, Iterable, List, Optional
 
 import numpy as np
 
@@ -247,25 +247,55 @@ def _eastmoney(codes: List[str]) -> Dict[str, Dict]:
 
 
 # ------------------------------------------------------------------ 对外
+#: 单次请求最多带多少只。实测（tools/tick_capacity_probe.py，2026-11-11）：
+#:   300 只 → 100% 覆盖 / 0.09s / URL 2721 字符
+#:   600 只 → 100% 覆盖 / 0.12s / URL 5421 字符
+#:   800 只 → **92% 覆盖**（只回到 736 行）—— 服务端静默截断
+#: 取 400 作为分块大小：远离截断点，又不会把请求拆得太碎。
+TICK_CHUNK = int(os.environ.get("APB_TICK_CHUNK", "400") or 400)
+
+
+def _snapshot_one(codes: List[str]) -> Tuple[Dict[str, Dict], Optional[str]]:
+    """单块请求，按 腾讯 -> 新浪 -> 东财 降级。"""
+    for fn, name in ((_tencent, "tencent"), (_sina, "sina"), (_eastmoney, "eastmoney")):
+        try:
+            r = fn(codes)
+        except Exception:  # noqa: BLE001
+            r = {}
+        if r:
+            return r, name
+    return {}, None
+
+
 def snapshot(codes: Iterable[str]) -> Dict:
     """
-    取一次快照。按 腾讯 -> 新浪 -> 东财 依次降级。
-    返回 {"ok","rows","as_of","latency_s","stale","source","missing"}
+    取一次快照。大名单自动**分块**（`TICK_CHUNK`，默认 400），并对缺的票重试一次。
+
+    为什么必须分块（评审 R46）：实测 800 只塞一个 URL 时服务端**静默截断**
+    到 736 行（92% 覆盖），`missing` 也拿不到真相 —— 因为请求本身"成功"了。
+    分块 + 缺失重试能把这种静默丢失变成"多一次请求"。
+
+    返回 {"ok","rows","as_of","latency_s","stale","source","missing","chunks","partial"}
     """
     codes = [str(c) for c in codes]
     if not codes:
         return {"ok": False, "reason": "empty"}
     rows: Dict[str, Dict] = {}
     used = None
-    for fn, name in ((_tencent, "tencent"), (_sina, "sina"), (_eastmoney, "eastmoney")):
-        try:
-            r = fn(codes)
-        except Exception:
-            r = {}
+    n_chunks = 0
+    for i in range(0, len(codes), max(1, TICK_CHUNK)):
+        chunk = codes[i:i + max(1, TICK_CHUNK)]
+        r, name = _snapshot_one(chunk)
+        n_chunks += 1
         if r:
-            rows = r
-            used = name
-            break
+            rows.update(r)
+            used = used or name
+    # 缺失重试一次（分块仍可能因个别票停牌/退市拿不到，重试只针对"可能有"的）
+    miss = [c for c in codes if _norm(c) not in rows]
+    if miss and len(miss) <= max(1, TICK_CHUNK):
+        r2, _ = _snapshot_one(miss)
+        if r2:
+            rows.update(r2)
     if not rows:
         return {"ok": False, "reason": "all_sources_failed"}
 
@@ -285,6 +315,8 @@ def snapshot(codes: Iterable[str]) -> Dict:
             "latency_s": round(latency, 1) if latency is not None else None,
             "stale": (latency is not None and latency > 15),
             "missing": missing,
+            "chunks": n_chunks,
+            "partial": bool(missing),
             "fetched_at": datetime.now().astimezone().isoformat(timespec="seconds")}
 
 

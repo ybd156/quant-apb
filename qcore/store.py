@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -122,6 +123,7 @@ def save_weighter(w, path: Optional[str] = None, market: str = "CN",
              a_r=w.a_r, b_r=w.b_r, E_r=w.E_r, logw_r=w.logw_r, n_r=w.n_r,
              ph_mean=w.ph_mean, ph_sum=w.ph_sum, ph_min=w.ph_min, alarms=w.alarms,
              sids=np.array(w.sids), n_regimes=np.array([w.R]),
+             learned_through=np.array([str(getattr(w, "learned_through", "") or "")]),
              cfg=np.array([json.dumps(w.cfg.__dict__, ensure_ascii=False)]))
     return path
 
@@ -151,6 +153,11 @@ def load_weighter(path: Optional[str] = None, market: str = "CN",
         setattr(w, k, z[k].astype(np.float64 if k != "alarms" else np.int64))
     for k in ("a_r", "b_r", "E_r", "logw_r", "n_r"):
         setattr(w, k, z[k].astype(np.float64))
+    try:
+        _lt = z["learned_through"][0]
+        w.learned_through = str(_lt)[:10] or None
+    except Exception:  # noqa: BLE001
+        w.learned_through = None
     if horizon is not None and int(getattr(cfg, "horizon", -1)) != int(horizon):
         msg = (f"weighter 周期不一致：{os.path.basename(path)} 内 cfg.horizon="
                f"{getattr(cfg, 'horizon', None)}，本次要跑 h={horizon}")
@@ -200,6 +207,19 @@ def export_ui_bundle(res: dict, p3d, family_of: Optional[Dict[str, str]] = None,
         "updated_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
         "meta": {k: v for k, v in res["meta"].items() if isinstance(v, (str, int, float))},
     }
+
+    # 死信号 + 指纹：让"产物落后于代码"和"信号从不发声"两件事在 UI 上可见
+    try:
+        diag0 = res["diagnostics"]
+        _nu = diag0.get("n_updates")
+        dead = [sids[i] for i in range(len(sids))
+                if _nu is not None and len(_nu) == len(sids) and float(_nu[i]) == 0]
+    except Exception:  # noqa: BLE001
+        dead = []
+    status["dead_signals"] = dead
+    status["n_dead_signals"] = len(dead)
+    status["zoo_n"] = len(sids)
+    status["zoo_hash"] = hashlib.sha1("|".join(sids).encode("utf-8")).hexdigest()[:12]
 
     # weights（当日全局权重，按大小排序）
     w_now = w.weights(int(res["REGIME"][-1]))
@@ -315,7 +335,9 @@ def append_ledger(rows: list, year: Optional[int] = None,
     with open(path, "a", encoding="utf-8") as f:
         for r in rows:
             rec = dict(r)
-            rec.setdefault("horizon", dh)
+            # 必须**强制**写：传入的行来自 DataFrame，本身带 horizon 列（NaN），
+            # setdefault 看到键已存在就不覆盖 → 全表 horizon=null（评审 R18）。
+            rec["horizon"] = int(dh)
             rec.setdefault("market", mkt)
             rec.setdefault("run_id", rid)
             k = _ledger_key(rec, dh)

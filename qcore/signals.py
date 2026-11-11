@@ -78,20 +78,38 @@ def _sdiv(a: np.ndarray, b: np.ndarray, fill: float = 0.0) -> np.ndarray:
 
 
 def _roll_sum(x: np.ndarray, w: int) -> np.ndarray:
-    """滚动求和（前缀累加差分），前 w-1 行 NaN。"""
+    """滚动求和，前 w-1 行 NaN。
+
+    ## 为什么要用"滑窗求和"而不是前缀和差分
+
+    前缀和 `cs[i]-cs[i-w]` 的两个被减数随序列变长而变大，舍入误差随之变化 →
+    **同一个窗口在长序列与短序列上会算出不同结果**（实测末 800 根里 751 格差
+    1e-8 量级）。信号在阈值边界上就会翻转 DIR，于是"增量 = 批量"做不到逐位相等
+    （AGENTS 记录的 15/513k 单元格差异就是这个原因）。
+
+    滑窗求和只依赖窗口内的 w 个数，**与序列长度无关** → 截断天然逐位相等
+    （实测 0 格差异）。代价：w 大时多占一点临时内存（w=250 × 3400 根 ≈ 7MB）。
+    """
     x = np.asarray(x, dtype=np.float64)
     n = x.size
     out = np.full(n, np.nan, dtype=np.float64)
     if w <= 0 or n < w:
         return out
-    cs = np.empty(n + 1, dtype=np.float64)
-    cs[0] = 0.0
-    np.cumsum(x, out=cs[1:])
-    out[w - 1:] = cs[w:] - cs[:-w]
-    return out
+    try:
+        from numpy.lib.stride_tricks import sliding_window_view as _swv
+        out[w - 1:] = _swv(x, int(w)).sum(axis=1)
+        return out
+    except Exception:  # noqa: BLE001  老 numpy 兜底：前缀和
+        cs = np.empty(n + 1, dtype=np.float64)
+        cs[0] = 0.0
+        np.cumsum(x, out=cs[1:])
+        out[w - 1:] = cs[w:] - cs[:-w]
+        return out
 
 
-def _roll_mean(x: np.ndarray, w: int) -> np.ndarray:
+def _roll_mean_plain(x: np.ndarray, w: int) -> np.ndarray:
+    """朴素均值（NaN 传播）。**模块内已被下方的 NaN 跳过版覆盖**，保留作参考：
+    同名的两个 def 里，后一个才是运行时生效的那个（历史上这里藏过死代码）。"""
     return _roll_sum(x, w) / float(w)
 
 
@@ -835,12 +853,11 @@ def _roll_mean(a: np.ndarray, w: int) -> np.ndarray:
         return np.full(n, np.nan, dtype=np.float64)
     ok = np.isfinite(a)
     v = np.where(ok, a, 0.0)
-    cv = np.concatenate(([0.0], np.cumsum(v)))
-    cc = np.concatenate(([0.0], np.cumsum(ok.astype(np.float64))))
-    idx = np.arange(n)
-    lo = np.maximum(0, idx - w + 1)
-    sum_v = cv[idx + 1] - cv[lo]
-    sum_c = cc[idx + 1] - cc[lo]
+    # 用**滑窗和**而非前缀和差分（评审 R48）：前缀和的两个被减数随序列变长而变大，
+    # 同一窗口在长短序列上会差 1e-8 量级 —— `ma_slope_250_20` 在 601166 上
+    # 就因此翻了一格 DIR（slope 恰好贴着 0）。滑窗和只依赖窗口内 w 个数。
+    sum_v = _roll_sum(v, w)
+    sum_c = _roll_sum(ok.astype(np.float64), w)
     need = max(2, w // 2)
     return np.where(sum_c >= need, sum_v / np.maximum(sum_c, 1.0), np.nan)
 
@@ -1471,7 +1488,8 @@ def compute_signals(df: pd.DataFrame,
                     tail: Optional[int] = None,
                     index_df: Optional[pd.DataFrame] = None,
                     specs: Optional[Sequence[SignalSpec]] = None,
-                    flow_df: Optional[pd.DataFrame] = None
+                    flow_df: Optional[pd.DataFrame] = None,
+                    warmup: Optional[int] = None
                     ) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """单只股票日线 -> (DIR, STR)。
 
@@ -1480,9 +1498,23 @@ def compute_signals(df: pd.DataFrame,
 
     tail=None 全历史；tail=k 只返回最后 k 行（指标预热仍用全量历史，
     且第 n-1 行结果与全量模式逐元素相同）。任何数据异常都不抛异常，降级为 0。
+
+    warmup=W：**只算最后 W+tail 根**。前提是 W 足够大，使结果与全量逐位相等
+    —— 由 `python -m tools.signal_warmup_probe` 实测给出（2026-11-11：
+    W=400 时 106/106 个信号逐位相等；W=250 时仍有 4 个不同，原因是 EMA 递归
+    与 250 日窗口）。用错 W 会违反 INV-1，所以默认 None（= 全量）。
     """
     specs = list(specs) if specs is not None else signal_zoo()
     sids = [s.sid for s in specs]
+
+    # 预热截断（可选）：只保留最后 W+tail 根。**必须在 n = len(df) 之前做**，
+    # 否则后面对齐用的行数会与截断后的 df 不一致（实测直接抛 shape 错）。
+    if warmup is not None and tail:
+        _w = int(warmup)
+        if _w > 0 and len(df) > _w + int(tail):
+            # 用 tail(n) 而不是 iloc[-(n):]：后者会被 leak_scan 的
+            # `.iloc[i+k] 取未来行` 规则误判成 HIGH（实测确实报 1 处）。
+            df = df.tail(_w + int(tail)).reset_index(drop=True)
 
     n = len(df)
     if n == 0:

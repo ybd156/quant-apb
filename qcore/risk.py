@@ -298,11 +298,17 @@ def _sector_share(w: np.ndarray, sectors: Sequence[str]) -> Dict[str, float]:
 # ------------------------------------------------------------------ 体检
 def diversification_report(weights: np.ndarray, family_map: Optional[Sequence[str]] = None,
                            sectors: Optional[Sequence[str]] = None,
-                           min_effective: float = 5.0) -> Dict:
+                           min_effective: float = 5.0,
+                           effective_override: Optional[float] = None) -> Dict:
     """这个组合/权重到底算不算分散。"""
     w = np.asarray(weights, dtype=np.float64)
     rep = {"hhi": hhi(w), "effective_n": effective_n(w),
            "max_share": float(w.max()) if w.size else 1.0}
+    # effective_override：相关性口径的有效独立数（更诚实）。
+    # 判定用它，账面 1/HHI 只作参照 —— 评审 R6：死信号会把 1/HHI 抬高 42%。
+    eff_judge = float(effective_override) if effective_override is not None else rep["effective_n"]
+    rep["effective_judge"] = round(eff_judge, 2)
+    rep["effective_basis"] = "corr_adjusted" if effective_override is not None else "hhi"
     if family_map is not None:
         fams = np.array(family_map, dtype=object)
         fw = {}
@@ -316,14 +322,14 @@ def diversification_report(weights: np.ndarray, family_map: Optional[Sequence[st
         rep["sector_share"] = _sector_share(w, sectors)
 
     warns = []
-    if rep["effective_n"] < min_effective:
-        warns.append(f"有效独立数仅 {rep['effective_n']:.1f}，低于阈值 {min_effective}，"
-                     "表面分散实则集中")
+    if eff_judge < min_effective:
+        warns.append(f"有效独立数仅 {eff_judge:.1f}（{rep['effective_basis']}），"
+                     f"低于阈值 {min_effective}，表面分散实则集中")
     if rep["max_share"] > 0.25:
         warns.append(f"最大单一敞口 {rep['max_share']:.0%}，超过 25%")
     if rep.get("effective_families", 99) < 3:
         warns.append(f"有效信号族仅 {rep.get('effective_families', 0):.1f}，"
-                     "信号高度同质（审计实测有效独立信号 33/73）")
+                     f"信号高度同质（有效独立信号 {eff_judge:.0f}/{len(w)}）")
     rep["warnings"] = warns
     rep["verdict"] = "分散良好" if not warns else f"存在集中风险（{len(warns)} 项）"
     return rep

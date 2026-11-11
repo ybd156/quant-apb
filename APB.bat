@@ -40,6 +40,13 @@ if /i "%~1"=="selftest" goto PASS
 if /i "%~1"=="update"   goto PASS
 if /i "%~1"=="hidden"   goto PASS
 
+rem ---- one-click: env check -> config if needed -> connect -> start daemon ----
+rem ?????????APB.bat auto
+if /i "%~1"=="auto" (
+  %PY% "tools	rain_machine_auto.py"
+  goto END
+)
+
 %PY% "tools\kit_menu.py"
 goto END
 

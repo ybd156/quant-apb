@@ -63,6 +63,9 @@ class AdaptiveWeighter:
         self.E_r = np.zeros((self.R, self.S)); self.logw_r = np.zeros((self.R, self.S))
         self.n_r = np.zeros((self.R, self.S))
         # ---- Page-Hinkley 状态（只看全局流）
+        #: 已学到的样本日（YYYY-MM-DD）。样本级幂等的唯一依据：
+        #: 同一个 s 只学一次，重复调用 step_once 不会把同批样本再喂一遍（评审 R45）。
+        self.learned_through: Optional[str] = None
         self.ph_mean = np.zeros(self.S); self.ph_sum = np.zeros(self.S)
         self.ph_min = np.zeros(self.S)
         self.alarms = np.zeros(self.S, dtype=int)
@@ -97,6 +100,16 @@ class AdaptiveWeighter:
         w = (1.0 - c.eps_explore) * p + c.eps_explore / self.S
         w = np.maximum(w, c.w_min)
         return w / w.sum()
+
+    def mark_learned(self, day: str) -> None:
+        d = str(day)[:10]
+        if not d:
+            return
+        if self.learned_through is None or d > self.learned_through:
+            self.learned_through = d
+
+    def seen(self, day: str) -> bool:
+        return bool(self.learned_through and str(day)[:10] <= self.learned_through)
 
     # ------------------------------------------------------------ 更新
     def update(self, regime: int, active: np.ndarray, payoff: np.ndarray) -> None:
@@ -187,4 +200,5 @@ class AdaptiveWeighter:
             "a_g": self.a_g, "b_g": self.b_g, "E_g": self.E_g, "logw_g": self.logw_g,
             "n_g": self.n_g, "a_r": self.a_r, "b_r": self.b_r, "E_r": self.E_r,
             "logw_r": self.logw_r, "n_r": self.n_r, "alarms": self.alarms,
+            "learned_through": self.learned_through,
         }

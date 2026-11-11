@@ -46,6 +46,12 @@ ENABLE_PIPELINE="${APB_PIPELINE:-1}"
 ENABLE_HEALTH="${APB_HEALTH:-1}"
 HEALTH_INTERVAL="${APB_HEALTH_INTERVAL:-21600}"
 ENABLE_ALERT="${APB_ALERT:-1}"
+ENABLE_AUTOINFO="${APB_AUTOINFO:-1}"
+# 训练任务自动调度：服务端自己判断"该不该训"，排进 sync 队列让训练机来领
+ENABLE_TRAIN_AUTO="${APB_TRAIN_AUTO:-1}"
+# 情报融合权重：0 = 关闭（默认，不改变现有行为）；0.3 表示"模型 7 : 情报 3"的排位融合
+INTEL_W="${APB_INTEL_W:-0}"
+export APB_INTEL_W="$INTEL_W"
 ALERT_INTERVAL="${APB_ALERT_INTERVAL:-1800}"
 
 echo "[entrypoint] APB $(cat /app/VERSION 2>/dev/null || echo unknown) on ${HOST}:${PORT}"
@@ -59,8 +65,20 @@ if [ "$ENABLE_TICK" = "1" ]; then
         sleep 20
         while true; do
             python -c "
-import json,sys
+import json,sys,os
 codes=[]
+# APB_TICK_TOP=N：把池内成交额前 N 只也纳入秒级快照（评审 R46）。
+# 实测腾讯一次可带 600 只（100% 覆盖 / 0.12s），tick.snapshot 已按 400 分块。
+try:
+    # 决策 4C：默认 100 只（先试一周，看 NAS 上的 CPU/网络），要关就 APB_TICK_TOP=0
+    _top = int(os.environ.get("APB_TICK_TOP", "100") or 0)
+    if _top > 0:
+        import csv
+        with open('/app/data/raw/meta/pool.csv', encoding='utf-8') as f:
+            _rows = list(csv.DictReader(f))
+        _rows.sort(key=lambda r: float(r.get('amount') or 0), reverse=True)
+        codes += [r['code'] for r in _rows[:_top]]
+except Exception: pass
 try:
     d=json.load(open('/app/data/state/picks.json'))
     codes=[r['code'] for r in (d.get('rows') or [])][:20]
@@ -323,8 +341,28 @@ if [ "$ENABLE_INVARIANTS" != "0" ]; then
     (
         sleep 300
         while true; do
-            nice -n 19 python -m qcore.invariants > /app/logs/invariants.log 2>&1 || true
+            # 评审 R20：不再 `|| true` 吞掉结果。退出码写进 state，
+            # 由 /api/health 暴露；APB_REQUIRE_INVARIANTS=1 时再首轮就拒绝继续。
+            nice -n 19 python -m qcore.invariants > /app/logs/invariants.log 2>&1
+            _inv_rc=$?
+            python - <<'PYINV' || true
+import json, os, datetime
+p = "/app/data/state/invariants_health.json"
+try:
+    d = json.load(open("/app/data/state/invariants.json", encoding="utf-8")) or []
+except Exception:
+    d = []
+sk = [x.get("id") for x in d if isinstance(x, dict) and x.get("status") == "skip"]
+fa = [x.get("id") for x in d if isinstance(x, dict) and x.get("status") == "fail"]
+json.dump({"at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+           "failed": fa, "skipped": sk, "n": len(d)},
+          open(p, "w", encoding="utf-8"), ensure_ascii=False)
+PYINV
             tail -3 /app/logs/invariants.log 2>/dev/null || true
+            if [ "${APB_REQUIRE_INVARIANTS:-0}" = "1" ] && [ "$_inv_rc" != "0" ]; then
+                echo "[invariants] FAILED (rc=$_inv_rc) and APB_REQUIRE_INVARIANTS=1 -> exit"
+                exit 1
+            fi
             sleep 21600
         done
     ) &
@@ -485,6 +523,43 @@ else:
     ) &
     PIDS="$PIDS $!"
 fi
+    PIDS="$PIDS $!"
+fi
+
+# 6.6) 训练任务自动调度（服务端自己排单）
+#
+# 判据：没模型 / 健康度 failed·degraded / 超龄 7 天 / 数据比训练截止新 ≥3 个交易日；
+# 去重：队列里已有该周期则跳过；冷却：12h 内不重复排；单轮最多 2 单。
+# 只排单，不训练 —— 训练机领到后自己跑，跑完上传。
+if [ "$ENABLE_TRAIN_AUTO" = "1" ]; then
+    (
+        sleep 180
+        while true; do
+            nice -n 19 python -m qcore.train_scheduler 2>&1 | tail -4 || true
+            # 成交口径审计（R22）：把「收盘 vs 次日开盘」的偏差逐笔记在账上
+            nice -n 19 python -m qcore.fill_audit --run >/dev/null 2>&1 || true
+            sleep 3600
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
+
+# 6.5) 自主情报：自己决定查谁 → 查 → 打分 → 落盘；收盘窗口内顺带给到期情报对账
+#
+# 为什么单独一段：情报是"当日才有、不可回补"的，跑太勤会被接口限流，
+# 跑太稀又攒不够样本。30 分钟一次、每次 ≤8 个标的，是成本与覆盖的折中。
+if [ "$ENABLE_AUTOINFO" = "1" ]; then
+    (
+        sleep 120
+        while true; do
+            nice -n 19 python -m qcore.autoinfo --run 2>&1 | tail -2 || true
+            _hm=$(date +%H%M)
+            if [ "$_hm" -ge 1505 ] && [ "$_hm" -le 1700 ]; then
+                nice -n 19 python -m qcore.autoinfo --verify 2>&1 | tail -2 || true
+            fi
+            sleep 1800
+        done
+    ) &
     PIDS="$PIDS $!"
 fi
 

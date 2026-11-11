@@ -54,10 +54,10 @@
 
 ```
 scanned 119 file(s)
-RESULT: HIGH=0  MEDIUM=33  INFO=100  WAIVED=781（行内 96 / 文件级 685）
+RESULT: HIGH=0  MEDIUM=53  INFO=107  WAIVED=793（行内 103 / 文件级 690）
 ```
 
-- **705 → 33**：从「704 条不知道要不要管」变成「33 条已知、已理解、仍在盯」。
+- **705 → 51**：从「704 条不知道要不要管」变成「51 条已知、已理解、仍在盯」（2026-11-11 重跑；新增的 6 个文件是 session / event_data / sentiment_store / market_breadth / qlib_data）。
 - 33 条全部落在 5 个核心/训练文件里，每次改动都值得重看一遍 —— 这是**故意的**，
   不是没处理完。
 - 文件级豁免 685 条，每条都带具体理由，写进 `audit/waivers.json`。

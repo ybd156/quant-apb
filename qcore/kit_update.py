@@ -158,20 +158,25 @@ def _download(url: str, out: str, timeout: int = 300, token: str = "") -> Dict:
             return {"ok": False, "reason": f"HTTP {e.code} 未授权 —— "
                                           f"检查 APB_TOKEN 是否与服务端一致"}
         return {"ok": False, "reason": f"HTTP {e.code}"}
-    except ssl.SSLError:
-        try:
+    except ssl.SSLError as e1:
+        # 不再自动降级到 CERT_NONE（评审 R38：任何中间人只要让握手失败，
+        # 就能把下载降到"不校验证书"）。默认报错并给出安装 CA 的指引。
+        if str(os.environ.get("APB_KIT_INSECURE_TLS", "0")).lower() in ("1", "true", "yes"):
             size = _try(_ssl_ctx_unverified())
-            print("[kit_update] 警告：证书校验失败，已退回不校验（建议在训练机安装 CA 证书）")
-        except Exception as e2:  # noqa: BLE001
-            return {"ok": False, "reason": f"SSL 失败且重试无效：{str(e2)[:60]}"}
+            print("[kit_update] 警告：APB_KIT_INSECURE_TLS=1，已跳过证书校验（仅限内网调试）")
+        else:
+            return {"ok": False, "reason": f"tls_verify_failed: {str(e1)[:60]}",
+                    "hint": "训练机缺 CA 证书。装上系统 CA（或导出证书到 SSL_CERT_FILE）；"
+                            "确需跳过请显式设 APB_KIT_INSECURE_TLS=1（有中间人风险）"}
     except Exception as e:  # noqa: BLE001
         # 有些环境抛的不是 ssl.SSLError，而是 URLError 包裹
         if "CERTIFICATE_VERIFY_FAILED" in str(e):
-            try:
+            if str(os.environ.get("APB_KIT_INSECURE_TLS", "0")).lower() in ("1", "true", "yes"):
                 size = _try(_ssl_ctx_unverified())
-                print("[kit_update] 警告：证书校验失败，已退回不校验")
-            except Exception as e2:  # noqa: BLE001
-                return {"ok": False, "reason": f"SSL 失败且重试无效：{str(e2)[:60]}"}
+                print("[kit_update] 警告：APB_KIT_INSECURE_TLS=1，已跳过证书校验")
+            else:
+                return {"ok": False, "reason": "tls_verify_failed",
+                        "hint": "证书校验失败；装 CA 或显式设 APB_KIT_INSECURE_TLS=1"}
         else:
             return {"ok": False, "reason": f"{type(e).__name__}: {str(e)[:60]}"}
 
@@ -255,7 +260,15 @@ def apply_update(zip_path: str, verbose: bool = True) -> Dict:
 
     try:
         with zipfile.ZipFile(zip_path) as z:
-            z.extractall(tmp)
+            # Zip Slip：拒绝绝对路径与 `..`（评审 R38）
+            for n in z.namelist():
+                p_ = os.path.normpath(n)
+                if n.startswith(("/", "\\")) or ".." in p_.split(os.sep):
+                    return {"ok": False, "reason": f"unsafe_zip_member: {n[:60]}"}
+            try:
+                z.extractall(tmp, filter="data")     # py3.12+
+            except TypeError:
+                z.extractall(tmp)
     except Exception as e:  # noqa: BLE001
         shutil.rmtree(tmp, ignore_errors=True)
         return {"ok": False, "reason": f"解压失败: {type(e).__name__}"}

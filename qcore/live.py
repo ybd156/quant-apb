@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from .data import get_pool, load_index
-from .dataset import build_dataset
+from .dataset import build_dataset, external_loader
 from .engine import RunConfig, run_walkforward
 from .learner import WeightConfig
 from . import store
@@ -86,7 +86,8 @@ def rebuild(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     _log(f"rebuild start: {len(codes)} stocks, start={start}, h={horizon}")
 
     p3d = build_dataset(codes, start=start, horizon=horizon,
-                        extra_horizons=[1, 20], verbose=False)
+                        extra_horizons=[1, 20], verbose=False,
+                        extra_loader=(external_loader if str(os.environ.get("APB_EXTERNAL", "0")).lower() not in ("0", "false", "no") else None))  # R1
     cfg = RunConfig(horizon=horizon, warmup=120, record_ledger=True)
     res = run_walkforward(p3d, cfg)
 
@@ -111,8 +112,19 @@ def rebuild(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
 
 
 # ------------------------------------------------------------------ 每日增量
+#: 信号预热下限（交易日）。来自 `python -m tools.signal_warmup_probe` 的实测：
+#: W=400 时 106/106 个信号与全量逐位相等；W=250 仍有 4 个 EMA 类信号不同。
+#: 因此**增量窗口里 t_from 之前必须至少有 400 根**，否则信号不可信。
+WARMUP_MIN = 400
+
+#: 增量默认窗口（自然日）。620 天 ≈ 420 个交易日 ≈ WARMUP_MIN + 20，
+#: 刚好够预热 + 一次小的 catch-up。原来是 900 天（≈610 交易日），
+#: 多出来的 190 根纯属浪费 —— 引擎只读 t_from 之后的行（评审 R48）。
+DEFAULT_WINDOW_DAYS = 620
+
+
 def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
-              window_days: int = 900, max_catchup: int = 40) -> Dict:
+              window_days: int = DEFAULT_WINDOW_DAYS, max_catchup: int = 40) -> Dict:
     t0 = time.time()
     st = store.read_json("status", default={}) or {}
     last = st.get("last_processed")
@@ -158,13 +170,35 @@ def step_once(as_of: Optional[str] = None, horizon: int = 5, pool_n: int = 300,
     except Exception as e:  # noqa: BLE001
         _log(f"live quotes unavailable: {type(e).__name__}")
 
-    p3d = build_dataset(codes, start=start, horizon=horizon, cutoff=str(as_of_ts.date()),
-                        verbose=False, live_quotes=_live)
+    _ex = (external_loader if str(os.environ.get("APB_EXTERNAL", "0")).lower()
+           not in ("0", "false", "no") else None)  # R1
+
+    def _build(_start):
+        # signal_warmup：每票只留「start 前 400 根」算信号（评审 R48）。
+        # 面板级对拍已验证逐位相等（80 只 × 3363 天 × 106 信号，DIR/STR 均 0 格），
+        # 增量窗口下把 build_dataset 从 4.09s 压到 2.49s（1.65×，80 只票）。
+        return build_dataset(codes, start=_start, horizon=horizon,
+                             cutoff=str(as_of_ts.date()), verbose=False,
+                             live_quotes=_live, extra_loader=_ex,
+                             signal_warmup=WARMUP_MIN)
+
+    p3d = _build(start)
     dates = pd.DatetimeIndex(p3d.dates)
 
     # 本地索引：从"上次处理日的下一交易日"开始
     t_from = int(np.searchsorted(dates.values, np.datetime64(pd.Timestamp(last)), side="right"))
     t_from = max(t_from, 0)
+
+    # 预热守卫（评审 R48）：引擎只读 t_from 之后的行，但 t_from 之前的行是**预热**。
+    # 窗口缩短后如果预热不足 400 根，信号会与全量不一致 → 直接退回长窗口重算，
+    # 宁可慢也不许悄悄用不可信的信号。
+    if t_from < WARMUP_MIN:
+        _long = (as_of_ts - timedelta(days=900)).strftime("%Y-%m-%d")
+        _log(f"warmup short ({t_from} < {WARMUP_MIN}) -> rebuild with 900d window")
+        p3d = _build(_long)
+        dates = pd.DatetimeIndex(p3d.dates)
+        t_from = max(int(np.searchsorted(dates.values,
+                                        np.datetime64(pd.Timestamp(last)), side="right")), 0)
     if len(dates) - t_from > max_catchup:
         # 旧实现：只打一行日志，仍返回 ok:True，并把 last_processed 推到最新日
         # → 中间那些交易日**永不入账**，且事后看起来是连续的。宁可报错也不静默丢样本。

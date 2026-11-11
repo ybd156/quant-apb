@@ -79,8 +79,12 @@ def inv3_rolling():
                         "该检查在 CI 每次发版执行，见 GitHub Actions 的 "
                         "「无未来函数检验」步骤")
     try:
+        # Windows 下 text=True 会用系统默认编码（GBK）解码子进程输出，
+        # 扫描器打印中文/特殊字符时直接 UnicodeDecodeError → 整项退化为 SKIP。
+        # 这正是「门禁自己失灵」那条陷阱（AGENTS §7 #19）。
         r = subprocess.run([sys.executable, script], cwd=ROOT,
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, timeout=300,
+                           encoding="utf-8", errors="replace")
         out = (r.stdout or "") + (r.stderr or "")
         m = re.search(r"HIGH=(\d+)", out)
         high = int(m.group(1)) if m else -1
@@ -92,7 +96,11 @@ def inv3_rolling():
             # 旧文案写「MEDIUM 项为评估层统计，已人工确认」——但实测
             # MEDIUM=704 里只有 96 条带 waiver，608 条从未被人看过。
             # 检查器不能替人工签收，只能如实报数。
-            tail = (f"；MEDIUM={med} 中已 waiver {wv}，其余 {med - wv} 条未确认"
+            # 注意：WAIVED 是**全部严重级**的豁免条数（含 INFO），不是 MEDIUM 子集，
+            # 所以不能拿 med - wv 当"未确认条数"（实测会算出负数 -731）。
+            # `MEDIUM=` 本身就是**剔除豁免后**的条数（leak_scan 的 meds 是 active 列表），
+            # 所以"未确认条数"= med；WAIVED 是各级合计，不能拿它相减（会算出负数）。
+            tail = (f"；MEDIUM {med} 条未确认（WAIVED {wv} 覆盖各级，含 INFO）"
                     if med >= 0 and wv >= 0 else "；MEDIUM 数无法解析")
             return "pass", f"HIGH=0{tail}（详见 audit/leak_scan.py --verbose）"
         if high > 0:
@@ -338,7 +346,9 @@ def run_all(write: bool = True) -> List[Dict]:
     return out
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    import sys as _sys
+    strict = "--strict" in (argv if argv is not None else _sys.argv[1:])
     res = run_all()
     icon = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP"}
     n_fail = 0

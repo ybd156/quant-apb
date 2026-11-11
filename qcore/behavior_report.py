@@ -150,9 +150,22 @@ def compute(codes: List[str], start: str = "2016-01-01", horizon: int = 5,
                 neut.append(v)
         ic_neutral = float(np.mean(neut)) if neut else None
 
-        note = "方向与文献一致" if (ic_s["mean"] or 0) != 0 else ""
-        if ic_neutral is not None and ic_s["mean"] and abs(ic_neutral) < abs(ic_s["mean"]) * 0.4:
+        # 标签必须机械化（评审 R24）：原来只要 IC≠0 就写"方向与文献一致"，
+        # 而 3/10 个因子在中性化后符号翻转，标签却不变。
+        _raw = ic_s["mean"] or 0.0
+        _t = ic_s.get("t") or 0.0
+        if _raw == 0:
+            note = ""
+        elif ic_neutral is None:
+            note = "中性化不可用（缺行业/市值）"
+        elif (ic_neutral > 0) != (_raw > 0):
+            note = f"中性化后变号（{_raw:+.4f} → {ic_neutral:+.4f}）→ 原始方向不可用"
+        elif abs(_t) < 2:
+            note = f"不显著（|t|={abs(_t):.2f}）"
+        elif abs(ic_neutral) < abs(_raw) * 0.4:
             note = "中性化后大幅衰减 → 大概率是规模/行业效应"
+        else:
+            note = "方向与文献一致（中性化后仍同号）"
         rows.append({
             "factor": fac,
             "ic": round(float(ic_s["mean"]), 6),

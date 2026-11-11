@@ -78,6 +78,8 @@ def append_stats(path: str, edge: Dict, eq_cmp: Dict, meta: Dict, meta_cmp: Dict
     A("")
     A(f"**判定：{eq_cmp['verdict']}**")
     A("")
+    A("> 口径：Sharpe = 每期算术均值/标准差 × √252；年化收益为**几何**复合，两者不可相除验算。")
+    A("")
     A("> 学习器若跑不赢等权集成，说明权重调整没有带来信息，只是把噪声重新分配了一遍。")
     A("> 这条是「自学习」这个卖点的生死线，必须如实报告。")
     A("")

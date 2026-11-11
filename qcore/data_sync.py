@@ -441,6 +441,24 @@ def sync(force: bool = False, verbose: bool = True) -> Dict:
         return out
     e = extract(verbose=verbose)
     if not e.get("ok"):
+        # 自愈（评审 R37）：416 会把"大到 20MB 但已损坏"的包当成完整文件，
+        # 于是每次都解压失败、--force 也救不回来。这里删包重下一次再解压。
+        if str(e.get("reason") or "").startswith("extract_failed"):
+            try:
+                os.remove(TARBALL)
+                if verbose:
+                    print("[data_sync] 解压失败 -> 删除损坏包并重下一次", flush=True)
+            except Exception:  # noqa: BLE001
+                pass
+            d2 = download(verbose=verbose)
+            if d2.get("ok"):
+                e = extract(verbose=verbose)
+                if e.get("ok"):
+                    out.update({"ok": True, "action": "updated_after_redownload",
+                                "new_local_date": local_date(), "download": d2,
+                                "extract": e, "synced_at": _now()})
+                    _atomic(STAMP, {**stamp, **out})
+                    return out
         out.update({"ok": False, "reason": e.get("reason"), "extract": e})
         _atomic(STAMP, {**stamp, **out})
         return out

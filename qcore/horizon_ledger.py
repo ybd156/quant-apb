@@ -184,6 +184,10 @@ def record(h: int, picks: Dict, verbose: bool = False) -> Dict:
                    "price": r.get("price") or r.get("close")}
                   for r in rows],
         "status": "pending",
+        # 到期日算不出来（日历还没走出 h 天）时**显式记 pending_calc**，
+        # 由 reconcile 在日历前进后补算。旧实现只写 None，之后没人补，
+        # 导致每一条预测都永远"未到期"（评审 R49）。
+        "pending_calc": bool(entry is None or exit_ is None),
         "result": None,
     }
 
@@ -254,6 +258,18 @@ def reconcile(h: Optional[int] = None, verbose: bool = True) -> Dict:
             if r.get("status") != "pending":
                 continue
             ex = r.get("exit_date")
+            # 补算：日历前进之后，把当初算不出的 entry/exit 补上（R49）
+            if not ex or r.get("pending_calc"):
+                _a = r.get("as_of")
+                _e = _trading_days_after(cal, _a, 1) if _a else None
+                _x = _trading_days_after(cal, _a, 1 + int(r.get("horizon") or hh)) if _a else None
+                if _e:
+                    r["entry_date"] = _e
+                if _x:
+                    r["exit_date"] = _x
+                    r["pending_calc"] = False
+                    changed = True
+                    ex = _x
             if not ex or ex > latest:
                 total_skip += 1
                 continue
@@ -439,7 +455,7 @@ def _stats_from_main_ledger(h: int) -> Optional[Dict]:
 
     return {
         "horizon": int(h),
-        "n": len(days) * 100,          # 近似：每天约 100 只
+        "n": int(sum(len(pairs) for pairs in by_day.values())),   # 真实条数（R19）
         "n_days": len(days),
         "hit_rate": round(float(np.mean(hits)), 4),
         "top_mean": round(float(np.mean(tops)), 6),

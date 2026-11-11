@@ -55,6 +55,8 @@ else
 fi
 cp "$ROOT/tools/train_one_click.py" "$KIT/tools/"
 cp "$ROOT/tools/sync_agent.py" "$KIT/tools/"
+# 一键入口（体检 → 配置 → 连通 → 起守护）
+cp "$ROOT/tools/train_machine_auto.py" "$KIT/tools/"
 cp "$ROOT/tools/train_missing.py" "$KIT/tools/"
 cp "$ROOT/tools/defaults.py" "$KIT/tools/"
 cp "$ROOT/tools/bootstrap.ps1" "$KIT/tools/"
@@ -76,13 +78,22 @@ cp "$ROOT/LICENSE" "$KIT/" 2>/dev/null || true
 # 而这个套件是 Windows 专用的（wheels 是 win_amd64）——
 # 多一个用不上的脚本只会增加「不知点哪个」的困惑。
 cp "$ROOT/train.bat" "$KIT/"
+# Linux/Mac 一键入口（Windows 用 APB.bat auto）
+cp "$ROOT/apb.sh" "$KIT/" 2>/dev/null || true
+chmod +x "$KIT/apb.sh" 2>/dev/null || true
 # daemon.bat 是 NAS/常驻侧的东西，训练机不需要（拷过去只会让人困惑）
 chmod +x "$KIT/train.bat" 2>/dev/null || true
 
 # ---------- 1.5 构建后校验：这个套件能不能承接所有任务 ----------
 if [ -f "$KIT/tools/kit_selftest.py" ]; then
   if python tools/kit_selftest.py --json >/dev/null 2>&1; then :; fi
-  ( cd "$KIT" && python tools/kit_selftest.py >/dev/null 2>&1 ) &&     echo "[kit] selftest OK (train / pipeline / prewarm / sync)" ||     echo "[kit] WARN: selftest failed in built kit -- check before shipping"
+  if ( cd "$KIT" && python tools/kit_selftest.py >/dev/null 2>&1 ); then
+    echo "[kit] selftest OK (train / pipeline / prewarm / sync)"
+  else
+    echo "[kit] ERROR: selftest failed in built kit —— 拒绝出包（评审 R39）"
+    echo "        排查：cd <kit> && python tools/kit_selftest.py"
+    exit 1
+  fi
 fi
 
 # ---------- 2. 清掉不需要的 ----------
@@ -181,6 +192,8 @@ cat > "$KIT/README-训练机.md" <<'MD'
 
 ### 第一次用，只做两步
 
+0. **只想一键**：双击 `APB.bat auto`（或 Linux 跑 `bash apb.sh auto`）——
+   它自己体检、缺配置就引导、测通后起后台守护。下面的 1/2 步是手动版。
 1. 双击 `APB.bat` → 选 **1**，填令牌（从 NAS「设置 → 访问令牌」复制）
    - 窗口里点「测试连接」，通了再保存
 2. 再双击 `APB.bat` → 选 **2**，后台跑起来

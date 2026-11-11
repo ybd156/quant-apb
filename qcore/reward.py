@@ -262,6 +262,29 @@ def reward_report(scorecard: pd.DataFrame, pos: Dict, trust: Dict,
 
 
 # ------------------------------------------------------------------ 事件调整
+
+def _measured_direction(e: Dict, label: int) -> tuple:
+    """事件方向：**优先用历史实测符号**，拿不到才退回人工标签。
+
+    为什么（评审 R52）：18 条重大事件里，人工标签的"利空/利多"与沪深300 的
+    5 日真实反应只有 **61%** 同号；直接按标签调仓等于 39% 押在反方向。
+    """
+    txt = str(e.get("title") or e.get("name") or "")
+    if txt:
+        try:
+            from . import event_history as EH
+            im = EH.implied(EH.analogs(txt, top=3))
+            car = (im or {}).get("implied_car")
+            if car is not None and abs(float(car)) > 1e-6:
+                return (1 if float(car) > 0 else -1), "history", im
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        return int(label), "label", None
+    except Exception:  # noqa: BLE001
+        return 0, "none", None
+
+
 def event_adjust(stock_weights: Dict[str, float],
                  sector_of: Dict[str, str],
                  events: Optional[List[Dict]] = None,
@@ -354,11 +377,17 @@ def event_adjust(stock_weights: Dict[str, float],
             continue
         if d == 0:
             continue
+        d, _dbasis, _dim = _measured_direction(e, d)
+        if d == 0:
+            continue
         ds = str(e.get("date") or "")[:10]
         try:
-            age = (_dt.strptime(ds, "%Y-%m-%d").date() - cutoff).days
+            _ed = _dt.strptime(ds, "%Y-%m-%d").date()
         except Exception:
             continue
+        if _ed > _dt.now().date():
+            continue                                  # 未来排期事件不得影响当前权重（R23）
+        age = (_ed - cutoff).days
         if age < 0:
             continue                                  # 太老
         decay = 0.5 ** (max(0.0, (lookback_days - age)) / half)
@@ -367,7 +396,9 @@ def event_adjust(stock_weights: Dict[str, float],
             v = d * c * decay
             sector_net[s] = sector_net.get(s, 0.0) + v
             used.append({"date": ds, "type": e.get("type"), "sector": s,
-                         "direction": d, "confidence": round(c, 3),
+                         "direction": d, "dir_basis": _dbasis,
+                         "implied_car": (_dim or {}).get("implied_car"),
+                         "confidence": round(c, 3),
                          "decay": round(decay, 3), "contrib": round(v, 4)})
 
     if not sector_net:

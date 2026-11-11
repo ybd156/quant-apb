@@ -135,6 +135,45 @@ def _report(nas: str, tid, ok: bool, detail: dict, token: str,
     return False
 
 
+def _run_ab_train(params: dict, verbose: bool = True) -> dict:
+    """在训练机上跑「双轨复核」：快照 vs 点对点，各训一次，比 holdout IC。
+
+    这是决策 1（C 方案）的落地形态 —— 双轨复核是重活（每期 5–8 分钟），
+    必须由训练机跑，NAS 只收结论。
+    """
+    import subprocess as _sp
+    h = int(params.get("horizon") or 5)
+    stocks = int(params.get("stocks") or 300)
+    trees = int(params.get("trees") or 250)
+    cmd = [sys.executable, "-m", "scripts.ab_train_pit",
+           "--horizon", str(h), "--stocks", str(stocks), "--trees", str(trees)]
+    if params.get("test_start"):
+        cmd += ["--test-start", str(params["test_start"])]
+    if params.get("test_end"):
+        cmd += ["--test-end", str(params["test_end"])]
+    if verbose:
+        print(f"    ab_train: h={h} stocks={stocks} trees={trees}", flush=True)
+    t0 = time.time()
+    try:
+        r = _sp.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=int(params.get("timeout_s") or 7200))
+        out = {"ok": r.returncode == 0, "seconds": round(time.time() - t0, 1),
+               "returncode": r.returncode, "tail": (r.stdout or "")[-1500:],
+               "stderr": (r.stderr or "")[-600:] if r.returncode else ""}
+        # 把产物一并回报，NAS 侧不用再去拉文件
+        try:
+            import json as _j, os as _o
+            fp = _o.path.join(_o.path.dirname(_o.path.dirname(_o.path.abspath(__file__))),
+                              "data", "state", "ab_train.json")
+            if _o.path.isfile(fp):
+                out["ab_train"] = _j.load(open(fp, encoding="utf-8"))
+        except Exception as _e:  # noqa: BLE001
+            out["ab_train_error"] = f"{type(_e).__name__}: {str(_e)[:80]}"
+        return out
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
 def _run_pipeline(params: dict, verbose: bool = True) -> dict:
     """在训练机上跑全流程回测（外包重活）。"""
     import subprocess as _sp
@@ -205,14 +244,15 @@ def run_task(nas: str, task: dict, token: str, verbose: bool = True) -> dict:
     """
     _job = str(task.get("job") or "train")
     _params = task.get("params") or {}
-    if _job in ("pipeline", "prewarm"):
+    if _job in ("pipeline", "prewarm", "train_ab"):
         tid = task.get("id")
         if verbose:
             print(f"  任务 {tid}: job={_job} params={_params}", flush=True)
         _journal({"event": "claimed", "task": tid, "job": _job, "params": _params})
         _progress(nas, tid, token, phase=f"{_job}_running", done=0, total=1,
                   note=f"{_job} 执行中")
-        res = (_run_pipeline(_params, verbose) if _job == "pipeline"
+        res = (_run_ab_train(_params, verbose) if _job == "train_ab"
+               else _run_pipeline(_params, verbose) if _job == "pipeline"
                else _run_prewarm(_params, verbose))
         _journal({"event": _job, "task": tid, **res})
         if verbose:

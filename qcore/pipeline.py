@@ -26,7 +26,7 @@ from . import stats as ST
 from .backtest import run_baselines, run_long_short
 from .context import stock_context
 from .data import get_pool, load_kline
-from .dataset import build_dataset
+from .dataset import build_dataset, external_loader
 from .engine import RunConfig, run_walkforward
 from .metrics import evaluate_all, weight_concentration
 from .paper import PaperConfig, compare, export_paper, live_nav, load_live_trades, simulate
@@ -98,7 +98,8 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     print(f"[1/7] data [{market}]: {len(codes)} stocks", flush=True)
 
     p3d = build_dataset(codes, start=start, horizon=horizon, extra_horizons=[1, 20],
-                        verbose=False, loader=loader, pad=pad, market=market)
+                        verbose=False, loader=loader, pad=pad, market=market,
+                        extra_loader=(external_loader if str(os.environ.get("APB_EXTERNAL", "1")).lower() not in ("0", "false", "no") else None))  # R1：外部数据族接线
     T, N, S = p3d.shape
     print(f"      dataset: T={T} N={N} S={S} ({p3d.nbytes()/1e6:.0f} MB)", flush=True)
 
@@ -269,14 +270,16 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
                      "note": "按相关性算的有效独立下注数，远小于按权重算的数字"}
     except Exception as e:  # noqa: BLE001
         corr_info = {"error": f"{type(e).__name__}: {e}"}
-    div_sig = RK.diversification_report(w_final, family_map=fam_list, min_effective=10.0)
+    div_sig = RK.diversification_report(
+        w_final, family_map=fam_list, min_effective=10.0,
+        effective_override=corr_info.get("effective_n_corr") if isinstance(corr_info, dict) else None)
     pw = RK.portfolio_weights(res["scores"][:, -1], p3d.SIGMA[-1],
                               sectors=None, top_k=10, max_weight=0.15)
     div_port = RK.diversification_report(pw["weights"], min_effective=5.0) if pw.get("ok") else {}
     div_sig["corr_adjusted"] = corr_info
     if corr_info.get("effective_n_corr") and corr_info["effective_n_corr"] < 45:
         div_sig["warnings"].append(
-            f"相关性调整后有效独立信号仅 {corr_info['effective_n_corr']:.0f}/73，"
+            f"相关性调整后有效独立信号仅 {corr_info['effective_n_corr']:.0f}/{S}，"
             "表面分散实则高度同质")
     risk_rep = {"signal_level": div_sig, "portfolio_level": div_port,
                 "n_positions": pw.get("n_positions"),
@@ -339,6 +342,8 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
     # 改成 qcore 一次算好、写进 costs.json，server 只读。
     try:
         from . import horizons as HZ
+        _turn = float(getattr(__import__("inspect").signature(HZ.annual_cost_drag)
+                              .parameters["turnover"], "default", 0.7))
         store.write_json("costs", {
             "market": market,
             "round_trip_bps": round(float(cost_bps), 4),
@@ -346,10 +351,11 @@ def run_full(pool_n: int = 300, start: str = "2013-01-01", horizon: int = 5,
             "sell_bps": round(float(rt["sell_bps"]), 4),
             "annual_drag_pct": {str(h): round(HZ.annual_cost_drag(int(h), market) * 100, 2)
                                 for h in (1, 3, 5, 10, 15, 20)},
-            "turnover_assumption": 0.8,
+            "turnover_assumption": _turn,
             "verified_on": (perf.get("costs") or {}).get("verified_on"),
             "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-            "note": "annual_drag_pct = 250/h × 换手0.8 × 往返bps；由 qcore 计算，UI 只读",
+            "note": (f"annual_drag_pct = (252/h) × 换手{_turn} × 往返bps；"
+                     "数值由 qcore 计算、UI 只读（标签与数值同源，评审 R5）"),
         })
     except Exception as _e:  # noqa: BLE001
         print(f"      costs.json skipped: {_e}", flush=True)

@@ -620,20 +620,24 @@
     const res = await api('/api/health');
     if (!res.ok || !res.data) { setHealth('down'); return; }
     S.health = res.data;
-    const age = toNum(res.data.data_age_days);
+    const dataAge = toNum(res.data.data_age_days);
+    const panelAge = toNum(res.data.panel_age_days);
     const missing = (res.data.missing_files || []).length;
+    // 灯的颜色由**两个**年龄里更差的那个决定（评审 R27）：
+    // 只报行情日期时，"行情 11-10、算到 11-06"照样是绿灯。
+    const worst = Math.max(dataAge === null ? 0 : dataAge, panelAge === null ? 0 : panelAge);
     if (missing) setHealth('down', '缺 ' + missing + ' 文件');
-    // 后端 _age_days 返回的是**交易日**数，不是自然日 —— 写成「天」会夸大
-    // （周五→周一差 3 个自然日，只隔 1 个交易日）。
-    else if (age !== null && age > 1) setHealth('stale', '落后 ' + age.toFixed(0) + ' 个交易日');
+    // 后端 _age_days 返回的是**交易日**数，不是自然日 —— 写成「天」会夸大。
+    else if (worst > 1) setHealth('stale', '落后 ' + worst.toFixed(0) + ' 个交易日');
     else setHealth('ok');
-    // 顶栏显示的是「行情数据最后一天」，不是「最后一次计算的时间点」。
-    // 后端 /api/health 现在同时给 as_of（最后计算）与 data_to（数据最后一天），
-    // 这里优先用 data_to；老服务端没有该字段时回退 as_of。
-    const asof = res.data.data_to || res.data.as_of || '—';
-    $('#chip-asof').textContent = '数据 ' + asof;
-    $('#chip-asof').title = '行情数据最后一天 ' + asof
-      + (age === null ? '' : '（落后 ' + age + ' 个交易日）');
+    // 顶栏并列两个日期：行情到哪天 / 算到哪天。缺一个都会误导。
+    const dataTo = res.data.data_to || res.data.as_of || '—';
+    const calcTo = res.data.computed_as_of || res.data.as_of || '—';
+    $('#chip-asof').textContent = '数据 ' + dataTo + ' · 计算 ' + calcTo;
+    $('#chip-asof').title = '行情最后一天 ' + dataTo
+      + (dataAge === null ? '' : '（落后 ' + dataAge + ' 个交易日）')
+      + ' / 计算截至 ' + calcTo
+      + (panelAge === null ? '' : '（落后 ' + panelAge + ' 个交易日）');
   }
 
   /* ======================= 版本更新（应用内一键更新） ==================== */
@@ -1473,6 +1477,13 @@
     const hzList = hz.horizons || [];
 
     const m = (modelRes.ok && modelRes.data) ? modelRes.data : null;
+    // R3：页面元信息 ≠ 实际部署模型时，必须显式说出来（不能让人以为在跑 250 树）
+    const depWarn = (m && m.deployed_mismatch)
+      ? banner({ tone: 'warn', icon: 'alert',
+          title: '页面展示的模型不是线上实际加载的那个',
+          text: esc(m.deployed_note || 'model.json 与 data/model/meta.json 不一致'),
+          meta: '修复：用同一写入方生成 model.json（评审 R3）' })
+      : '';
     const picks = (picksRes.ok && picksRes.data) ? picksRes.data : null;
     const _hzInfo = (hzList.find((x) => Number(x.horizon) === H)) || {};
     const _hzNoModel = !_hzInfo.model_exists;
@@ -1653,7 +1664,8 @@
         '</p>'
     });
 
-    return '<div style="margin-bottom:14px">' + horizonCard + '</div>' +
+    return depWarn +
+      '<div style="margin-bottom:14px">' + horizonCard + '</div>' +
       '<div style="margin-bottom:14px">' + heroCard + '</div>' +
       '<div style="margin-bottom:14px">' + btCard + '</div>' +
       '<div style="margin-bottom:14px">' +
@@ -2280,19 +2292,21 @@
       }) + (sorted.length > 500 ? '<p class="muted" style="margin-top:8px">仅渲染前 500 行（共 ' + sorted.length + ' 行）</p>' : '') + '</div>'
     });
 
-    // 73 个手写信号是「量化预知」的测量本体，不是归档 —— 不折叠、不降级。
+    // 手写信号是「量化预知」的测量本体，不是归档 —— 不折叠、不降级。
+    // 个数不再写死：从 /api/signals 的 total 取（R8：同一指标曾有 73/80/102/106 四个值）。
+    const nSig = toNum(res.data.total) || null;
     // 不利结论可以显示得不好看，但不能被藏起来。
     const legacyBanner = banner({
       tone: (sigT !== null && Math.abs(sigT) < 2) ? 'warn' : 'bad',
       icon: 'alert',
       title: sigIc === null
-        ? '73 个手写信号：IC 未就绪（缺 /api/performance）'
-        : '73 个手写信号：Rank IC ' + num(sigIc, 4) +
+        ? '手写信号：IC 未就绪（缺 /api/performance）'
+        : (nSig === null ? '手写信号' : nSig + ' 个手写信号') + '：Rank IC ' + num(sigIc, 4) +
           '（HAC t ' + num(sigT, 2) + '，n=' + num(sigN, 0) + '）',
       text: '这是本项目的测量对象本身。上方 Alpha158+GBDT 是另一套并行模型，' +
         '池、区间、因子数都不同，<b>两者不可直接比较</b>；各自的样本量与口径见各自卡片。',
-      meta: '73 个信号 · 相关性调整后有效独立信号 ' +
-        (sigEff === null ? '—' : num(sigEff, 1)) + ' / 73 · 判定：' +
+      meta: (nSig === null ? '信号' : nSig + ' 个信号') + ' · 相关性调整后有效独立信号 ' +
+        (sigEff === null ? '—' : num(sigEff, 1)) + ' / ' + (nSig === null ? '—' : nSig) + ' · 判定：' +
         (sigIc === null ? '未就绪' : (Math.abs(sigT) < 2 ? '与 0 不可区分' : '显著'))
     });
 
@@ -2936,7 +2950,7 @@
     const label = mktLabel(mkt);
 
     const CUR_H = Number(S.paHorizon || 1);
-    const [sumRes, cfgRes, paperRes, tradesRes, autoRes, periodRes] = await Promise.all([
+    const [sumRes, cfgRes, paperRes, tradesRes, autoRes, periodRes, fillAuditRes] = await Promise.all([
       apiCached('/api/account/config', 0),
       apiCached('/api/account/config?market=' + mkt, 0),
       apiCached('/api/paper?market=' + mkt, 0),
@@ -2945,7 +2959,9 @@
         : Promise.resolve({ ok: true, data: { rows: [], n: 0 } }),
       apiCached('/api/paper/auto?market=' + mkt + '&by_horizon=1', 3000),
       apiCached('/api/paper/period?market=' + mkt + '&bucket=' +
-                (S.paBucket || 'day') + '&horizon=' + CUR_H, 3000)
+                (S.paBucket || 'day') + '&horizon=' + CUR_H, 3000),
+      // 决策 2A：成交口径必须显式标注（模拟盘=收盘、回测=次日开盘）
+      mkt === 'CN' ? apiCached('/api/fill_audit', 0) : Promise.resolve({ ok: false, data: null })
     ]);
 
     const summary = (sumRes.ok && sumRes.data) ? sumRes.data : null;
@@ -2955,6 +2971,21 @@
     const currency = (cfg && cfg.currency) || '';
     const paperData = paperForMarket(paperRes, mkt);
     const tag = label + (currency ? '（' + currency + '）' : '');
+    const fa = (fillAuditRes && fillAuditRes.ok) ? fillAuditRes.data : null;
+    // 决策 2A：口径差显式写在页面上，别让人以为模拟盘净值能和回测直接比。
+    const fillBasisNote = (mkt === 'CN')
+      ? banner({
+          tone: 'info', icon: 'info',
+          title: '成交价口径：模拟盘按当日收盘、回测按次日开盘',
+          text: '两者不是同一基准，净值不能直接对比。'
+            + (fa && fa.mean_gap_bps != null
+                ? '已归因 ' + (fa.n_attributed || 0) + ' 笔，平均口径差 ' +
+                  (fa.mean_gap_bps > 0 ? '+' : '') + fa.mean_gap_bps + ' bps/笔'
+                  + (fa.insufficient ? '（样本不足 30 笔，仅作参考）' : '') + '。'
+                : '成交口径审计尚未生成。'),
+          meta: '明细见 /api/fill_audit；切换成交模型需重算历史净值'
+        })
+      : '';
 
     let body = '';
     if (!paperData) {
@@ -3212,7 +3243,8 @@
           : '')
     });
 
-    return '<div style="margin-bottom:12px">' + marketTabsHtml(summary, mkt) + '</div>' +
+    return fillBasisNote +
+      '<div style="margin-bottom:12px">' + marketTabsHtml(summary, mkt) + '</div>' +
       '<div style="margin-bottom:14px">' + hzAccountCard + '</div>' +
       '<div style="margin-bottom:14px">' + autoCard + '</div>' +
       '<div style="margin-bottom:14px">' + acctCard + '</div>' +
@@ -3420,10 +3452,20 @@
     const impactCard = card({
       title: '影响因子表', sub: 'events.impact_factor 输出',
       body: impact.length ? table({
-        cols: Object.keys(impact[0]).slice(0, 7).map((k) => ({
-          label: k, key: k, num: toNum(impact[0][k]) !== null,
-          render: (r) => esc(fmtByKey(k, r[k]))
-        })),
+        // 显式列定义（R34）：原来 Object.keys(...).slice(0,7) 自动取列，
+        // 恰好把 p / insufficient / level 丢掉 —— n<30 的行看起来和结论一样。
+        cols: [
+          { label: '类型', key: 'type' },
+          { label: '板块', key: 'sector' },
+          { label: '周期', key: 'horizon', num: true },
+          { label: 'n', key: 'n', num: true },
+          { label: 'CAR', key: 'mean_car', num: true },
+          { label: 't', key: 't', num: true },
+          { label: 'p', key: 'p', num: true },
+          { label: '样本', key: 'insufficient',
+            render: (r) => (r.insufficient ? '<span class="tag warn">不足</span>'
+                                          : '<span class="tag hit">够</span>') }
+        ],
         rows: impact
       }) : emptyBox('暂无影响因子表',
         '需要 events.json 里带 <code>impact</code> 数组（type / sector / horizon / mean_car / t / n）。')

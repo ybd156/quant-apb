@@ -88,6 +88,11 @@ def _bare(code: str) -> str:
     return c
 
 
+def _force_closed() -> bool:
+    import os as _os
+    return str(_os.environ.get("APB_APPEND_FORCE", "0")).lower() in ("1", "true", "yes")
+
+
 def _fetch_recent(code: str, days: int = 8) -> Optional[pd.DataFrame]:
     """
     拉最近几天的日线（后复权）。
@@ -152,6 +157,18 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
     from . import qlib_data as QD
 
     day = target_day or date.today().isoformat()
+
+    # ---- 收盘门禁（评审 R43）----
+    # 盘中点一次"补数据"，东财 klt=101 会把**当日未收盘**的半根 bar 返回，
+    # 写进 overlay 之后它就成了"当日 K 线"，直到下一个数据包发布才自愈。
+    # 定时任务是 15:05 之后才跑，但手动入口（/api/data/append）没有人管。
+    if str(day) == date.today().isoformat():
+        _hm = datetime.now().hour * 60 + datetime.now().minute
+        if _hm < 15 * 60 + 5 and not _force_closed():
+            _write_state(ok=False, action="skipped", reason="market_not_closed",
+                         target=str(day))
+            return {"ok": False, "reason": "market_not_closed",
+                    "hint": "当日尚未收盘（<15:05），拒绝写入半根 bar；确需写入请设 APB_APPEND_FORCE=1"}
     cal = QD.load_calendar()
     if cal is None or len(cal) == 0:
         _write_state(ok=False, action="failed", reason="no_calendar", target="")
@@ -195,6 +212,16 @@ def append_day(target_day: Optional[str] = None, codes: Optional[List[str]] = No
             continue
         cur = rows.iloc[-1]
         prev = rows.iloc[-2]
+        # 量能校验：半根 bar 的成交量通常只有正常的 1/3 以下（陷阱 28 实测 52,770 vs 25–33 万）
+        try:
+            _v = [float(x) for x in rows["volume"].tolist()[:-1][-5:] if float(x) > 0]
+            if _v:
+                _med = sorted(_v)[len(_v) // 2]
+                if float(cur.get("volume") or 0) < 0.3 * _med:
+                    skipped_no_bar += 1
+                    continue
+        except Exception:  # noqa: BLE001
+            pass
         if str(pd.Timestamp(cur["date"]).date()) != day:
             skipped_no_bar += 1
             continue                      # 没有目标日的数据

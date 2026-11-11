@@ -131,5 +131,10 @@ jobs:
           python -m audit.basis_ic --codes 60   || echo "::warning::basis_ic 未能完成"
           python -m audit.pool_probe --codes 300 || echo "::warning::pool_probe 报出可疑项（见日志）"
 
+      # 发布闸门（评审 R42）：scripts/preflight.py 553 行、文档要求"每次改完必须跑"，
+      # 但 CI/Release 都没接。这里跑 --quick（跳过引擎重跑与测试套件，起服务打全部 GET）。
+      - name: 发布闸门（preflight --quick）
+        run: python scripts/preflight.py --quick
+
       - name: 导入自检
         run: python -c "import qcore, qcore.pipeline, qcore.live, qcore.brief, webui.server; print('import ok', qcore.__version__)"

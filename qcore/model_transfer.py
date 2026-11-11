@@ -90,10 +90,12 @@ def export_bundle(horizon: int = 1, out_path: Optional[str] = None) -> Dict:
         "horizon": int(horizon),
         "exported_at": _now(),
         "meta": meta,
+        "qa": (meta.get("qa") or {}),
         "env": {
             "python": f"{__import__('sys').version_info.major}."
                       f"{__import__('sys').version_info.minor}",
             "numpy": np.__version__,
+            "kit_version": _local_version(),
         },
     }
     out = out_path or os.path.join(
@@ -106,6 +108,7 @@ def export_bundle(horizon: int = 1, out_path: Optional[str] = None) -> Dict:
     return {"ok": True, "path": out, "horizon": int(horizon),
             "size_mb": round(os.path.getsize(out) / 1e6, 2),
             "meta": meta,
+        "qa": (meta.get("qa") or {}),
             "note": "拷到 NAS 后执行 python -m qcore.model_transfer --import <zip>"}
 
 
@@ -170,6 +173,77 @@ def _validate(model, meta: Dict, expected_features: Optional[int] = None) -> Dic
     return {"ok": not bad, "checks": checks,
             "reason": (bad[0]["check"] + ": " + bad[0]["detail"]) if bad else ""}
 
+
+
+def _local_version() -> str:
+    try:
+        with open(os.path.join(os.path.dirname(STATE), "..", "VERSION"), encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _vtuple(v: str):
+    try:
+        parts = [int(x) for x in str(v).strip().lstrip("v").split(".") if x.isdigit()]
+        return tuple(parts + [0] * (4 - len(parts)))[:4]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _admission(meta: Dict, manifest: Dict, horizon: int) -> Dict:
+    """准入三问（评审 R36/R40）：版本够新吗？训练数据够新吗？有质量证据吗？
+
+    - 版本：manifest.env.kit_version 不能低于本机 VERSION（更老的因子集不许覆盖）
+    - 训练截止：meta.train_end 不能早于当前部署模型（旧模型不许盖新模型）
+    - 质量：manifest.qa.holdout_ic 存在才采信；缺失标 `quality_unverified`（不阻断）
+    两条硬门都可用 APB_MODEL_ALLOW_OLD=1 绕过（自签却仍留痕）。
+    """
+    import os as _os
+    allow_old = str(_os.environ.get("APB_MODEL_ALLOW_OLD", "0")).lower() in ("1", "true", "yes")
+    checks = []
+
+    # ① 版本
+    kv = ((manifest or {}).get("env") or {}).get("kit_version") or ""
+    lv = _local_version()
+    ok_ver = True
+    detail = f"训练机 {kv or '未声明'} vs 本机 {lv or '未声明'}"
+    if kv and lv:
+        a, b = _vtuple(kv), _vtuple(lv)
+        ok_ver = (a is None or b is None or a >= b)
+        if not ok_ver and allow_old:
+            ok_ver = True
+            detail += "（APB_MODEL_ALLOW_OLD=1，已放行）"
+    checks.append({"check": "kit_version", "ok": ok_ver, "detail": detail})
+
+    # ② 训练截止
+    from . import live_model as LM
+    try:
+        _mp, _metap = LM._paths(int(horizon))
+        cur = json.load(open(_metap, encoding="utf-8")) if os.path.isfile(_metap) else {}
+    except Exception:  # noqa: BLE001
+        cur = {}
+    new_end = str((meta or {}).get("train_end") or "")[:10]
+    old_end = str((cur or {}).get("train_end") or "")[:10]
+    ok_end = True
+    detail2 = f"新模型 {new_end or '未声明'} vs 线上 {old_end or '无'}"
+    if new_end and old_end:
+        ok_end = new_end >= old_end
+        if not ok_end and allow_old:
+            ok_end = True
+            detail2 += "（APB_MODEL_ALLOW_OLD=1，已放行）"
+    checks.append({"check": "train_end", "ok": ok_end, "detail": detail2})
+
+    # ③ 质量证据（不阻断，只标注）
+    qa = (manifest or {}).get("qa") or {}
+    ic = qa.get("holdout_ic")
+    checks.append({"check": "quality_evidence",
+                   "ok": ic is not None,
+                   "detail": (f"holdout_ic={ic}" if ic is not None
+                              else "manifest 未带 qa.holdout_ic（无法证明比随机好）")})
+    return {"checks": checks,
+            "hard_ok": all(c["ok"] for c in checks if c["check"] != "quality_evidence"),
+            "quality_unverified": ic is None}
 
 def _expected_feature_count() -> Optional[int]:
     """当前代码产出的 Alpha158 因子数。取不到返回 None（不阻断）。"""
@@ -240,6 +314,13 @@ def import_bundle(src, horizon: Optional[int] = None,
 
     expect = _expected_feature_count()
     val = _validate(model, meta, expect)
+    adm = _admission(meta, manifest, h)
+    val["checks"] = (val.get("checks") or []) + adm["checks"]
+    val["quality_unverified"] = adm["quality_unverified"]
+    if val["ok"] and not adm["hard_ok"]:
+        bad = [c for c in adm["checks"] if not c["ok"] and c["check"] != "quality_evidence"]
+        val["ok"] = False
+        val["reason"] = (bad[0]["check"] + ": " + bad[0]["detail"]) if bad else "admission_failed"
     if not val["ok"]:
         return {"ok": False, "reason": "validation_failed",
                 "detail": val["reason"], "checks": val["checks"],
@@ -247,7 +328,8 @@ def import_bundle(src, horizon: Optional[int] = None,
 
     if dry_run:
         return {"ok": True, "dry_run": True, "horizon": h, "checks": val["checks"],
-                "meta": meta, "would_install": bool(install)}
+                "meta": meta,
+        "qa": (meta.get("qa") or {}), "would_install": bool(install)}
 
     if not install:
         return {"ok": True, "validated": True, "horizon": h, "checks": val["checks"]}
@@ -258,6 +340,7 @@ def import_bundle(src, horizon: Optional[int] = None,
     return {"ok": True, "installed": True, "horizon": h,
             "version": saved.get("version"), "checks": val["checks"],
             "meta": meta,
+        "qa": (meta.get("qa") or {}),
             "note": f"已安装为 horizon={h} 的模型，可用 /api/model/rollback 回滚"}
 
 

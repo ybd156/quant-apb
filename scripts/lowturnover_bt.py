@@ -34,12 +34,43 @@ bench = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bench)
 
 
+def pit_codes(universe: str = "csi300", start: str = "2008-01-01",
+              end: str = "2021-01-01") -> list:
+    """点对点成分：凡在 [start, end] 内**曾经**属于该指数的票都算进来。
+
+    为什么（评审 R4）：`universe_codes(start=test_start)` 只取"测试起点那一天"的成分，
+    于是训练期 2008–2019 的样本是"按 2021 年是否还在指数里"筛过的（未来条件选择）。
+    `pit_membership()` 本来就提供了逐段区间，这里只是把它接上。
+    """
+    from datetime import datetime as _dt
+    d0 = _dt.strptime(start[:10], "%Y-%m-%d").date()
+    d1 = _dt.strptime(end[:10], "%Y-%m-%d").date()
+    mem = QD.pit_membership(universe)
+    out = []
+    for code, spans in mem.items():
+        for (s0, s1) in spans:
+            a = s0.date() if hasattr(s0, "date") else s0
+            b = s1.date() if hasattr(s1, "date") else s1
+            if b >= d0 and a <= d1:
+                out.append(code)
+                break
+    return list(dict.fromkeys(out))
+
+
 def prepare(universe: str = "csi300", stocks: int = 300,
             train_end: str = "2019-12-31", test_start: str = "2021-01-01",
             test_end: str = "2026-11-06", horizon: int = 1,
-            trees: int = 250, verbose: bool = True):
-    """训练模型并返回测试期的分数、价格、日期。"""
-    codes = QD.universe_codes(universe, start=test_start)
+            trees: int = 250, verbose: bool = True, pit: bool = False):
+    """训练模型并返回测试期的分数、价格、日期。
+
+    pit=True 时用**点对点成分**（含期间调出/退市的票），避免用 2021 快照选 2008–2019 样本。
+    """
+    if pit:
+        codes = pit_codes(universe, start="2008-01-01", end=test_start)
+        if verbose:
+            print(f"  [pit] 点对点成分 {len(codes)} 只（2008–{test_start} 曾入选）", flush=True)
+    else:
+        codes = QD.universe_codes(universe, start=test_start)
     if verbose:
         print(f"  {universe} 成分股 {len(codes)} 只（{test_start} 时点）", flush=True)
     d = bench.build_features(codes, start="2008-01-01", horizon=horizon,

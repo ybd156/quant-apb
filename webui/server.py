@@ -587,6 +587,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_version()
         if path == "/api/behavior":
             return self._api_behavior()
+        if path == "/api/predictions_view":
+            # 决策 3 的 C 方案：四本账**只读合并**（不改写入方）
+            return self._api_predictions_view(query)
+        if path == "/api/ab_train":
+            d, e = _read_json("ab_train.json")
+            if e == "not_ready":
+                return self._fail("not_ready", 200, file="ab_train.json",
+                                  hint="由训练机跑 train_ab 任务后回传；"
+                                       "也可本机 python -m scripts.ab_train_pit")
+            return self._ok(d) if not e else self._fail(e, 200, file="ab_train.json")
+        if path == "/api/fill_audit":
+            # R22：模拟盘成交口径审计（close_T vs open_T+1）——只读 state
+            return self._api_fill_audit()
+        if path == "/api/train/plan":
+            return self._api_train_plan()
+        if path == "/api/autoinfo":
+            return self._api_autoinfo(query)
         if path == "/api/events":
             return self._api_events(query)
         if path == "/api/export":
@@ -855,6 +872,61 @@ class ApiHandler(BaseHTTPRequestHandler):
             "n_display_note": (f"已显示第 {offset + 1}–{offset + len(rows)} 行 / 共 {total} 行"
                                + ("（去重视图）" if use_dedup else "（原始台账，含历史重复）")),
         })
+
+    def _api_predictions_view(self, query):
+        """四本账只读视图（评审 R50 / 决策 3C）。INV-8：不在 server 里算指标。"""
+        try:
+            from qcore import pred_view as PV
+            q = query or {}
+            code = ((q.get("code") or [""])[0] or "").strip()
+            as_of = ((q.get("as_of") or [""])[0] or "").strip() or None
+            if code:
+                return self._ok(PV.lookup(code, as_of))
+            return self._ok(PV.summary())
+        except Exception as e:  # noqa: BLE001
+            return self._fail("pred_view_failed", 200, detail=str(e)[:160])
+
+    def _api_fill_audit(self):
+        """模拟盘成交口径审计（评审 R22）。INV-8：只读 JSON，不在这里算。"""
+        try:
+            import json as _json
+            p = STATE_DIR / "fill_audit.json"
+            if not p.is_file():
+                return self._fail("not_ready", 200, file="fill_audit.json",
+                                  hint="收盘后自动生成；也可手动 python -m qcore.fill_audit --run")
+            return self._ok(_json.loads(p.read_text(encoding="utf-8")))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("fill_audit_failed", 200, detail=str(e)[:160])
+
+    def _api_train_plan(self):
+        """训练任务调度器最近一次判断（只读）。INV-8：不在 server 里做判断。"""
+        try:
+            import json as _json
+            p = STATE_DIR / "train_plan.json"
+            if not p.is_file():
+                return self._fail("not_ready", 200, file="train_plan.json",
+                                  hint="先跑 python -m qcore.train_scheduler --plan")
+            return self._ok(_json.loads(p.read_text(encoding="utf-8")))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("train_plan_failed", 200, detail=str(e)[:160])
+
+    def _api_autoinfo(self, query=None):
+        """自主情报（只读）。INV-8：server 不采集、不打分，只转发 qcore 写好的产物。"""
+        try:
+            import json as _json
+            p = STATE_DIR / "autoinfo.json"
+            if not p.is_file():
+                return self._fail("not_ready", 200, file="autoinfo.json",
+                                  hint="先跑 python -m qcore.autoinfo --run")
+            d = _json.loads(p.read_text(encoding="utf-8"))
+            try:
+                from qcore import autoinfo as _A
+                d["summary"] = _A.summary()
+            except Exception:  # noqa: BLE001
+                pass
+            return self._ok(d)
+        except Exception as e:  # noqa: BLE001
+            return self._fail("autoinfo_failed", 200, detail=str(e)[:160])
 
     def _api_passthrough(self, key: str):
         data, sent = self._load_or_not_ready(key)
@@ -1151,7 +1223,29 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._fail("bad_schema", 200, file=name, hint="期望 JSON 对象")
         # 合并形态：{"model": {...}, "picks": [...], "factors": [...]}
         inner = data.get("model")
-        payload = inner if isinstance(inner, dict) else data
+        payload = dict(inner) if isinstance(inner, dict) else dict(data)
+
+        # 评审 R3：model.json 是"训练脚本导出的元信息"，**不等于** live_model 实际加载的模型。
+        # 这里把 data/model/meta*.json（真实部署）一并回传，并给出是否不一致。
+        try:
+            import json as _j
+            dep = {}
+            for fn in ("meta.json", "meta_h5.json"):
+                fp = self.__class__ and (STATE_DIR.parent / "model" / fn)
+                if fp.is_file():
+                    dep[fn] = _j.loads(fp.read_text(encoding="utf-8"))
+            payload["deployed"] = dep
+            m0 = dep.get("meta.json") or {}
+            same = (payload.get("n_trees") in (None, m0.get("n_trees"))
+                    and payload.get("n_stocks") in (None, m0.get("n_stocks")))
+            payload["deployed_mismatch"] = bool(dep) and not same
+            if payload["deployed_mismatch"]:
+                payload["deployed_note"] = (
+                    f"页面展示的是 {payload.get('n_trees')} 树 / {payload.get('n_stocks')} 只；"
+                    f"实际部署的是 {m0.get('n_trees')} 树 / {m0.get('n_stocks')} 只"
+                    f"（训练截止 {m0.get('train_end')}）")
+        except Exception as e:  # noqa: BLE001
+            payload["deployed_error"] = f"{type(e).__name__}: {str(e)[:60]}"
         return self._ok(payload)
 
     def _api_picks(self, query):
@@ -1340,17 +1434,24 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         # 新鲜度按**数据日期**算，不是按最后计算时间算
         age = _age_days(data_to) if data_to else _age_days(as_of)
+        # 计算层的新鲜度单独给（评审 R27）：顶栏只报行情日期时，
+        # "行情 11-10 / 算到 11-06"这种状态是看不出来的。
+        panel_age = _age_days(as_of)
         return self._ok({
             "ok": not missing,
             "as_of": as_of,          # 最后一次计算的时间点（保留原义）
             "data_to": data_to,      # 行情数据最后一天（UI 顶栏显示这个）
             "data_age_days": age,
+            "computed_as_of": as_of,
+            "panel_age_days": panel_age,
             "missing_files": missing,
             "files": files,
             "optional_files": optional,
             "events_fallback": optional_events_fallback,
             "source_health": source_health if isinstance(source_health, dict) else None,
             "invariants": invariants,
+            # 评审 R20：容器里门禁的退出码与 skip/fail 明细（start.sh 写入）
+            "invariants_health": _read_json("invariants_health.json")[0],
             "state_dir": str(STATE_DIR),
             "static_dir": str(STATIC_DIR),
             "run_enabled": ALLOW_RUN,
@@ -2172,11 +2273,13 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
         try:
-            if not force:
-                d = HS.load_snapshots(1)
-                if d and d[0].get("date"):
-                    return self._ok(d[0])
-            return self._ok(HS.analyze(verbose=False))
+            d = HS.load_snapshots(1)
+            if d and d[0].get("date"):
+                return self._ok(d[0])
+            # 评审 R29：不再在请求线程里联网现算（实测 6.95s）。
+            # 快照由收盘后的 `qcore.hotspot snapshot` 生成（start.sh §6.7）。
+            return self._fail("not_ready", 200, file="hotspot 快照",
+                              hint="收盘后自动生成；也可手动 python -m qcore.hotspot snapshot")
         except Exception as e:  # noqa: BLE001
             return self._fail("hotspot_failed", 200, detail=str(e)[:160])
 
@@ -2757,13 +2860,26 @@ f.addEventListener('submit',async(e)=>{
                 return None
             return self._fail("unauthorized", 403, hint="X-Token 与 APB_TOKEN 不匹配")
 
-        # 3) 内网兜底
+        # 3) 内网兜底（评审 R31：默认收紧）
+        #
+        # 旧行为：只要判定"内网"就放行。但 `is_internal` 完全依赖反代是否注 XFF；
+        # 反代漏配时，公网请求会被当成 127.0.0.1 → 重置模拟盘/导入状态/签发令牌全部敞开。
+        # 现在：**只有监听在本机回环**时才免 token；监听 0.0.0.0 需显式开开关。
         if not expected:
-            if self._is_internal():
+            allow = str(os.environ.get("APB_ALLOW_WRITE_NO_TOKEN", "0")).lower() in ("1", "true", "yes")
+            bound = ""
+            try:
+                bound = str((getattr(self.server, "server_address", None) or ("", 0))[0])
+            except Exception:  # noqa: BLE001
+                bound = ""
+            loopback = bound in ("127.0.0.1", "::1", "localhost", "")
+            if self._is_internal() and (loopback or allow):
                 return None
             client = self._real_ip()
             return self._fail("token_not_configured", 403,
-                              hint=f"未设 APB_TOKEN 时只允许内网操作（来源 {client}）")
+                              hint=(f"未设 APB_TOKEN 且服务监听 {bound or '非本机'}："
+                                    f"写接口默认关闭（来源 {client}）。"
+                                    "请设 APB_TOKEN 登录，或显式设 APB_ALLOW_WRITE_NO_TOKEN=1"))
         return self._fail("unauthorized", 403,
                           hint="需要登录，或带 X-Token（与 APB_TOKEN 一致）")
 
@@ -2928,9 +3044,21 @@ f.addEventListener('submit',async(e)=>{
             from qcore import sync as SY
         except Exception as e:  # noqa: BLE001
             return self._fail("import_error", 500, detail=str(e)[:160])
-        r = SY.report_task(str(tid), bool(body.get("ok")),
-                           detail=body.get("detail") or {},
+        _detail = body.get("detail") or {}
+        r = SY.report_task(str(tid), bool(body.get("ok")), detail=_detail,
                            worker=str(body.get("worker") or ""))
+        # 双轨复核（决策 1 的 C 方案）结果落到 NAS：训练机跑完 train_ab 后，
+        # 把 ab_train.json 原样带回来，这里存成 state，供 /api 与报告引用。
+        try:
+            _ab = None
+            if isinstance(_detail, dict):
+                _ab = _detail.get("ab_train") or (_detail.get("train_ab") or {}).get("ab_train")
+            if _ab:
+                _p = STATE_DIR / "ab_train.json"
+                _p.write_text(json.dumps(_ab, ensure_ascii=False, indent=1), encoding="utf-8")
+                r = {**r, "ab_train_saved": str(_p.name)}
+        except Exception as e:  # noqa: BLE001
+            r = {**r, "ab_train_save_error": f"{type(e).__name__}: {str(e)[:80]}"}
         return self._ok(r) if r.get("ok") else self._fail(r.get("reason", "failed"), 200)
 
     def _post_sync_push(self):

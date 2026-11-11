@@ -41,11 +41,11 @@ COPY webui/ ./webui/
 # scripts/ 里 benchmark_alpha158.py 是 live_model 和 watch 的依赖
 # （build_features 从这里加载），漏了它自选/训练都会 FileNotFoundError
 COPY scripts/ ./scripts/
-# 只带不变量检查需要的静态扫描器（15KB），不带测试目录
-COPY audit/leak_scan.py ./audit/
-# INV-1 无未来函数检验需要它（28KB）。夹具不进镜像 ——
-# 该检验优先用真实 qlib 数据，没有夹具时才退回夹具。
-COPY tests/test_no_lookahead.py ./tests/
+# 带整套 audit（探针脚本很小）—— 只带 leak_scan 会让 basis_probe/pool_probe
+# 在容器里"永远跑不了"，而 DIAGNOSIS 里写着可以跑（评审 R20）
+COPY audit/ ./audit/
+# 带整套 tests（评审 R20：只拷 1 个文件时，容器内门禁与 CI 跑的不是同一套）
+COPY tests/ ./tests/
 COPY tools/ ./tools/
 COPY docker/start.sh ./start.sh
 # 构建期就校验入口脚本语法。实测事故：python -c "..." 块里的反引号被 sh

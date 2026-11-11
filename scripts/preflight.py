@@ -143,7 +143,21 @@ def check_state() -> None:
         if not nev:
             rec("state.events", FAIL, "事件数为 0")
         elif not isinstance(imp, list) or not imp:
-            rec("state.impact", FAIL, "impact 表为空（事件研究未跑）")
+            # 空表有两种：①根本没跑；②跑了但上游缺数据（板块指数取不到）。
+            # 后者不该拦发版 —— 但**必须**有机器可读的原因，否则就是在偷偷放行。
+            meta, _e = {}, None
+            try:
+                with open(os.path.join(sd, "impact_meta.json"), encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+            except Exception:  # noqa: BLE001
+                meta = {}
+            reason = str(meta.get("reason") or "")
+            if reason:
+                rec("state.impact", WARN,
+                    f"impact 空表，原因已知：{reason}"
+                    f"（板块指数 {meta.get('sectors_from_index')}/{meta.get('sectors_requested')}）")
+            else:
+                rec("state.impact", FAIL, "impact 表为空且无 impact_meta.json（无法判断是没跑还是缺数据）")
         else:
             rec("state.impact", PASS, f"{nev} 个事件 / {len(imp)} 组影响因子")
     except Exception as e:  # noqa: BLE001

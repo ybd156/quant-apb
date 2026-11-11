@@ -112,6 +112,7 @@ def collect(horizon: int) -> Tuple[np.ndarray, np.ndarray, int]:
     xs: List[float] = []
     ys: List[float] = []
     used_days = 0
+    n_same_source = 0
     for r in rows:
         if r.get("status") != "done":
             continue
@@ -133,10 +134,18 @@ def collect(horizon: int) -> Tuple[np.ndarray, np.ndarray, int]:
                 continue
             xs.append(s)
             ys.append(rt)
+            n_same_source += 1
 
-    # 2) 周期台账样本不够时，并入主台账（pipeline 逐日重放产出的几千条）
-    # 主台账的周期归属由 ledger_meta.json 决定，不能乱套。
-    if len(xs) < MIN_SAMPLES:
+    # 2) 周期台账样本不够时 —— **不再并入主台账**（评审 R44）。
+    #
+    # 主台账 `ledger.json` 里的 score 是 **102 信号集成的加权投票分**（±0.7 量级），
+    # 而本模块 apply() 乘的是 **GBDT 原始分**（0.003 量级）。拿前者拟合 a、乘到后者身上，
+    # 等于用"另一个模型"的斜率去改这个模型的输出 —— 实测会把分数压成常数（差 2e-6）。
+    #
+    # 需要跨源样本时，必须先让两侧同源（predict 落盘的 score），而不是借用。
+    # 这里留一个显式开关，方便做 A/B，不默认开启。
+    _cross = str(os.environ.get("APB_CALIB_CROSS_SOURCE", "0")).lower() in ("1", "true", "yes")
+    if len(xs) < MIN_SAMPLES and _cross:
         try:
             from . import horizon_ledger as _HL
             if _HL._model_horizon() == int(horizon):
@@ -302,8 +311,17 @@ def apply(horizon: int, scores) -> Tuple[np.ndarray, Dict]:
     p = _params(d, int(horizon))
     if p["n_updates"] == 0:
         return arr, {"applied": False, "reason": "还没学过（n_updates=0）"}
-    out = p["a"] * arr + p["b"]
-    return out, {"applied": True, "a": round(p["a"], 6), "b": round(p["b"], 6),
+    a = float(p["a"])
+    if a <= 0 and str(os.environ.get("APB_CALIB_ALLOW_NEG_A", "0")).lower() not in ("1", "true", "yes"):
+        # a<=0 意味着"分数越高、收益越低"，套到新分数上就是把排序整体倒过来（评审 R17）。
+        # 没有统计证据支持反号时，一律不应用。
+        return arr, {"applied": False, "reason": "a_nonpositive",
+                     "a": round(a, 6), "b": round(p["b"], 6),
+                     "n_updates": p["n_updates"],
+                     "hint": "斜率非正，拒绝应用；确认要反向请设 APB_CALIB_ALLOW_NEG_A=1"}
+    out = a * arr + p["b"]
+    return out, {"applied": True, "a": round(a, 6), "b": round(p["b"], 6),
+                 "calib_inverted": bool(a < 0),
                  "n_updates": p["n_updates"], "updated_at": p["updated_at"]}
 
 

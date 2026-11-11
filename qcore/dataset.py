@@ -99,6 +99,85 @@ def _health_pick(need: str) -> Optional[str]:
         return None
 
 
+#: 与 code 无关的全局表（市场宽度、全市场事件）进程内缓存。
+#: 重要：`external_loader` 是**逐票**调用的（300 只），而这两张表是全市场共用。
+#: 不做缓存的话，300 次 `pd.read_csv(market_breadth.csv 650KB)` + 300 次
+#: 40KB jsonl 解析，会把一次 pipeline 从 ~100s 拖到十几分钟（实测）。
+_GLOBAL_CACHE = {"ts": 0.0, "breadth": None, "events": None}
+#: 「数据日 → 可用日」的 T+1 平移缓存。
+#: 每只票的事件表都有 4000+ 个日期，逐个调 `next_trading_day()` 是 4054 次
+#: 日历查询 × 300 只 = 120 万次（实测单票 1.6s，R54 的真凶）。
+#: 日期在各票之间是重复的，缓存后单票只剩 dict 查找。
+_SHIFT_CACHE: Dict[str, object] = {}
+_GLOBAL_TTL = 60.0
+
+
+def _global_frames():
+    import time as _t
+    now = _t.time()
+    if _GLOBAL_CACHE["ts"] and (now - _GLOBAL_CACHE["ts"]) < _GLOBAL_TTL:
+        return _GLOBAL_CACHE["breadth"], _GLOBAL_CACHE["events"]
+    breadth = events = None
+    try:
+        from . import market_breadth as MB
+        bw = MB.load()
+        if bw is not None and len(bw):
+            bw = bw.copy()
+            bw["date"] = pd.to_datetime(bw["date"]).dt.normalize()
+            breadth = bw[["date", "breadth_z", "up_ratio"]]
+    except Exception:  # noqa: BLE001
+        breadth = None
+    try:
+        from . import sentiment_store as SS
+        ev = SS.load_events("")
+        if ev is not None and len(ev):
+            ev = ev.copy()
+            ev["date"] = pd.to_datetime(ev["date"]).dt.normalize()
+            events = ev
+    except Exception:  # noqa: BLE001
+        events = None
+    _GLOBAL_CACHE.update({"ts": now, "breadth": breadth, "events": events})
+    return breadth, events
+
+
+
+def _merge_on_date(frames):
+    """按 date 做外连接（numpy 版）。
+
+    为什么不用 `pd.merge(..., how="outer")`：`external_loader` 是**逐票**调用，
+    每票都要把 4–5 张表合并一遍，pandas 的 merge 会排序+哈希+重排索引，
+    实测 120 只票 6.2s → >120s（评审 R54）。
+    这里改成"日期取并集 + searchsorted 定位"，语义不变（每日期一行、缺值 NaN），
+    但只做一次排序与一次并集。
+    """
+    import numpy as np
+
+    parts = {}
+    for f in frames:
+        if f is None or not len(f) or "date" not in f.columns:
+            continue
+        days = pd.to_datetime(f["date"]).dt.normalize().to_numpy()
+        days = days.astype("datetime64[D]").astype(np.int64)
+        _u, idx = np.unique(days, return_index=True)       # 同一天多行时保留第一行
+        for c in f.columns:
+            if c == "date":
+                continue
+            try:
+                vals = pd.to_numeric(f[c], errors="coerce").to_numpy(dtype=np.float64)[idx]
+            except Exception:  # noqa: BLE001
+                continue
+            parts[str(c)] = (_u, vals)
+    if not parts:
+        return None
+    all_days = np.unique(np.concatenate([d for d, _ in parts.values()]))
+    out = {"date": pd.to_datetime(all_days.astype("datetime64[D]"))}
+    for c, (d, v) in parts.items():
+        arr = np.full(all_days.size, np.nan, dtype=np.float64)
+        arr[np.searchsorted(all_days, d)] = v
+        out[c] = arr
+    return pd.DataFrame(out)
+
+
 def external_loader(code: str, cache_only: bool = True):
     """把「资金流 + 事件」合并成一张按日索引的外部数据表，供 compute_signals 用。
 
@@ -157,8 +236,15 @@ def external_loader(code: str, cache_only: bool = True):
                 _d = pd.to_datetime(e["date"]).dt.normalize()
                 try:
                     from . import calendar_cn as _CAL
-                    _shift = {d: pd.Timestamp(_CAL.next_trading_day(d.date()))
-                              for d in _d.dropna().unique()}
+                    _shift = {}
+                    for d in _d.dropna().unique():
+                        _ts = pd.Timestamp(d)
+                        _k = str(_ts.date())
+                        _v = _SHIFT_CACHE.get(_k)
+                        if _v is None:
+                            _v = pd.Timestamp(_CAL.next_trading_day(_ts.date()))
+                            _SHIFT_CACHE[_k] = _v
+                        _shift[_ts] = _v
                     e = e.copy()
                     e["date"] = _d.map(_shift)
                 except Exception:  # noqa: BLE001
@@ -177,38 +263,25 @@ def external_loader(code: str, cache_only: bool = True):
             frames.append(sn)
     except Exception:  # noqa: BLE001
         pass
-    # 市场宽度：全市场共用同一序列（从本地 300 只日线自算，1991 起全历史）
-    try:
-        from . import market_breadth as MB
-        bw = MB.load()
-        if bw is not None and len(bw):
-            bw = bw.copy()
-            bw["date"] = pd.to_datetime(bw["date"]).dt.normalize()
-            frames.append(bw[["date", "breadth_z", "up_ratio"]])
-    except Exception:  # noqa: BLE001
-        pass
-    # 政策/新闻事件：全市场事件对所有票生效（板块级过滤需要板块映射，暂不猜）
-    try:
-        from . import sentiment_store as SS
-        ev = SS.load_events(code)
-        if ev is not None and len(ev):
-            ev = ev.copy()
-            ev["date"] = pd.to_datetime(ev["date"]).dt.normalize()
-            frames.append(ev)
-    except Exception:  # noqa: BLE001
-        pass
+    # 市场宽度 + 全市场事件：与 code 无关 → 走进程内缓存，绝不逐票重读
+    _bw, _ev = _global_frames()
+    if _bw is not None:
+        frames.append(_bw)
+    # 政策/新闻事件：同一张全局表（缓存），仍按 code 与板块过滤
+    if _ev is not None:
+        frames.append(_ev)
     if not frames:
         return None
-    out = frames[0]
-    for f in frames[1:]:
-        out = pd.merge(out, f, on="date", how="outer")
-    out = out.sort_values("date").reset_index(drop=True)
+    out = _merge_on_date(frames)
+    if out is None:
+        return None
     # 把实际选用的数据源挂到 attrs，便于事后审计「这批数字是哪来的」
     out.attrs["sources"] = src
     return out
 
 
 def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
+                  signal_warmup: Optional[int] = None,
                   extra_horizons: Optional[List[int]] = None,
                   exec_lag: int = 1, str_dtype: str = "uint8", n_univ: int = 100,
                   chunk: int = 25, cutoff: Optional[str] = None,
@@ -351,14 +424,30 @@ def build_dataset(codes: List[str], start: str = "2013-01-01", horizon: int = 5,
                 _extra = extra_loader(code)
             except Exception:  # noqa: BLE001
                 _extra = None
+        # 预热裁剪（评审 R48）：`build_panel(clip=False)` 保留上市以来全部历史，
+        # 于是每只票都按 6000+ 根算信号 —— 而引擎只读 start 之后的行。
+        # 传 signal_warmup=W 时只保留「start 前 W 根 + start 之后全部」：
+        # 由 tools/signal_warmup_probe 实测，W=400 时结果与全量**逐位相等**。
+        # 每票独立守卫：start 之前的行数不足 W 就不裁（否则预热不够，信号不可信）。
+        _dfs = df
+        if signal_warmup:
+            try:
+                _n_from = int((df["date"] < pd.Timestamp(start)).sum())
+                _w = int(signal_warmup)
+                if _n_from >= _w:
+                    _dfs = df.iloc[_n_from - _w:].reset_index(drop=True)
+            except Exception:  # noqa: BLE001
+                _dfs = df
         try:
-            dir_df, str_df = compute_signals(df, flow_df=_extra)
+            dir_df, str_df = compute_signals(_dfs, flow_df=_extra)
         except Exception as e:  # noqa: BLE001
             if verbose:
                 print(f"  [signal-fail] {code}: {e}")
             continue
-        pos = np.searchsorted(dates, df["date"].to_numpy(), side="left")
-        ok = (pos < T) & (dates[np.clip(pos, 0, T - 1)] == df["date"].to_numpy())
+        # 映射必须用**裁剪后**的 _dfs：dir_df 只有 _dfs 那些行，
+        # 拿全量 df 的日期做掩码会 shape 不匹配（实测 IndexError 8515 vs 3761）。
+        pos = np.searchsorted(dates, _dfs["date"].to_numpy(), side="left")
+        ok = (pos < T) & (dates[np.clip(pos, 0, T - 1)] == _dfs["date"].to_numpy())
         pos = pos[ok]
         if len(pos) == 0:
             continue

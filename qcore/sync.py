@@ -70,6 +70,56 @@ def _atomic(path: str, obj) -> None:
     os.replace(tmp, path)
 
 
+class _FileLock:
+    """跨平台独占锁（Windows msvcrt / POSIX fcntl）。
+
+    为什么要：claim/create 都是 load→改→save，NAS 是 ThreadingHTTPServer，
+    两台训练机同时轮询会**两台领到同一任务**，更糟的是 create 与 claim 交错时
+    新任务会被旧快照覆盖（评审 R41）。锁只护住这几毫秒的临界区。
+    """
+
+    def __init__(self, path: str, timeout: float = 5.0):
+        self.path = path + ".lock"
+        self.timeout = timeout
+        self.fh = None
+
+    def __enter__(self):
+        import time as _t
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self.fh = open(self.path, "a+")
+        t0 = _t.time()
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(self.fh.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(self.fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except Exception:  # noqa: BLE001
+                if (_t.time() - t0) > self.timeout:
+                    return self          # 超时降级为"无锁"，不能让队列卡死
+                _t.sleep(0.05)
+
+    def __exit__(self, *exc):
+        try:
+            if os.name == "nt":
+                import msvcrt
+                self.fh.seek(0)
+                msvcrt.locking(self.fh.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self.fh.fileno(), fcntl.LOCK_UN)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.fh.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+
 def _load() -> Dict:
     try:
         with open(TASKS, encoding="utf-8") as f:
@@ -134,6 +184,11 @@ def create_task(horizons: List[int], trees: int = 250, stocks: int = 300,
     为什么要有 pipeline：102 个信号的完整回测在本机要几分钟到几十分钟，
     而训练机本来就是干重活的 —— 把它外包出去，NAS 只负责取数与展示。
     """
+    with _FileLock(TASKS):
+        return _create_task_locked(horizons, trees, stocks, note, created_by, job, params)
+
+
+def _create_task_locked(horizons, trees, stocks, note, created_by, job, params) -> Dict:
     d = _load()
     _expire(d)
     tid = uuid.uuid4().hex[:12]
@@ -198,6 +253,11 @@ def set_progress(task_id: str, phase: str = "", horizon=None, done=None,
 
 def claim_task(worker: str = "unknown") -> Dict:
     """领一个待办任务（FIFO）。没有就返回 pending=0。"""
+    with _FileLock(TASKS):
+        return _claim_task_locked(worker)
+
+
+def _claim_task_locked(worker: str) -> Dict:
     d = _load()
     _expire(d)
     for t in d.get("tasks", []):

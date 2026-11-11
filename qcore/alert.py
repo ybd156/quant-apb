@@ -291,6 +291,36 @@ def rule_slippage_high() -> List[Dict]:
     return []
 
 
+def rule_panel_lag() -> List[Dict]:
+    """面板落后于行情（评审 R14）：数据到了 11-10、模型只算到 11-06。
+
+    只看两个日期，不做任何计算：`data_sync.local_date()` 是行情最后一天，
+    `status.as_of` 是最后一次算到的行情日。
+    """
+    try:
+        from . import data_sync as DS
+        d_to = DS.local_date()
+    except Exception:  # noqa: BLE001
+        return []
+    st = _read_json(_p("status")) or {}
+    as_of = st.get("as_of")
+    if not d_to or not as_of or str(as_of)[:10] >= str(d_to)[:10]:
+        return []
+    try:
+        from . import calendar_cn as CAL
+        d0 = _dt.date.fromisoformat(str(as_of)[:10]); d1 = _dt.date.fromisoformat(str(d_to)[:10])
+        n, cur = 0, d0
+        while cur < d1 and n < 60:
+            cur = CAL.next_trading_day(cur); n += 1
+    except Exception:  # noqa: BLE001
+        n = 0
+    if n <= 0:
+        return []
+    return [_alert("warn", "panel_lag",
+                   f"面板落后行情 {n} 个交易日（算到 {as_of} / 行情到 {d_to}）",
+                   lag_trading_days=n, as_of=str(as_of), data_to=str(d_to))]
+
+
 def rule_drawdown() -> List[Dict]:
     """
     规则 6（附加）· drawdown —— 模拟盘/实盘回撤超阈值。
@@ -327,6 +357,7 @@ def rule_drawdown() -> List[Dict]:
 
 # (key, 函数) —— 顺序即输出顺序（同一 level 内按此排）
 RULES: List[Tuple[str, Callable[[], List[Dict]]]] = [
+    ("panel_lag", rule_panel_lag),
     ("source_down", rule_source_down),      # crit 排最前：数据源挂了，其他结论都不可信
     ("model_stale", rule_model_stale),
     ("picks_stale", rule_picks_stale),

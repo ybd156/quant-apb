@@ -68,6 +68,8 @@ def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--universe", default="csi300")
+    ap.add_argument("--pit", action="store_true",
+                    help="用点对点成分训练（避免用测试起点快照选历史样本，评审 R4）")
     ap.add_argument("--stocks", type=int, default=300)
     ap.add_argument("--trees", type=int, default=250)
     ap.add_argument("--top-k", type=int, default=30)
@@ -89,7 +91,8 @@ def main(argv=None) -> int:
     from qcore import bt as BT
 
     print(f"训练 {a.universe} / 截至 {a.train_end} / {a.trees} 棵 ...", flush=True)
-    d = ltb.prepare(a.universe, a.stocks, train_end=a.train_end, trees=a.trees)
+    d = ltb.prepare(a.universe, a.stocks, train_end=a.train_end, trees=a.trees,
+                    pit=bool(getattr(a, "pit", False)))
     if d is None:
         print("准备失败")
         return 1
@@ -187,8 +190,12 @@ def main(argv=None) -> int:
         },
     })
 
+    # 注意（R12）：这份 picks 与 `live_model` 写的是**同一个文件**，
+    # 但语义不同（这里是"模型分排序"，那里是"今日名单"）。
+    # 必须补齐 market / horizon / decision_source，否则 paper_auto 会拒单或串市场。
     _write("picks.json", {
         "as_of": str(dates[-1].date()), "rows": rows, "n": len(rows),
+        "market": "CN", "horizon": 1, "decision_source": "gbdt_export",
         "top_k": a.top_k, "hold_days": a.hold_days, "band": a.band,
         "note": "按 GBDT 分数排序；held=true 表示上一期已在推荐中（缓冲带内不动）",
     })

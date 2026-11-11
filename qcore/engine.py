@@ -145,7 +145,11 @@ def run_walkforward(p3d: Panel3D, cfg: RunConfig = RunConfig(),
                 if active.any():
                     y_m = np.where(act_m, y_all, 0.0)
                     payoff[active] = y_m.sum(axis=0)[active] / cnt[active]
-                w_engine.update(int(p3d.REGIME[s]), active, payoff)
+                # 样本级幂等（R45）：已经学过的样本日直接跳过。
+                # 没有这道门，`live --loop` 每小时会把同一批到期样本再学一遍。
+                if not w_engine.seen(str(p3d.dates[s])[:10]):
+                    w_engine.update(int(p3d.REGIME[s]), active, payoff)
+                    w_engine.mark_learned(str(p3d.dates[s])[:10])
 
     diag = w_engine.diagnostics()
     # 对外统一为 (N,T) 朝向（与 SPEC v1.0 / metrics / backtest 一致）；
