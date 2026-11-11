@@ -97,6 +97,12 @@ rm -rf "$KIT/runtime" 2>/dev/null || true
 # 国内装 numpy+pandas 常要 5-20 分钟，且可能失败。
 # 把 wheel 打进套件后，用户端是纯本地安装，几秒完成。
 # 版本锁死到和开发环境一致（numpy 2.3.5 / pandas 3.0.1），保证行为一致。
+#
+# **必须同时带 pip / setuptools / wheel**：Python 3.12 移除了 distutils，
+# 而镜像上的 get-pip.py 是老版本、仍 import distutils —— 实测
+# `ModuleNotFoundError: No module named 'distutils'`，整个 bootstrap 失败。
+# pip 本身是纯 Python，把它的 wheel 直接铺进 site-packages 就能用，
+# 完全不需要联网、也不需要 get-pip。
 WHEEL_CACHE="$ROOT/.wheel-cache"
 mkdir -p "$WHEEL_CACHE"
 if ! ls "$WHEEL_CACHE"/numpy-*.whl >/dev/null 2>&1; then
@@ -110,10 +116,10 @@ if ! ls "$WHEEL_CACHE"/numpy-*.whl >/dev/null 2>&1; then
       --python-version 3.12 --platform win_amd64 --implementation cp --abi cp312 \
       --dest "$WHEEL_CACHE" \
       -i https://pypi.tuna.tsinghua.edu.cn/simple \
-      "numpy==2.3.5" "pandas==3.0.1" >/dev/null 2>&1 || \
+      "numpy==2.3.5" "pandas==3.0.1" "pip" "setuptools" "wheel" >/dev/null 2>&1 || \
     "$PYBIN" -m pip download --only-binary=:all: \
       --python-version 3.12 --platform win_amd64 --implementation cp --abi cp312 \
-      --dest "$WHEEL_CACHE" "numpy==2.3.5" "pandas==3.0.1" >/dev/null 2>&1 || true
+      --dest "$WHEEL_CACHE" "numpy==2.3.5" "pandas==3.0.1" "pip" "setuptools" "wheel" >/dev/null 2>&1 || true
   fi
 fi
 

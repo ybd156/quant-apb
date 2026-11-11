@@ -46,11 +46,87 @@ function Invoke-Py {
     }
 }
 
+# Proxy handling: do NOT pre-judge. Try as configured; only bypass on failure.
+#
+# Why not probe first: measured on a real machine, a proxy at 127.0.0.1:10808
+# answered an Invoke-WebRequest through it, but git and curl both failed
+# through the same endpoint (protocol mismatch: it speaks SOCKS, not HTTP).
+# Any pre-flight test can be right for one client and wrong for another, so
+# the only trustworthy signal is "did the real operation succeed".
+#
+# Machines without a proxy are unaffected: the fallback simply never fires.
+function Clear-ProxyEnv {
+    $names = @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy')
+    $had = @()
+    foreach ($n in $names) {
+        $v = [Environment]::GetEnvironmentVariable($n)
+        if ($v) { $had += "$n=$v"; [Environment]::SetEnvironmentVariable($n, $null) }
+    }
+    return $had
+}
+
+function Restore-ProxyEnv($saved) {
+    if (-not $saved) { return }
+    foreach ($item in $saved) {
+        $i = $item.IndexOf('=')
+        if ($i -gt 0) {
+            [Environment]::SetEnvironmentVariable($item.Substring(0, $i),
+                                                  $item.Substring($i + 1))
+        }
+    }
+}
+
+# Public downloader: try as configured, and on failure bypass the proxy once.
+# Call sites keep using Get-Remote -- the fallback is invisible to them.
+function Get-Remote($urls, $out, $what, $minBytes = 1000) {
+    try {
+        Get-RemoteCore $urls $out $what $minBytes
+        return
+    } catch {
+        $saved = Clear-ProxyEnv
+        if (-not $saved) { throw }
+        Warn2 "$what failed with the configured proxy -- retrying without it"
+        try {
+            Get-RemoteCore $urls $out $what $minBytes
+            Ok "$what succeeded after bypassing the proxy"
+        } catch {
+            Restore-ProxyEnv $saved
+            throw
+        }
+    }
+}
+
+$script:LogPath = Join-Path $Root 'logs\ootstrap.log'
+
+function Log-Lines($text) {
+    try {
+        $dir = Split-Path -Parent $script:LogPath
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Add-Content -Path $script:LogPath -Value $text -Encoding UTF8
+    } catch { }
+}
+
+# Run python and CAPTURE the output so a failure can show the real reason.
+function Invoke-PyLogged {
+    param([string[]]$PyArgs)
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $PyExe @PyArgs 2>&1 | Out-String
+        $rc = $LASTEXITCODE
+        Log-Lines ("`$ python " + ($PyArgs -join ' ') + "  -> rc=$rc")
+        Log-Lines $out
+        return @{ rc = $rc; out = $out }
+    } finally {
+        $ErrorActionPreference = $prev
+    }
+}
+
 function Step($m) { Write-Host "  [..] $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "  [OK] $m" -ForegroundColor Green }
 function Warn2($m){ Write-Host "  [!!] $m" -ForegroundColor Yellow }
 
-function Get-Remote($urls, $out, $what, $minBytes = 1000) {
+function Get-RemoteCore($urls, $out, $what, $minBytes = 1000) {
     # $urls may be a single string or an array (multi-mirror fallback).
     # python.org is often 1-2 MB/s from China; huaweicloud hits 3.5+ MB/s,
     # so the China mirrors are tried first.
@@ -150,12 +226,105 @@ if ($pipRc -ne 0) {
         ) $getpip 'pip installer' 100000
     }
     Step "Installing pip ..."
-    $rc = Invoke-Py -PyArgs @($getpip,'--no-warn-script-location','--disable-pip-version-check')
-    if ($rc -ne 0) { throw "pip installation failed" }
-    Ok "pip installed"
+    # get-pip downloads pip/setuptools/wheel from an index. Default to a
+    # domestic mirror (overridable via APB_PIP_INDEX) because the official
+    # index is unreachable from many networks -- but do not assume it works:
+    # try, then retry with pypi.org, then retry with the proxy bypassed.
+    $idx = $env:APB_PIP_INDEX
+    if (-not $idx) { $idx = 'https://mirrors.aliyun.com/pypi/simple' }
+    $r = Invoke-PyLogged -PyArgs @($getpip, '--no-warn-script-location',
+                                   '--disable-pip-version-check', '--index-url', $idx)
+    if ($r.rc -ne 0) {
+        Warn2 "pip install via $idx failed, retrying with pypi.org ..."
+        $r = Invoke-PyLogged -PyArgs @($getpip, '--no-warn-script-location',
+                                       '--disable-pip-version-check')
+    }
+    if ($r.rc -ne 0) {
+        $savedProxy = Clear-ProxyEnv
+        if ($savedProxy) {
+            Warn2 "still failing -- retrying with the configured proxy bypassed"
+            $r = Invoke-PyLogged -PyArgs @($getpip, '--no-warn-script-location',
+                                           '--disable-pip-version-check',
+                                           '--index-url', $idx)
+            if ($r.rc -ne 0) { Restore-ProxyEnv $savedProxy }
+        }
+    }
+    if ($r.rc -ne 0) {
+        # get-pip on Python 3.12 can fail with "No module named 'distutils'"
+        # (3.12 removed distutils and older pip builds still import it --
+        # measured against the aliyun mirror). pip itself is pure Python,
+        # so bundled pip/setuptools/wheel wheels can simply be unpacked.
+        $wheelDir0 = Join-Path $Root 'wheels'
+        $pipWhls = @()
+        if (Test-Path $wheelDir0) {
+            $pipWhls = Get-ChildItem -Path $wheelDir0 -Filter '*.whl' -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -match '^(pip|setuptools|wheel)-' }
+        }
+        if ($pipWhls.Count -gt 0) {
+            Step "get-pip failed -> unpacking bundled pip wheels ($($pipWhls.Count))"
+            $site0 = Join-Path $PyDir 'Lib\site-packages'
+            New-Item -ItemType Directory -Path $site0 -Force | Out-Null
+            Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+            foreach ($w in $pipWhls) {
+                try {
+                    [System.IO.Compression.ZipFile]::ExtractToDirectory($w.FullName, $site0)
+                } catch {
+                    Warn2 ("unpack failed: " + $w.Name + " -> " + $_.Exception.Message)
+                }
+            }
+            $chk = Invoke-PyLogged -PyArgs @('-m','pip','--version')
+            if ($chk.rc -eq 0) {
+                $r = $chk
+                Ok "pip installed from bundled wheels (offline)"
+            }
+        }
+    }
+    if ($r.rc -ne 0) {
+        # Do NOT just throw: show the last lines of the real output.
+        Warn2 "pip installation failed. Last output:"
+        $tail = ($r.out -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 12
+        foreach ($line in $tail) { Write-Host ("        " + $line) -ForegroundColor DarkGray }
+        Warn2 "Full log: $script:LogPath"
+        $script:NoPip = $true
+    } else {
+        Ok "pip installed"
+    }
 }
 
 # ---------------------------------------------------------------- 4. numpy / pandas
+# If pip could not be installed, wheels can still be unpacked by hand:
+# a .whl is a zip, and the .pyd/.dll files inside land exactly where
+# site-packages expects them. That makes the kit usable on a network
+# where pip cannot reach any index at all.
+if ($script:NoPip) {
+    $wheelDir = Join-Path $Root 'wheels'
+    $whls = @()
+    if (Test-Path $wheelDir) {
+        $whls = Get-ChildItem -Path $wheelDir -Filter '*.whl' -ErrorAction SilentlyContinue
+    }
+    if ($whls.Count -gt 0) {
+        Step "pip unavailable -> unpacking $($whls.Count) wheels directly"
+        $site = Join-Path $PyDir 'Lib\site-packages'
+        New-Item -ItemType Directory -Path $site -Force | Out-Null
+        $unpacked = 0
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+        foreach ($w in $whls) {
+            try {
+                # Expand-Archive REFUSES files whose extension is not .zip
+                # ("only .zip archives are supported" -- measured). A .whl IS
+                # a zip, so use ZipFile directly.
+                [System.IO.Compression.ZipFile]::ExtractToDirectory($w.FullName, $site)
+                $unpacked++
+            } catch {
+                Warn2 ("unpack failed: " + $w.Name + " -> " + $_.Exception.Message)
+            }
+        }
+        Ok "unpacked $unpacked / $($whls.Count) wheels into site-packages"
+    } else {
+        Warn2 "no wheels to unpack and no pip -- cannot install numpy/pandas"
+    }
+}
+
 $depRc = Invoke-Py -PyArgs @('-c','import numpy,pandas') -Quiet
 if ($depRc -ne 0) {
     # Bundled wheels first: installing from local files takes a few seconds,

@@ -153,6 +153,36 @@ def main() -> int:
         check(f"kit_menu 支持 {cmd}", f'"{cmd}"' in menu)
     check("kit_menu 强制 UTF-8 输出", "reconfigure(encoding=\"utf-8\"" in menu)
 
+    print(chr(10) + "[5b] 便携运行时引导（bootstrap.ps1）")
+
+    def t_bootstrap():
+        bp = os.path.join(ROOT, "tools", "bootstrap.ps1")
+        assert os.path.isfile(bp), "bootstrap.ps1 不存在"
+        raw = open(bp, "rb").read()
+        # 陷阱 14：ps1 必须纯 ASCII + CRLF + 无控制字符（ 会被写成 0x08）
+        assert all(b < 0x80 for b in raw), "ps1 含非 ASCII（中文会被 ANSI 读成乱码）"
+        ctrl = [b for b in raw if b < 0x09 or 0x0b <= b <= 0x0c or 0x0e <= b <= 0x1f]
+        assert not ctrl, f"ps1 含控制字符 {ctrl[:3]}（ 被转成了 0x08）"
+        assert bytes([13, 10]) in raw, "ps1 不是 CRLF"
+        src = raw.decode("utf-8")
+        # get-pip 在 3.12 上会因 distutils 失败，必须有离线兜底
+        assert "ZipFile" in src, "没有用 ZipFile 解 wheel（Expand-Archive 不认 .whl）"
+        assert "pip wheels" in src or "bundled pip" in src, "没有 pip wheel 离线兜底"
+        assert "Clear-ProxyEnv" in src, "没有代理绕过兜底"
+        # 不能预先无条件清代理（别的机器可能没有代理）
+        assert "Resolve-ProxyEnv" not in src, "还在用预探测代理（已证明不可靠）"
+        return "ASCII+CRLF+无控制字符，含 ZipFile / pip wheel / 代理兜底"
+    check("bootstrap.ps1 契约", t_bootstrap)
+
+    def t_kit_wheels():
+        bs2 = open(os.path.join(ROOT, "scripts", "build-train-kit.sh"),
+                   encoding="utf-8").read()
+        # 必须把 pip/setuptools/wheel 也打进套件，否则 3.12 上 get-pip 失败就无解
+        assert '"pip" "setuptools" "wheel"' in bs2, "构建脚本没带 pip/setuptools/wheel"
+        return "构建脚本包含 pip/setuptools/wheel"
+    check("套件自带 pip wheel", t_kit_wheels)
+
+    print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print("\n[6] 构建脚本只保留一个根入口")
     bs = open(os.path.join(ROOT, "scripts", "build-train-kit.sh"),
               encoding="utf-8").read()
