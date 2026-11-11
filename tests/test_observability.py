@@ -182,6 +182,32 @@ def main() -> int:
         return "构建脚本包含 pip/setuptools/wheel"
     check("套件自带 pip wheel", t_kit_wheels)
 
+    print(chr(10) + "[5c] train.bat 必须能修复半成品运行时")
+
+    def t_trainbat():
+        tb = os.path.join(ROOT, "train.bat")
+        assert os.path.isfile(tb), "train.bat 不存在"
+        raw = open(tb, "rb").read()
+        assert all(b < 0x80 for b in raw), "train.bat 必须纯 ASCII"
+        ctrl = [b for b in raw if b < 0x09 or 0x0b <= b <= 0x0c or 0x0e <= b <= 0x1f]
+        assert not ctrl, "train.bat 含控制字符"
+        assert bytes([13, 10]) in raw, "train.bat 不是 CRLF"
+        src = raw.decode("utf-8")
+        # 关键：不能只看 python.exe 存不存在就认定运行时可用。
+        # 实测：bootstrap 失败会留下有 python.exe、没有 pip 的运行时，
+        # 老逻辑直接跳过修复，永远卡在 "No module named pip"。
+        assert "PYOK" in src, "没有验证运行时可用性（只看 python.exe 存在）"
+        assert 'import numpy, pandas' in src, "没有用 import 验证依赖"
+        # 依赖缺失时要先走自带 wheel，再考虑联网
+        assert "--find-links wheels" in src, "没有优先用自带 wheel"
+        # pip 缺失要能触发修复
+        assert "pip is missing, repairing" in src, "pip 缺失时没有修复路径"
+        # 结尾不能再教用户跑已删除的 daemon.bat
+        assert "daemon.bat" not in src, "train.bat 还在提 daemon.bat"
+        return "验证 numpy/pandas 可用 + wheel 优先 + pip 缺失自动修复"
+    check("train.bat 运行时契约", t_trainbat)
+
+    print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print("\n[6] 构建脚本只保留一个根入口")
     bs = open(os.path.join(ROOT, "scripts", "build-train-kit.sh"),

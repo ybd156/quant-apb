@@ -16,16 +16,31 @@ python --version >nul 2>nul && set "PY=python"
 if not defined PY ( py -3 --version >nul 2>nul && set "PY=py -3" )
 
 rem ---------- 2. bundled portable runtime ----------
-if not defined PY if exist "runtime\python\python.exe" set "PY=runtime\python\python.exe"
+rem IMPORTANT: "python.exe exists" does NOT mean the runtime works.
+rem A failed bootstrap leaves python.exe behind with no pip and no numpy --
+rem then this check would skip the repair forever (measured: the kit got
+rem stuck on "No module named pip" and could never recover).
+rem So verify it can actually import what training needs.
+set "PYOK="
+if exist "runtime\python\python.exe" (
+    set "PY=runtime\python\python.exe"
+    %PY% -c "import numpy, pandas" >nul 2>nul
+    if not errorlevel 1 set "PYOK=1"
+)
 
-rem ---------- 3. bootstrap portable runtime ----------
-if not defined PY (
-    echo [..] No Python found on this machine.
+rem ---------- 3. bootstrap (also repairs a half-built runtime) ----------
+if not defined PYOK (
+    echo [..] No usable Python found on this machine.
     echo [..] Setting up a portable runtime inside this folder ^(no install, ~50MB^).
+    echo [..] If a previous attempt failed, this will repair it.
     echo.
     powershell -NoProfile -ExecutionPolicy Bypass -File "tools\bootstrap.ps1"
-    if errorlevel 1 goto BOOTFAIL
     if exist "runtime\python\python.exe" set "PY=runtime\python\python.exe"
+    if exist "runtime\python\python.exe" (
+        %PY% -c "import numpy, pandas" >nul 2>nul
+        if not errorlevel 1 set "PYOK=1"
+    )
+    if not defined PYOK goto BOOTFAIL
 )
 
 if not defined PY goto NOPYTHON
@@ -41,7 +56,22 @@ rem ---------- 5. dependencies ----------
 %PY% -c "import numpy, pandas" >nul 2>nul
 if errorlevel 1 (
     echo [..] Installing numpy / pandas ...
-    %PY% -m pip install --quiet --disable-pip-version-check numpy pandas
+    rem Bundled wheels first: no network needed, takes seconds.
+    if exist "wheels" (
+        %PY% -m pip install --quiet --disable-pip-version-check --no-index --find-links wheels numpy pandas >nul 2>nul
+    )
+    %PY% -c "import numpy, pandas" >nul 2>nul
+    if errorlevel 1 (
+        rem pip itself may be missing (half-built runtime) -- repair via bootstrap
+        %PY% -m pip --version >nul 2>nul
+        if errorlevel 1 (
+            echo [..] pip is missing, repairing the runtime ...
+            powershell -NoProfile -ExecutionPolicy Bypass -File "tools\bootstrap.ps1"
+        ) else (
+            %PY% -m pip install --quiet --disable-pip-version-check numpy pandas
+        )
+    )
+    %PY% -c "import numpy, pandas" >nul 2>nul
     if errorlevel 1 goto NODEP
 )
 
@@ -56,7 +86,7 @@ echo ============================================================
 echo   Done. Models were uploaded to your NAS automatically.
 echo.
 echo   Want this machine to keep working as a training worker?
-echo   Run daemon.bat instead - it stays online and picks up tasks.
+echo   Run APB.bat and pick 2 - it stays online and picks up tasks.
 echo   (This window ran a one-time training.)
 echo   If the network was down, find the fallback zip in dist\models\
 echo ============================================================
