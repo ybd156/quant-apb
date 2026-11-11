@@ -106,6 +106,57 @@ def cfg_ready(cfg: dict) -> bool:
                      or str(cfg.get("password") or "").strip()))
 
 
+def redeem_pair(text: str) -> dict:
+    """用授权链接/授权码向 NAS 换令牌，并写进 apb_defaults.json。"""
+    sys.path.insert(0, ROOT)
+    from qcore import pairing as PR
+    parsed = PR.parse_link(text)
+    if not parsed.get("ok"):
+        return {"ok": False, "reason": parsed.get("reason"),
+                "hint": parsed.get("hint") or "需要形如 K7M2-QP4R 的 8 位授权码"}
+    nas, code = parsed.get("nas") or "", parsed["code"]
+    if not nas:
+        cfg = load_cfg()
+        nas = str(cfg.get("nas") or "").rstrip("/")
+    if not nas:
+        return {"ok": False, "reason": "need_nas",
+                "hint": "只给了授权码，缺 NAS 地址：请用完整链接，或先填一次 NAS 地址"}
+
+    import urllib.request
+    payload = json.dumps({"code": code}).encode()
+    req = urllib.request.Request(nas.rstrip("/") + "/api/pair/redeem", data=payload,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": "network", "detail": f"{type(e).__name__}: {e}"}
+    if not d.get("ok"):
+        # 服务端的错误形态是 {"ok":false,"error":"already_used","hint":...}
+        # （_fail 把 code 放在 error 字段里），不要去找不存在的 reason。
+        _err = d.get("error")
+        if isinstance(_err, dict):
+            _err = _err.get("code")
+        return {"ok": False, "reason": str(_err or d.get("reason") or "redeem_failed"),
+                "hint": str(d.get("hint") or d.get("detail") or "")}
+    data = d.get("data") or {}
+    tok = str(data.get("token") or "")
+    if not tok:
+        return {"ok": False, "reason": "no_token_in_response"}
+    try:
+        with open(DEFAULTS, "w", encoding="utf-8") as f:
+            json.dump({"nas": nas, "token": tok,
+                       "paired_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "paired_code": code}, f, ensure_ascii=False, indent=1)
+        try:
+            os.chmod(DEFAULTS, 0o600)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": "save_failed", "detail": str(e)[:120]}
+    return {"ok": True, "nas": nas, "token_prefix": tok[:12], "code": code}
+
+
 def do_setup() -> int:
     """就地跑配置向导（终端版）。返回码直接透传。"""
     say("  没有找到可用配置 → 启动配置向导（填 NAS 地址 + 令牌，测通才保存）")
@@ -151,6 +202,8 @@ def main(argv=None) -> int:
     ap.add_argument("--once", action="store_true", help="领一个任务就退出（不常驻）")
     ap.add_argument("--no-daemon", action="store_true", help="前台常驻（日志直接打印）")
     ap.add_argument("--data", action="store_true", help="显式触发数据包下载（545MB）")
+    ap.add_argument("--pair", default="", metavar="LINK_OR_CODE",
+                    help="用授权链接/授权码一步配置（NAS 上生成，一次性）")
     a = ap.parse_args(argv)
 
     total = 5 if not a.check else 2
@@ -175,6 +228,13 @@ def main(argv=None) -> int:
 
     # 2) 配置
     step(2, total, "训练机配置")
+    if a.pair:
+        say(f"  用授权码配置：{a.pair[:40]}{'…' if len(a.pair) > 40 else ''}")
+        r = redeem_pair(a.pair)
+        if not r.get("ok"):
+            say(f"  兑换失败：{r.get('reason')}  {r.get('hint') or r.get('detail') or ''}")
+            return 5
+        say(f"  已配置 NAS {r['nas']}（令牌 {r['token_prefix']}…）")
     cfg = load_cfg()
     if not cfg_ready(cfg):
         rc = do_setup()

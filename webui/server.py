@@ -587,6 +587,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             return self._api_version()
         if path == "/api/behavior":
             return self._api_behavior()
+        if path == "/api/pair":
+            return self._api_pair_list()
         if path == "/api/predictions_view":
             # 决策 3 的 C 方案：四本账**只读合并**（不改写入方）
             return self._api_predictions_view(query)
@@ -872,6 +874,56 @@ class ApiHandler(BaseHTTPRequestHandler):
             "n_display_note": (f"已显示第 {offset + 1}–{offset + len(rows)} 行 / 共 {total} 行"
                                + ("（去重视图）" if use_dedup else "（原始台账，含历史重复）")),
         })
+
+    def _api_pair_list(self):
+        """GET /api/pair —— 生效中的授权码（不含明文下载能力，只给状态）。"""
+        denied = self._sync_auth(allow_session=True)
+        if denied:
+            return denied
+        try:
+            from qcore import pairing as PR
+            return self._ok({**PR.list_codes(include_used=False), **PR.summary()})
+        except Exception as e:  # noqa: BLE001
+            return self._fail("pair_list_failed", 200, detail=str(e)[:120])
+
+    def _post_pair_code(self):
+        """POST /api/pair/code —— 生成授权码 + 授权链接（需登录/令牌）。"""
+        denied = self._sync_auth(allow_session=True)
+        if denied:
+            return denied
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        try:
+            from qcore import pairing as PR
+            nas = str(body.get("nas") or "").strip()
+            if not nas:
+                # 用请求的 Host 推一个默认地址（用户多半就是从 NAS 网页点进来的）
+                host = self.headers.get("Host") or "127.0.0.1"
+                scheme = "https" if self.headers.get("X-Forwarded-Proto") == "https" else "http"
+                nas = f"{scheme}://{host}"
+            return self._ok(PR.create(nas=nas, ttl_min=int(body.get("ttl_min") or 30),
+                                      label=str(body.get("label") or "")))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("pair_create_failed", 200, detail=str(e)[:120])
+
+    def _post_pair_redeem(self):
+        """POST /api/pair/redeem —— 训练机用授权码换令牌。**不需要预先鉴权**（码就是凭据）。"""
+        body, err = self._read_body()
+        if err:
+            return self._fail(err, 400)
+        body = body if isinstance(body, dict) else {}
+        try:
+            from qcore import pairing as PR
+            ip = (self.headers.get("X-Forwarded-For") or
+                  (self.client_address[0] if self.client_address else "")) or ""
+            r = PR.redeem(str(body.get("code") or ""), ip=ip[:64])
+            return self._ok(r) if r.get("ok") else self._fail(
+                r.get("reason", "redeem_failed"), 200,
+                hint=r.get("hint"), used_at=r.get("used_at"), expires_at=r.get("expires_at"))
+        except Exception as e:  # noqa: BLE001
+            return self._fail("pair_redeem_failed", 200, detail=str(e)[:120])
 
     def _api_predictions_view(self, query):
         """四本账只读视图（评审 R50 / 决策 3C）。INV-8：不在 server 里算指标。"""
@@ -3308,6 +3360,10 @@ f.addEventListener('submit',async(e)=>{
             return self._api_logout()
         if path == "/api/tokens":
             return self._post_tokens()
+        if path == "/api/pair/code":
+            return self._post_pair_code()
+        if path == "/api/pair/redeem":
+            return self._post_pair_redeem()
         if path == "/api/sync/task":
             return self._post_sync_task()
         if path == "/api/sync/progress":

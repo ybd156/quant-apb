@@ -105,6 +105,7 @@ Python ≥ 3.10。禁止引入 scipy / sklearn / talib / requests。
 | `qcore/autoinfo.py` | 自主情报：从持仓/推荐/自选选 subject → 查新闻 → 打分 → 登记可证伪判断 | `data/state/autoinfo.json`、`data/autoinfo/` |
 | `qcore/event_history.py` | 历史事件参照库（18 条），用本地沪深300 现算真实 CAR；给情报打分提供先验 | `data/state/event_history.json` |
 | `qcore/intel_features.py` | 情报侧信道：把新闻+历史参照压成 [-1,1] 情报分，排位融合进模型分（`APB_INTEL_W`，默认 0） | 无 |
+| `qcore/pairing.py` | **训练机配对**：一次性授权码 + 授权链接（30 分钟 TTL、限速、兑换即签发令牌） | `data/state/pair_codes.json` |
 | `qcore/pred_view.py` | **四本账只读合并视图**（ledger/picks/trades/claims 并列，每行带 source+basis，不合并写入） | 无（只读） |
 | `qcore/fill_audit.py` | **成交口径审计**：模拟盘按 close_T 成交、回测按 open_T+1，逐笔记 gap_bps | `data/state/fill_audit.json` |
 | `qcore/claims.py` | 判断台账（先登记后验证） | `data/claims/` |

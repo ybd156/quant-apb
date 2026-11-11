@@ -3994,6 +3994,81 @@
         '</div>' +
       '</div>') : '';
 
+    // 授权配对（授权链接 + 授权码）：训练机一步配置，不用手抄 NAS 地址和令牌。
+
+    const pairCard = card({
+
+      title: '训练机配对（授权链接 + 授权码）',
+
+      sub: '生成一次性的链接/码，训练机跑 APB.bat auto --pair "<链接>" 即可配置好',
+
+      body: '<div id="pair-box">' +
+
+        '<p class="muted">码是一次性的、默认 30 分钟后过期；兑换后 NAS 会自动签发一个 ' +
+
+        '<code>sync+write</code> 令牌。别把链接发到公开频道。</p>' +
+
+        '<button type="button" class="btn btn-primary" id="btn-pair-new">生成授权链接</button>' +
+
+        '<div id="pair-out" style="margin-top:10px"></div></div>'
+
+    });
+
+
+    setTimeout(() => {
+
+      const b = $('#btn-pair-new');
+
+      if (!b) return;
+
+      b.onclick = async () => {
+
+        b.disabled = true;
+
+        const out = $('#pair-out');
+
+        out.innerHTML = '<span class="muted">生成中…</span>';
+
+        const r = await api('/api/pair/code', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+
+        b.disabled = false;
+
+        if (!r || !r.ok) {
+
+          out.innerHTML = '<span class="down-text">生成失败：' +
+
+            esc((r && (r.error || r.reason)) || '未知错误') + '</span>';
+
+          return;
+
+        }
+
+        const d = r.data || {};
+
+        out.innerHTML =
+
+          '<div class="kv"><span>授权码</span><span style="font-family:monospace;font-size:18px">' +
+
+          esc(d.code) + '</span></div>' +
+
+          '<div class="kv"><span>授权链接</span><span style="word-break:break-all">' +
+
+          esc(d.primary_link) + '</span></div>' +
+
+          '<div class="kv"><span>到期</span><span>' + esc(d.expires_at) + '</span></div>' +
+
+          '<p class="muted" style="margin-top:8px">在训练机上跑：<br>' +
+
+          '<code>' + esc(d.cli) + '</code></p>';
+
+      };
+
+    }, 0);
+
+
     const tokenCard = card({
       title: '访问令牌', sub: '给每台训练机 / 外部集成单独发一把，可单独吊销',
       tools: '<button type="button" class="btn ghost sm" id="tk-showrev">' +
@@ -4088,6 +4163,7 @@
       '<div style="margin-bottom:14px">' + updateCard(u) + '</div>' +
       '<div style="margin-bottom:14px">' + feeCard + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + authCard + autoCard + '</div>' +
+      '<div style="margin-bottom:14px">' + pairCard + '</div>' +
       '<div style="margin-bottom:14px">' + tokenCard + '</div>' +
       '<div style="margin-bottom:14px">' + trainCard + '</div>' +
       '<div class="grid two" style="margin-bottom:14px">' + runCard + exportCard + '</div>' +
