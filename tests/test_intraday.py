@@ -73,6 +73,34 @@ def _redirect_paths(tmp: str):
     I._ensure_dirs()
 
 
+
+def _synthetic_session():
+    """合成一段完整分钟会话，供「拿不到真实数据」的路径复用。
+
+    ## 为什么必须注入**突发尖峰**而不是连续放量
+
+    `i_vol_burst_15` 的判据是「本根量 / 前 15 根均量 > 2.5」。
+    如果连续 15 根一起放大，前 15 根均值也跟着放大，比值始终≈1，
+    信号一次都不触发 —— 于是被误判成「死信号」。
+
+    这个坑有两处合成数据都会踩（无网络路径 / 会话未收盘路径），
+    所以抽成一个函数，避免只改一处、另一处继续红。
+    """
+    idx = pd.date_range("2026-11-06 09:31", "2026-11-06 15:00", freq="1min")
+    rng = np.random.default_rng(0)
+    px = 100 * np.cumprod(1 + rng.normal(0, 0.0004, len(idx)))
+    vol = rng.integers(100, 5000, len(idx)).astype(float)
+    # 短促尖峰（2-3 根），前后都是常态量，量比才会 > 2.5
+    vol[60:63] *= 12.0
+    vol[150:152] *= 10.0
+    px[60:63] *= 1.004
+    px[150:152] *= 0.996
+    return pd.DataFrame({
+        "datetime": idx, "open": px, "close": px,
+        "high": px * 1.0005, "low": px * 0.9995,
+        "volume": vol, "amount": px * vol * 100.0})
+
+
 def main() -> int:
     print("=" * 78)
     print("tests/test_intraday.py :: intraday forward-test module")
@@ -90,14 +118,7 @@ def main() -> int:
     if not frames:
         # 完全拿不到数据时，用合成数据把逻辑跑通，并明确标注
         print(f"  [WARN] no network minute data ({net_err}) -> use synthetic bars")
-        idx = pd.date_range("2026-11-06 09:31", "2026-11-06 15:00", freq="1min")
-        rng = np.random.default_rng(0)
-        px = 100 * np.cumprod(1 + rng.normal(0, 0.0004, len(idx)))
-        frames = {"600519": pd.DataFrame({
-            "datetime": idx, "open": px, "close": px,
-            "high": px * 1.0005, "low": px * 0.9995,
-            "volume": rng.integers(100, 5000, len(idx)).astype(float),
-            "amount": px * rng.integers(100, 5000, len(idx)) * 100.0})}
+        frames = {"600519": _synthetic_session()}
 
     df = frames[CODES[0]] if CODES[0] in frames else list(frames.values())[0]
 
@@ -124,27 +145,7 @@ def main() -> int:
     # 会话不完整时，下游（信号/截断/记账）需要完整数据，改用合成会话跑逻辑
     if not _complete:
         print("  [WARN] 当前会话未收盘 -> 下游改用合成完整会话（逻辑照测，数据非真实）")
-        idx = pd.date_range("2026-11-06 09:31", "2026-11-06 15:00", freq="1min")
-        rng = np.random.default_rng(0)
-        px = 100 * np.cumprod(1 + rng.normal(0, 0.0004, len(idx)))
-        vol = rng.integers(100, 5000, len(idx)).astype(float)
-        # 注入**突发尖峰**（不是连续放量）。
-        #
-        # i_vol_burst_15 的判据是「本根量 / 前 15 根均量 > 2.5」。
-        # 原来注入的是连续 15 根 ×6 —— 前 15 根均值也跟着涨到 6 倍，
-        # 比值始终≈1，信号一次都不触发，于是被误判成「死信号」。
-        # CI 上没有真实分钟数据、只能走这条合成路径，于是必红
-        # （实测：`no dead signal :: dead signals: ['i_vol_burst_15']`）。
-        #
-        # 正确做法：短促的 2-3 根尖峰，前后都是常态量，比值才会 >2.5。
-        vol[60:63] *= 12.0     # 开盘后第一波
-        vol[150:152] *= 10.0   # 午后一波
-        px[60:63] *= 1.004
-        px[150:152] *= 0.996
-        frames = {"600519": pd.DataFrame({
-            "datetime": idx, "open": px, "close": px,
-            "high": px * 1.0005, "low": px * 0.9995,
-            "volume": vol, "amount": px * vol * 100.0})}
+        frames = {"600519": _synthetic_session()}
         df = frames["600519"]
 
     # ---------------- 2. 信号 ----------------
