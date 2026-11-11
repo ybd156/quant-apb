@@ -1,5 +1,6 @@
 # 数据与产物（体积大 / 可再生）
 data/raw/
+data/realtime/
 data/cache/
 data/pred_ledger/
 data/state/

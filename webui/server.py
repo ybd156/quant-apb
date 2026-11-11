@@ -1505,6 +1505,23 @@ class ApiHandler(BaseHTTPRequestHandler):
                             if _os.path.isfile(fp):
                                 tf.add(fp, arcname=f"qlib_bin/{sub}/{fn}")
                                 n_files += 1
+                # 1.5) overlay —— 当日补充数据，**必须一起打**。
+                #
+                # 外部 qlib 包的日历通常滞后一两个交易日（实测 11-06），
+                # `daily_append` 把 11-09/11-10 的行情写成
+                # `data/qlib/overlay/*.json`，`qlib_data` 在**读取时**追加。
+                #
+                # 但打包只打 qlib_bin 的话，overlay 就丢了 —— 训练机拿到的是
+                # 11-06，而 NAS 的 /api/data/version 说自己是 11-10。
+                # 用户看到「数据就绪: 2026-11-06」和后台的 11-10 对不上，
+                # 以为同步坏了（实测）。overlay 很小（几百 KB），一起打没有代价。
+                _ov = PROJECT_ROOT / "data" / "qlib" / "overlay"
+                if _ov.is_dir():
+                    for fn in sorted(_os.listdir(str(_ov))):
+                        fp = _os.path.join(str(_ov), fn)
+                        if _os.path.isfile(fp) and fn.endswith(".json"):
+                            tf.add(fp, arcname=f"overlay/{fn}")
+                            n_files += 1
                 # 2) features 只要池内的
                 feat = _os.path.join(src_root, "features")
                 if _os.path.isdir(feat):

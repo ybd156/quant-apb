@@ -40,6 +40,9 @@ LIVE_MAX_AGE="${APB_LIVE_MAX_AGE_DAYS:-7}"
 ENABLE_RETRAIN="${APB_RETRAIN:-0}"
 ENABLE_DATA_SYNC="${APB_DATA_SYNC:-1}"
 ENABLE_DAILY_BAR="${APB_DAILY_BAR:-1}"
+# 收盘后补完 K 线，再用新数据重算 pipeline（performance/picks 才会更新）。
+# 默认开：没有它，overlay 更新了但 performance.json 永远停在旧日期。
+ENABLE_PIPELINE="${APB_PIPELINE:-1}"
 ENABLE_HEALTH="${APB_HEALTH:-1}"
 HEALTH_INTERVAL="${APB_HEALTH_INTERVAL:-21600}"
 ENABLE_ALERT="${APB_ALERT:-1}"
@@ -430,6 +433,58 @@ else:
             sleep 1800
         done
     ) &
+
+# 5.17) 补完当日 K 线后**立刻重算 pipeline**
+#
+# 这一步之前完全缺失（实测）：
+#   daily_append 把 11-09/11-10 写进 overlay，数据日期确实变成 11-10，
+#   但 performance.json 的 dataset.end 还停在 11-09、picks 停在 11-09，
+#   而 start.sh 里**没有任何 pipeline 定时任务**。
+#   于是「数据更新了」和「下游产物更新了」是两件互不相干的事，
+#   界面上看到的就是「数据全部有问题」（用户原话）。
+#
+# 收盘后跑一次，低优先级；失败只记日志，不影响服务。
+if [ "$ENABLE_PIPELINE" != "0" ]; then
+    (
+        sleep 600
+        while true; do
+            python -c "
+from datetime import datetime
+now = datetime.now()
+hm = now.hour * 60 + now.minute
+if now.weekday() >= 5:
+    print('[pipeline] 周末跳过')
+elif not (15*60+20 <= hm <= 18*60):
+    print('[pipeline] 非收盘后时段，跳过')
+else:
+    from qcore.core import dates as D
+    from qcore import store
+    st = store.read_json('status', default={}) or {}
+    eff = D.effective()
+    done = str(st.get('pipeline_data_to') or '')
+    if done and eff and done >= eff:
+        print('[pipeline] 数据', eff, '已重算过，跳过')
+    else:
+        print('[pipeline] 数据', eff, '尚未重算，开始')
+        store.write_json('status', dict(st, pipeline_started_at=datetime.now().astimezone().isoformat(timespec='seconds')))
+        import subprocess, sys
+        rc = subprocess.call([sys.executable, '-m', 'qcore.pipeline',
+                              '--pool', '300', '--start', '2013-01-01'])
+        st2 = store.read_json('status', default={}) or {}
+        if rc == 0:
+            st2['pipeline_data_to'] = eff
+            st2['pipeline_finished_at'] = datetime.now().astimezone().isoformat(timespec='seconds')
+            print('[pipeline] 完成，已记录 data_to =', eff)
+        else:
+            st2['pipeline_failed_at'] = datetime.now().astimezone().isoformat(timespec='seconds')
+            print('[pipeline] 失败 rc=', rc)
+        store.write_json('status', st2)
+" 2>&1 | tail -8 || true
+            sleep 3600
+        done
+    ) &
+    PIDS="$PIDS $!"
+fi
     PIDS="$PIDS $!"
 fi
 
