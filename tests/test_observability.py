@@ -161,6 +161,15 @@ def main() -> int:
           'cp "$ROOT/start_agent_hidden.vbs" "$KIT/"' not in bs)
     check("不再打包 setup.bat 到根",
           'cp "$ROOT/setup.bat" "$KIT/"' not in bs)
+    check("不再打包 train.sh（Windows 套件用不上）",
+          'cp "$ROOT/train.bat" "$ROOT/train.sh"' not in bs)
+    check("不再打包 daemon.bat",
+          'cp "$ROOT/daemon.bat"' not in bs)
+    # README 不能再教用户点已经不存在的脚本
+    readme = bs[bs.index("README-训练机.md"):] if "README-训练机.md" in bs else ""
+    check("README 教的是 APB.bat", "APB.bat" in readme)
+    check("README 不再教用户双击 daemon.bat",
+          "双击 `daemon.bat`" not in readme)
 
     print("\n[7] 负控：这些检查器真的会失败")
     check("set_progress 对空 id 不报成功", SY.set_progress("", phase="x").get("ok") is False)

@@ -72,9 +72,12 @@ cp "$ROOT/scripts/benchmark_alpha158.py" "$KIT/scripts/"
 cp "$ROOT/requirements.txt" "$KIT/"
 cp "$ROOT/VERSION" "$KIT/"
 cp "$ROOT/LICENSE" "$KIT/" 2>/dev/null || true
-cp "$ROOT/train.bat" "$ROOT/train.sh" "$KIT/"
+# 只带 train.bat（Windows 引导）。train.sh 是 Linux 用的，
+# 而这个套件是 Windows 专用的（wheels 是 win_amd64）——
+# 多一个用不上的脚本只会增加「不知点哪个」的困惑。
+cp "$ROOT/train.bat" "$KIT/"
 # daemon.bat 是 NAS/常驻侧的东西，训练机不需要（拷过去只会让人困惑）
-chmod +x "$KIT/train.sh" 2>/dev/null || true
+chmod +x "$KIT/train.bat" 2>/dev/null || true
 
 # ---------- 1.5 构建后校验：这个套件能不能承接所有任务 ----------
 if [ -f "$KIT/tools/kit_selftest.py" ]; then
@@ -146,36 +149,62 @@ cat > "$KIT/README-训练机.md" <<'MD'
 
 ---
 
-## 三步开始
+## 只有一个入口：APB.bat
 
-### Windows
+双击 **`APB.bat`**，它会先显示这台机器的状态，再给你一个菜单：
 
-**训练一次**：双击 `train.bat`
-
-**当成常驻训练机**（推荐）：双击 `daemon.bat`
-
-区别：
-| | train.bat | daemon.bat |
-|---|---|---|
-| 跑一次就退出 | ✅ | ❌ |
-| 自动领 NAS 任务 | ❌ | ✅ |
-| 自动检查更新 | ❌ | ✅ |
-| 适合 | 手动补训一个周期 | 长期挂着当训练机 |
-
-`daemon.bat` 会一直运行，每 60 秒问一次 NAS 有没有新任务。
-窗口关掉就停 —— 想让它后台跑，用「任务计划程序」或直接最小化。
-
-### Linux / macOS
-
-```bash
-bash train.sh
+```
+==============================================================
+  APB 训练机状态
+==============================================================
+  版本         0.32.1
+  依赖         numpy 2.3.5 / pandas 3.0.1
+  鉴权         已配令牌
+  数据         2026-11-10
+  守护进程     运行中（PID 1234，心跳 5s 前）
+  ────────────────────────────────────────────────────────────
+   1  配置（填 NAS 地址 / 令牌）           setup
+   2  启动后台运行（无窗口，推荐）          start
+   3  停止                                  stop
+   4  刷新状态                              status
+   5  立即训练一次（前台，能看到过程）       train
+   6  自检（能否承接所有任务）              selftest
+   7  检查更新                              update
+   0  退出
 ```
 
-第一次运行会自动：
-1. 检查 Python / numpy / pandas（缺了会提示装）
-2. 下载行情数据（约 545MB，解压 3.7GB）
-3. 训练 5 个周期（T+1 / T+3 / 1周 / 2周 / 15天）
-4. 打包成 `dist/models/apb_models_<日期>.zip`
+### 第一次用，只做两步
+
+1. 双击 `APB.bat` → 选 **1**，填令牌（从 NAS「设置 → 访问令牌」复制）
+   - 窗口里点「测试连接」，通了再保存
+2. 再双击 `APB.bat` → 选 **2**，后台跑起来
+
+之后想看在干嘛，随时双击 `APB.bat`，最上面就是状态。
+
+### 也可以用命令行
+
+```
+APB.bat status     只看状态
+APB.bat start      后台启动
+APB.bat stop       停止
+APB.bat setup      配置
+APB.bat train      前台训练一次
+APB.bat selftest   自检能不能承接所有任务
+```
+
+### 后台运行是什么意思
+
+选 **2** 之后没有任何窗口，守护进程会：
+
+- 每 60 秒问一次 NAS 有没有新任务，有就领
+- 训练时**逐周期回报进度**（NAS 网页上能看到「h5 · 1/2 · 约2分」）
+- 训完自动上传，不用手动打包
+- 服务端有新版本就自动更新并重启自己
+- 崩了按 10s→300s 退避重拉
+- 日志在 `logs/agent.log`，超过 5MB 自动轮转
+
+> 这是 Windows 套件（`wheels/` 是 win_amd64）。Linux/macOS 请直接用仓库里的
+> `python tools/train_one_click.py`。
 
 ---
 
@@ -235,8 +264,8 @@ python tools/train_one_click.py --dry-run           # 只检查环境
 
 ```
 apb-train-kit/
-├─ train.bat / train.sh        训练一次
-├─ daemon.bat                  常驻训练机（推荐长期用）
+├─ APB.bat                     **唯一入口**（状态 + 菜单）
+├─ train.bat                   首次引导（生成便携运行时）
 ├─ tools/
 │   ├─ train_one_click.py      训练主程序
 │   └─ sync_agent.py           自动领任务 + 上传

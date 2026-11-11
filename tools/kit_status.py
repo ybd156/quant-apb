@@ -82,7 +82,7 @@ def collect(no_net: bool = False) -> dict:
     out["auth"] = ("token" if token else ("password" if password else "none"))
     if not token and not password:
         out["problems"].append("没配令牌也没配密码 —— 上传会 login_required，"
-                               "双击 setup.bat 填一下")
+                               "双击 APB.bat 选「1 配置」填一下")
 
     # ---- 依赖 ----
     deps = {}
@@ -186,7 +186,7 @@ def render(s: dict) -> str:
     auth = s.get("auth")
     row("鉴权", {"token": "已配令牌", "password": "已配密码",
                  "none": "**没配**（上传会失败）"}.get(auth, str(auth)),
-        "" if auth in ("token", "password") else "  ← 双击 setup.bat")
+        "" if auth in ("token", "password") else "  ← 双击 APB.bat 选 1")
     row("数据", s.get("data_date") or "未知")
     if s.get("server_data_date"):
         row("服务端数据", s["server_data_date"])
