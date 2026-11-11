@@ -1303,6 +1303,25 @@ class ApiHandler(BaseHTTPRequestHandler):
         status, _err = _read_json(STATE_FILES["status"])
         as_of = status.get("as_of") if isinstance(status, dict) else None
 
+        # 「数据到哪天」不等于「最后一次算到哪天」。
+        #
+        # as_of 是 status.json 里「最后一次跑 pipeline 的时间点」，
+        # 而用户看到的「数据 2026-11-09」应该是**行情数据最后一天**。
+        # 实测：overlay 已有 2026-11-10（08:17 补的），但 status.as_of
+        # 还停在 11-09，于是 UI 顶栏显示「数据 2026-11-09 · 落后 2 个交易日」，
+        # 而同一时刻 /api/data/version 返回 11-10 / lag=0 —— 三个接口各算各的，
+        # 用户看到的是最旧的那个。
+        #
+        # 统一到 data_sync.local_date()（含 overlay）作为唯一真源。
+        data_to = None
+        try:
+            from qcore import data_sync as _DS
+            data_to = _DS.local_date()
+        except Exception:  # noqa: BLE001
+            data_to = None
+        if not data_to and isinstance(status, dict):
+            data_to = status.get("data_to") or as_of
+
         missing = []
         files = {}
         for key, name in STATE_FILES.items():
@@ -1319,10 +1338,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         source_health, _ = _read_json(STATE_FILES["source_health"])
         invariants, _ = _read_json(OPTIONAL_FILES["invariants"])
 
-        age = _age_days(as_of)
+        # 新鲜度按**数据日期**算，不是按最后计算时间算
+        age = _age_days(data_to) if data_to else _age_days(as_of)
         return self._ok({
             "ok": not missing,
-            "as_of": as_of,
+            "as_of": as_of,          # 最后一次计算的时间点（保留原义）
+            "data_to": data_to,      # 行情数据最后一天（UI 顶栏显示这个）
             "data_age_days": age,
             "missing_files": missing,
             "files": files,

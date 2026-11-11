@@ -273,6 +273,61 @@ def main() -> int:
         return "自检只警告，不阻断"
     check("套件自检不阻断训练", t_no_block)
 
+    print(chr(10) + "[5e] 「数据日期」只能有一个真源")
+
+    def t_data_date_single_source():
+        """UI 顶栏的「数据 X」必须是行情数据最后一天，不是「最后一次计算」。
+
+        实测事故：`/api/health` 的 as_of 来自 status.json（最后跑 pipeline 的时间点），
+        UI 拿它当数据日期显示。overlay 已有 2026-11-10，status.as_of 还停在
+        11-09/11-06，于是顶栏写「数据 2026-11-09 · 落后 2 个交易日」，
+        而同一时刻 /api/data/version 返回 11-10 / lag=0 —— 三个接口各算各的。
+        """
+        srv = open(os.path.join(ROOT, "webui", "server.py"), encoding="utf-8").read()
+        i = srv.find("def _api_health")
+        assert i > 0, "找不到 _api_health"
+        seg = srv[i:i + 3000]
+        # 必须从 data_sync.local_date() 取数据日期（含 overlay）
+        assert "data_sync" in seg and "local_date" in seg, \
+            "_api_health 没有用 data_sync.local_date() 作为数据日期真源"
+        assert '"data_to"' in seg, "_api_health 没有返回 data_to 字段"
+        # 新鲜度必须按数据日期算
+        assert "_age_days(data_to)" in seg, "data_age_days 仍按 as_of 算"
+        return "health 返回 data_to，新鲜度按它算"
+
+    check("/api/health 用真实数据日期", t_data_date_single_source)
+
+    def t_ui_uses_data_to():
+        js = open(os.path.join(ROOT, "webui", "static", "app.js"),
+                  encoding="utf-8").read()
+        i = js.find("chip-asof")
+        assert i > 0, "找不到 chip-asof"
+        seg = js[max(0, i - 700):i + 300]
+        assert "data_to" in seg, "UI 顶栏没有优先用 data_to（仍在用 as_of）"
+        # 必须留回退，老服务端没有该字段时不能显示 undefined
+        assert "as_of" in seg, "没有对老服务端的回退"
+        return "UI 优先 data_to，回退 as_of"
+    check("UI 顶栏优先 data_to", t_ui_uses_data_to)
+
+    def t_data_to_not_older():
+        """data_to 不该比 as_of 旧 —— 数据日期比最后计算时间新是正常的，反之可疑。"""
+        from qcore import data_sync as DS
+        import webui.server as S
+        # 直接算：data_sync.local_date 必须 >= status.data_to（如果有）
+        eff = DS.local_date()
+        try:
+            st = S._read_json(S.STATE_FILES["status"])[0] or {}
+        except Exception:  # noqa: BLE001
+            st = {}
+        d_to = st.get("data_to") if isinstance(st, dict) else None
+        if eff and d_to:
+            assert str(eff) >= str(d_to), \
+                f"有效数据日期 {eff} 比 status.data_to {d_to} 还旧"
+            return f"有效 {eff} >= status.data_to {d_to}"
+        return "缺字段，跳过比较"
+    check("有效数据日期不旧于 status", t_data_to_not_older)
+
+    print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print(chr(10) + "[6] 构建脚本只保留一个根入口")

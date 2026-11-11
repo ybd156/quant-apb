@@ -627,9 +627,13 @@
     // （周五→周一差 3 个自然日，只隔 1 个交易日）。
     else if (age !== null && age > 1) setHealth('stale', '落后 ' + age.toFixed(0) + ' 个交易日');
     else setHealth('ok');
-    const asof = res.data.as_of || '—';
+    // 顶栏显示的是「行情数据最后一天」，不是「最后一次计算的时间点」。
+    // 后端 /api/health 现在同时给 as_of（最后计算）与 data_to（数据最后一天），
+    // 这里优先用 data_to；老服务端没有该字段时回退 as_of。
+    const asof = res.data.data_to || res.data.as_of || '—';
     $('#chip-asof').textContent = '数据 ' + asof;
-    $('#chip-asof').title = '最新数据日 ' + asof + (age === null ? '' : '（' + age + ' 天前）');
+    $('#chip-asof').title = '行情数据最后一天 ' + asof
+      + (age === null ? '' : '（落后 ' + age + ' 个交易日）');
   }
 
   /* ======================= 版本更新（应用内一键更新） ==================== */
