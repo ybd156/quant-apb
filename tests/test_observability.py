@@ -207,6 +207,73 @@ def main() -> int:
         return "验证 numpy/pandas 可用 + wheel 优先 + pip 缺失自动修复"
     check("train.bat 运行时契约", t_trainbat)
 
+    print(chr(10) + "[5d] kit_doctor 与精简清单不能互相打架")
+
+    def t_doctor_vs_manifest():
+        """kit_manifest 里 NEVER 的模块，不能被 kit_doctor 当成必备能力。
+
+        实测事故：kit_manifest 把 `qcore/update_progress.py` 列进 NEVER
+        （训练机不跑容器，用不到），而 kit_doctor 又检查这个文件在不在，
+        缺了就说「套件太旧」—— 于是用户下的 0.32.6 被判定为旧版，
+        而同一屏还写着「当前套件版本：0.32.6」，自相矛盾。
+        """
+        from scripts.kit_manifest import closure
+        from qcore import kit_doctor as KD
+        man = closure()
+        never = {str(x).split("/")[-1].replace(".py", "") for x in man["never"]}
+        files = {str(f).replace(chr(92), "/") for f in man["files"]}
+
+        # 1) NEVER 里的东西确实不在闭包里
+        for name in never:
+            rel = "qcore/" + name + ".py"
+            if rel in files:
+                return f"内部矛盾：{rel} 同时出现在 NEVER 和 files 里"
+
+        # 2) kit_doctor 的真实结果：精简套件不该被判为不合格
+        r = KD.check()
+        # 源码仓库里 paper_auto 等都在，应该直接通过
+        assert r["ok"], f"kit_doctor 在完整代码树上失败：{r['problems']}"
+
+        # 3) 源码扫描：kit_doctor 不能检查 NEVER 里的模块
+        dsrc = open(os.path.join(ROOT, "qcore", "kit_doctor.py"),
+                    encoding="utf-8").read()
+        bad = [n for n in never
+               if f'"{n}.py"' in dsrc or f"{n}.py" in dsrc.split("# 4)")[0].split("# 1)")[-1]]
+        for n in never:
+            # 检查是否有 isfile(.../name.py) 形式
+            if 'os.path.join(ROOT, "qcore", "' + n + '.py")' in dsrc:
+                bad.append(n)
+        assert not bad, f"kit_doctor 仍在检查 NEVER 里的模块：{sorted(set(bad))}"
+        return f"NEVER {len(never)} 项均未被当作必备能力"
+
+    check("kit_doctor 不检查 NEVER 模块", t_doctor_vs_manifest)
+
+    def t_advice_not_lying():
+        """缺能力时不能说死「太旧」—— 会让用户反复重下同一版本。"""
+        src = open(os.path.join(ROOT, "qcore", "kit_doctor.py"),
+                   encoding="utf-8").read()
+        assert "这套代码太旧了" not in src, "advice 还在断言「太旧」"
+        assert "缺少运行所需的能力" in src, "advice 没有改成描述能力缺失"
+        return "advice 已改为描述能力缺失"
+    check("缺能力时不谎报「太旧」", t_advice_not_lying)
+
+    def t_no_block():
+        """套件自检失败不能 return 1 掐死训练。
+
+        实测：用户下的 0.32.6 被误判「太旧」，重下三次都进不去 ——
+        一个可能误报的检查不该有阻断权限。
+        """
+        src = open(os.path.join(ROOT, "tools", "train_one_click.py"),
+                   encoding="utf-8").read()
+        i = src.find("套件能力自检")
+        assert i > 0, "找不到套件自检段"
+        seg = src[i:i + 1600]
+        assert "return 1" not in seg, "套件自检失败仍会 return 1 掐死训练"
+        assert "不影响现在开跑" in seg or "继续" in seg, "没有说明「继续」"
+        return "自检只警告，不阻断"
+    check("套件自检不阻断训练", t_no_block)
+
+    print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print(chr(10) + "[6] 构建脚本只保留一个根入口")
     print("\n[6] 构建脚本只保留一个根入口")

@@ -26,11 +26,16 @@ def check() -> Dict:
     """
     返回 {"ok": bool, "version": str, "problems": [...], "advice": str}
 
-    检查项都是「本版才有的能力」，缺了说明套件太旧：
-      · wheels/ 目录存在且含 numpy wheel  -> 否则装依赖要联网，很慢
-      · data_sync 有 _mirror_urls          -> 否则不会从 NAS 下数据
-      · paper_auto 有 reset                -> 否则模拟盘不能清空重设
-      · webui 里有 update_progress         -> 否则更新没进度
+    只检查「训练/同步真的会用到、且缺失会直接导致跑不动」的能力：
+      · wheels/ 里有 numpy wheel   -> 否则装依赖要走网络，可能十几分钟
+      · data_sync 有 _mirror_urls  -> 否则只会从 GitHub 下数据，国内失败
+      · paper_auto 有 reset        -> 否则模拟盘不能清空重设
+
+    ## 不该出现在这里的检查
+
+    任何「只有 NAS / 容器侧才用到」的模块都**不能**作为套件新旧判据 ——
+    精简打包（`scripts/kit_manifest.py`）本来就不会带它们，
+    会稳定误报「太旧」。版本新旧交给 `qcore/kit_update.py` 跟服务端比对。
     """
     problems: List[str] = []
     version = ""
@@ -79,20 +84,29 @@ def check() -> Dict:
     except Exception:
         pass
 
-    # 4) 更新进度
-    if not os.path.isfile(os.path.join(ROOT, "qcore", "update_progress.py")):
-        problems.append("没有更新进度模块（旧版）")
+    # 4) 更新进度 —— **故意不检查**。
+    #
+    # `update_progress.py` 是 NAS 容器自更新的进度模块，训练机不跑容器、
+    # 永远用不到它，所以 `scripts/kit_manifest.py` 把它列进了 NEVER（不打包）。
+    #
+    # 原来这里用「文件在不在」判断套件新旧 —— 于是精简打包之后必然误报：
+    # 用户下载的明明是最新的 0.32.6，却被告知「这套训练套件太旧」，
+    # 而且同一个页面同时写着「当前套件版本：0.32.6」，自相矛盾（实测截图）。
+    #
+    # 版本新旧应该由 `qcore/kit_update.py` 跟服务端比对，不是靠猜文件。
+    # 这里只检查「训练真的需要的能力」。
 
     ok = not problems
     advice = ""
     if not ok:
-        _v = version or "最新"
+        # 不再说「太旧」—— 缺失可能是打包不全、目录残留、或真旧，
+        # 断言成「太旧」会误导用户反复重下同一个版本（实测踩过）。
         advice = (
-            "这套代码太旧了，请重新下载最新训练套件：\n"
-            f"    https://github.com/ybd156/quant-apb/releases/latest\n"
-            "    文件名：apb-train-kit_<版本>.zip\n"
-            "下载后解压到一个**新的空目录**，不要覆盖旧目录（残留文件会互相干扰）。\n"
-            f"当前套件版本：{version or '未知'}"
+            "这套套件缺少运行所需的能力（上面列出的项）。\n"
+            "  1) 确认解压到**新的空目录**，不要覆盖旧目录（残留文件会互相干扰）\n"
+            "  2) 仍不行就重新下载：https://github.com/ybd156/quant-apb/releases/latest\n"
+            f"     文件名：apb-train-kit_<版本>.zip\n"
+            f"  当前套件版本：{version or '未知'}"
         )
     return {"ok": ok, "version": version, "problems": problems, "advice": advice}
 

@@ -437,18 +437,29 @@ def main(argv=None) -> int:
         return 1
     say(f"  {OK('环境 OK')}")
 
-    # 套件新旧检查 —— 旧版不会自己说"我太旧了"，用户只看到一堆看不懂的错
-    try:
-        from qcore import kit_doctor as _KD
-        if not _KD.print_report():
-            if not a.skip_kit_check:
+    # 套件能力自检 —— **只警告，不阻断**。
+    #
+    # 原来这里 `return 1` 直接退出。问题是 kit_doctor 检查的都是「锦上添花」
+    # 的能力（预打包 wheel、NAS 下载源、模拟盘重置），没有一条会让训练跑不动：
+    #   · 缺 wheel      -> 装依赖慢一点，不是跑不了
+    #   · 缺 NAS 源     -> 走 GitHub，慢或失败，但可能通
+    #   · 缺 reset      -> 模拟盘不能清空，跟训练无关
+    # 用一个「可能误报」的检查去拦死训练，代价远大于收益 ——
+    # 实测用户下的 0.32.6 被误判成旧版，重下了三次都进不去。
+    #
+    # 真正跑不动的会在实际运行时暴露，那时的报错是具体的。
+    # --skip-kit-check 用于完全静默。
+    if not a.skip_kit_check:
+        try:
+            from qcore import kit_doctor as _KD
+            if not _KD.print_report():
                 say("")
-                say("请重新下载最新套件后再运行（或加 --skip-kit-check 强行继续）。")
-                return 1
-    except ImportError:
-        say("  [!] 没有 kit_doctor 模块 —— 这套代码偏旧，建议重新下载最新套件")
-    except Exception as _e:
-        say(f"  [!] 套件自检跳过: {type(_e).__name__}")
+                say("  [!!] 上面这些问题不影响现在开跑，继续。")
+                say("       若后面真的报错，再按提示重下套件。")
+        except ImportError:
+            say("  [!] 没有 kit_doctor 模块 —— 这套代码偏旧，但先按现状开跑")
+        except Exception as _e:
+            say(f"  [!] 套件自检跳过: {type(_e).__name__}")
 
     if a.dry_run:
         say("")
