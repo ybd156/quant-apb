@@ -301,6 +301,8 @@ regime 混合    γ = γ_max·n/(n+γ_n0);  z = (1-γ)z_g + γz_r
 | 29 | **界面审计自己失灵** | ①只在整页找时间字符串 → 「数据截至 11-06」让「成交表有时刻」假通过；②静态资源缓存 → 改了 `app.js` 审计仍对着旧界面报结论；③`innerText` 对折叠容器返回空串 | 断言只针对目标表格；每次审计用全新 profile + `Network.setCacheDisabled`；行级判断用 `textContent` |
 | 30 | **配置迁移只保留白名单键** | `_migrate()` 只留 `DEFAULTS` 里的键 → 用户设的 `horizon_capital` 被**整段丢掉**，`capital_for()` 永远回落到 `initial_capital`，「各周期本金」设置形同虚设 | 迁移要显式保留非默认字段；设置项必须有 round-trip 测试（存→读→再存→读） |
 | 31 | **队列/门禁有、决策层没有** | `sync` 有队列、`model_health` 有健康度、`sync_agent` 会领任务，但没人判断"该不该训" → 模型超龄 22 个交易日也没人管；同类：`external_loader` 写好了没人调、`autoinfo` 写完没人消费 | 新增"采集/排队/门禁"时必须同时给出**触发判据**（`qcore/train_scheduler.py` 的 5 条+去重+冷却）与一条契约测试 |
+| 32 | **门禁依赖本地产物** | preflight 被加进 CI，而它检查 `data/state/*.json`（gitignore 的东西）→ 本地全绿、CI **必然 6 项红**，于是每次发版都被自己的门禁拦住；同理 `account.default` 只看代码默认值，本地有 `account.json` 时永远看不出默认值越界（5000 < 门禁下界 10000） | 加进 CI 的门禁必须能在**干净检出**跑通：产物类检查降级 SKIP（`preflight --quick --ci`），代码类检查照常硬判 |
+| 33 | **`git push --follow-tags` 推送全部积压 tag** | 本地积压 97 个 annotated tag，一次 `--follow-tags` 全部推上去 → 触发 **97 次 Release workflow**（测试/构建镜像/推 GHCR/建 Release 各一次） | 发版只用 `bash scripts/release.sh`（只推 HEAD + 当前 TAG，并显式拒绝 `--tags/--follow-tags`） |
 
 ---
 
@@ -572,7 +574,11 @@ IC 显著为负但幅度极小，扣成本后为负 —— "反着做"也救不�
     （个数不写死，读 `status.n_signals` / `zoo_n`）。
 11. **台账必须有人读**：`/api/ledger?source=file` 直读主台账（分页 + 总数 + 去重数）；
     只写不读的文件，重复写入 5.85× 也没人会发现。
-12. **改界面必须跑无头审计**：`node tools/ui_audit.mjs --port <端口>`（先起
+12. **发版只走 `bash scripts/release.sh`**：它只推 `HEAD` 与当前 `VERSION` 对应的
+    那个 tag，并拒绝 `--tags` / `--follow-tags`（2026-11-12 事故：一次
+    `--follow-tags` 把 97 个积压 tag 全推上去，触发 97 次 Release）。
+    同时确认 `VERSION` == tag == HEAD，三者不一致时 `release.yml` 会拒绝出镜像。
+13. **改界面必须跑无头审计**：`node tools/ui_audit.mjs --port <端口>`（先起
     `python -m webui.server`）。它抓渲染后的 DOM 做跨字段断言，能抓住
     「同一件事两处写法不同」——静态读代码看不见，肉眼看截图会漏。
     实测它一次抓出 5 个我自己没发现的问题（持有期与周期不符、单位写成「天」、

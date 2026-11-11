@@ -2110,6 +2110,50 @@ $ python -c "from qcore import sync as S; print(S.summary()['counts'])"
 **为什么这也算评审项**：`train_ab`（双轨复核）刚接进队列，但如果训练机上手成本高，
 那条链路等于没通。一键入口是它的**可用性前提**。
 
+
+**第十六批（发版事故复盘：两条都是我造成的，都补了硬防护）**
+
+### 事故 1：把 preflight 加进 CI，但它在干净检出上必然失败
+
+`preflight` 会检查 `data/state/*.json`（8 个必需文件）——而 `data/` 在 `.gitignore` 里。
+本地有产物所以全绿；GitHub runner 上干净检出，于是：
+
+```
+[2] 状态文件   → state.files / state.names / state.events / state.impact / state.behavior 全红
+[4] HTTP 端点  → http.endpoints 未就绪（缺 status.json 等 9 个文件）
+[3] 账户配置   → account.default: CN 默认本金越界 5000.0
+结果: 6 项失败 → 不许发版
+```
+
+**每一次 CI、每一次 Release 都必然红**。这不是"门禁太严"，是**门禁在错误的场景里
+判错了对象**：干净检出没有产物 ≠ 产物坏了。
+
+修法两条：
+- `preflight --ci`（`ci.yml` 已带上）：`data/state` 为空时把 `state.*` / `http.*`
+  降级为 **SKIP** 并打印原因；代码类检查（导入/路由/UI 函数/COPY 源）照常硬判。
+- `account.default` 暴露了第二个真 bug：代码默认 `initial_capital=5000`，
+  而 preflight 的下界是 **10,000** —— 本地有 `account.json`（800,000）时永远看不出。
+  已把默认改成 CN/HK **10,000**、US **1,000**。
+
+验证（`git archive HEAD` 出的干净检出）：
+```
+--quick（旧）       → 4 通过 / 1 失败 / 9 跳过   ✗ 不许发版
+--quick --ci（新）  → 9 通过 / 0 失败 / 9 跳过   ✓ 可以发版
+本地（有产物）      → 17 通过 / 0 失败 / 2 警告  ✓ 与之前一致
+```
+
+### 事故 2：`git push --follow-tags` 把 97 个积压 tag 全推上去
+
+仓库本地有 **97 个 annotated tag**，`--follow-tags` 会把它们全部推送 →
+`release.yml` 的触发条件是 `on: push: tags: ["v*"]` → **97 次 Release workflow**，
+每次跑测试、构建镜像、推 GHCR、建 GitHub Release。
+
+正确命令只有两条：`git push origin HEAD` + `git push origin v<当前版本>`。
+已固化为 `scripts/release.sh`：只推 HEAD 与当前 TAG，**显式拒绝**
+`--tags / --follow-tags / --all / --mirror`，并校验 `VERSION == tag == HEAD`。
+
+> 教训合起来就一句：**门禁要能在它要守护的那个环境里跑通；发版要只动本次的东西。**
+
 ### 8.2 未修（0 条）
 
 **55 条评审项全部收口。** 剩下的都不是"缺陷"，而是**要人拍板的决策**：

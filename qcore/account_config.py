@@ -19,11 +19,14 @@ A 股、美股、港股的资金、成本、最小交易单位、涨跌停规则
 {
   "default_market": "CN",
   "markets": {
-    "CN": {"initial_capital": 5000.0, "top_k": 5, "max_weight": 0.35,
+    # 本金默认 10,000：preflight 的下界就是 10,000（5000 时最低佣金 5 元≈10bps，
+    # 成本占比会严重失真）。旧默认 5000 只在"用户已保存过 account.json"的机器上
+    # 看不出来 —— 干净检出跑 preflight 才暴露（CI 里必红）。
+    "CN": {"initial_capital": 10000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 19.28, "hold": 20, "currency": "CNY"},
-    "US": {"initial_capital": 500.0,  "top_k": 5, "max_weight": 0.35,
+    "US": {"initial_capital": 1000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 3.28,  "hold": 20, "currency": "USD"},
-    "HK": {"initial_capital": 5000.0, "top_k": 5, "max_weight": 0.35,
+    "HK": {"initial_capital": 10000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 38.17, "hold": 20, "currency": "HKD"}
   },
   "updated_at": "..."
@@ -69,11 +72,15 @@ DEFAULT_HORIZON_CAPITAL = {1: 5_000.0, 3: 5_000.0, 5: 5_000.0,
                            10: 5_000.0, 15: 5_000.0}
 
 DEFAULTS: Dict[str, Dict] = {
-    "CN": {"initial_capital": 5_000.0, "top_k": 5, "max_weight": 0.35,
+    # 本金默认 10,000（原 5,000）：preflight 的下界就是 10,000，而 5,000 元分 5 只
+    # 时每只 1,000 元，最低佣金 5 元 ≈ 10bps 会明显扭曲成本占比。
+    # 旧默认只在"用户已保存过 account.json"的机器上看不出来 —— 干净检出（CI）
+    # 跑 preflight 才暴露，于是每次发版都红。
+    "CN": {"initial_capital": 10_000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 19.28, "hold": 20, "currency": "CNY"},
-    "US": {"initial_capital": 500.0, "top_k": 5, "max_weight": 0.35,
+    "US": {"initial_capital": 1_000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 3.28, "hold": 20, "currency": "USD"},
-    "HK": {"initial_capital": 5_000.0, "top_k": 5, "max_weight": 0.35,
+    "HK": {"initial_capital": 10_000.0, "top_k": 5, "max_weight": 0.35,
            "cost_bps": 38.17, "hold": 20, "currency": "HKD"},
 }
 

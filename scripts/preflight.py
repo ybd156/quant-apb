@@ -44,13 +44,22 @@ import urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-PASS, FAIL, WARN = "PASS", "FAIL", "WARN"
+PASS, FAIL, WARN, SKIP = "PASS", "FAIL", "WARN", "SKIP"
 results = []
 
 
+#: 干净检出（CI / 新克隆）时 data/state 为空 —— 那时"产物类检查"没有意义，
+#: 一律降级为 SKIP。**这就是 R42 收尾时踩的坑**：门禁在本地有产物的机器上绿、
+#: 在 CI 上红，等于每次发版都必然失败。
+NO_STATE = False
+
+
 def rec(name: str, status: str, detail: str = "") -> None:
+    if NO_STATE and (name.startswith("state.") or name.startswith("http.")):
+        status = SKIP
+        detail = "干净检出，无 data/state 产物（跑一次 pipeline 后此检查才有意义）"
     results.append((name, status, detail))
-    mark = {PASS: "OK  ", FAIL: "FAIL", WARN: "WARN"}[status]
+    mark = {PASS: "OK  ", FAIL: "FAIL", WARN: "WARN", SKIP: "SKIP"}[status]
     print(f"  [{mark}] {name}" + (f"  — {detail}" if detail else ""))
 
 
@@ -532,8 +541,19 @@ def check_docker() -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--ci", action="store_true",
+                    help="CI 模式：data/state 为空时把产物类检查降级为 SKIP")
     ap.add_argument("--quick", action="store_true", help="跳过测试套件")
     a = ap.parse_args()
+
+    # 干净检出（CI / 新克隆）：data/state 不存在或为空 → 产物类检查降级为 SKIP。
+    # 事故背景：preflight 被加进 CI 后，本地绿、CI 必红（因为 CI 没有 state 产物），
+    # 于是每次发版都失败。门禁不能在"没有产物"的场景里判"产物坏了"。
+    global NO_STATE
+    _sd = os.path.join(ROOT, "data", "state")
+    NO_STATE = bool(a.ci) or (not os.path.isdir(_sd)) or (not os.listdir(_sd))
+    if NO_STATE:
+        print("  [INFO] 干净检出：state.* / http.* 检查降级为 SKIP（CI 这样跑才对）")
 
     print("=" * 66)
     print("APB 发布前自检")
@@ -550,8 +570,10 @@ def main() -> int:
 
     n_fail = sum(1 for _, s, _ in results if s == FAIL)
     n_pass = sum(1 for _, s, _ in results if s == PASS)
+    n_skip = sum(1 for _, s, _ in results if s == SKIP)
     print("\n" + "=" * 66)
-    print(f"结果: {n_pass} 通过 / {n_fail} 失败 / {len(results) - n_pass - n_fail} 警告")
+    print(f"结果: {n_pass} 通过 / {n_fail} 失败 / "
+          f"{len(results) - n_pass - n_fail - n_skip} 警告 / {n_skip} 跳过")
     if n_fail:
         print("\n失败项：")
         for n, s, d in results:
